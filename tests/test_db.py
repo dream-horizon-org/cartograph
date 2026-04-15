@@ -12,6 +12,13 @@ from cartograph.db import (
     update_agent_session,
     update_agent_heartbeat,
     increment_invocation_count,
+    enqueue_trigger,
+    get_pending_triggers,
+    update_trigger_status,
+    cancel_pending_triggers,
+    acquire_trigger_lock,
+    release_trigger_lock,
+    get_stale_running_agents,
 )
 
 
@@ -134,3 +141,101 @@ def test_increment_invocation_count(initialized_db):
     increment_invocation_count("orch-1")
     agent = get_agent("orch-1")
     assert agent["invocation_count"] == 2
+
+
+def test_enqueue_and_get_triggers(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    enqueue_trigger("orch-1", "Start orchestration", 100)
+    triggers = get_pending_triggers()
+    assert len(triggers) == 1
+    assert triggers[0]["agent_id"] == "orch-1"
+    assert triggers[0]["prompt"] == "Start orchestration"
+    assert triggers[0]["priority"] == 100
+    assert triggers[0]["status"] == "pending"
+
+
+def test_triggers_ordered_by_priority_then_created(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    create_agent_run("sme-1", "sme", "/tmp/ws/sme-1")
+    create_agent_run("iter-1", "iterator", "/tmp/ws/iter-1")
+    enqueue_trigger("sme-1", "Analyze resource", 40)
+    enqueue_trigger("orch-1", "Coordinate", 100)
+    enqueue_trigger("iter-1", "List resources", 60)
+    triggers = get_pending_triggers()
+    assert [t["agent_id"] for t in triggers] == ["orch-1", "iter-1", "sme-1"]
+
+
+def test_update_trigger_status(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    enqueue_trigger("orch-1", "Start", 100)
+    triggers = get_pending_triggers()
+    update_trigger_status(triggers[0]["id"], "done")
+    assert len(get_pending_triggers()) == 0
+
+
+def test_cancel_pending_triggers(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    enqueue_trigger("orch-1", "Prompt 1", 100)
+    enqueue_trigger("orch-1", "Prompt 2", 100)
+    cancel_pending_triggers("orch-1")
+    assert len(get_pending_triggers()) == 0
+
+
+def test_acquire_trigger_lock_on_pending_agent(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    assert acquire_trigger_lock("orch-1") is True
+    agent = get_agent("orch-1")
+    assert agent["trigger_lock"] == 1
+    assert agent["status"] == "invoking"
+
+
+def test_acquire_trigger_lock_on_idle_agent(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    update_agent_status("orch-1", "idle")
+    assert acquire_trigger_lock("orch-1") is True
+    agent = get_agent("orch-1")
+    assert agent["trigger_lock"] == 1
+    assert agent["status"] == "invoking"
+
+
+def test_acquire_trigger_lock_fails_on_running_agent(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    update_agent_status("orch-1", "running")
+    assert acquire_trigger_lock("orch-1") is False
+
+
+def test_acquire_trigger_lock_fails_on_already_locked(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    acquire_trigger_lock("orch-1")
+    assert acquire_trigger_lock("orch-1") is False
+
+
+def test_release_trigger_lock(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    acquire_trigger_lock("orch-1")
+    release_trigger_lock("orch-1")
+    agent = get_agent("orch-1")
+    assert agent["trigger_lock"] == 0
+
+
+def test_get_stale_running_agents(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    update_agent_status("orch-1", "running")
+    # Set heartbeat to a time far in the past
+    conn = sqlite3.connect(initialized_db)
+    conn.execute(
+        "UPDATE agent_runs SET heartbeat = '2020-01-01T00:00:00+00:00' WHERE agent_id = 'orch-1'"
+    )
+    conn.commit()
+    conn.close()
+    stale = get_stale_running_agents(timeout_seconds=60)
+    assert len(stale) == 1
+    assert stale[0]["agent_id"] == "orch-1"
+
+
+def test_get_stale_running_agents_ignores_fresh(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    update_agent_status("orch-1", "running")
+    update_agent_heartbeat("orch-1")
+    stale = get_stale_running_agents(timeout_seconds=60)
+    assert len(stale) == 0

@@ -1,6 +1,7 @@
 """SQLite data layer for agent runtime. All SQL is encapsulated here."""
 
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 
 _DB_PATH: str | None = None
@@ -127,3 +128,85 @@ def increment_invocation_count(agent_id: str) -> None:
     )
     conn.commit()
     conn.close()
+
+
+def enqueue_trigger(agent_id: str, prompt: str, priority: int) -> str:
+    trigger_id = str(uuid.uuid4())
+    conn = _connect()
+    conn.execute(
+        """INSERT INTO trigger_queue (id, agent_id, prompt, priority, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (trigger_id, agent_id, prompt, priority, _now()),
+    )
+    conn.commit()
+    conn.close()
+    return trigger_id
+
+
+def get_pending_triggers() -> list[dict]:
+    conn = _connect()
+    cursor = conn.execute(
+        """SELECT * FROM trigger_queue
+           WHERE status = 'pending'
+           ORDER BY priority DESC, created_at ASC"""
+    )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def update_trigger_status(trigger_id: str, status: str) -> None:
+    conn = _connect()
+    conn.execute(
+        "UPDATE trigger_queue SET status = ? WHERE id = ?",
+        (status, trigger_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def cancel_pending_triggers(agent_id: str) -> None:
+    conn = _connect()
+    conn.execute(
+        "UPDATE trigger_queue SET status = 'done' WHERE agent_id = ? AND status = 'pending'",
+        (agent_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def acquire_trigger_lock(agent_id: str) -> bool:
+    conn = _connect()
+    cursor = conn.execute(
+        """UPDATE agent_runs
+           SET trigger_lock = 1, status = 'invoking', updated_at = ?
+           WHERE agent_id = ? AND status IN ('pending', 'idle') AND trigger_lock = 0""",
+        (_now(), agent_id),
+    )
+    changed = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def release_trigger_lock(agent_id: str) -> None:
+    conn = _connect()
+    conn.execute(
+        "UPDATE agent_runs SET trigger_lock = 0, updated_at = ? WHERE agent_id = ?",
+        (_now(), agent_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_stale_running_agents(timeout_seconds: int) -> list[dict]:
+    conn = _connect()
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+    cursor = conn.execute(
+        """SELECT * FROM agent_runs
+           WHERE status = 'running' AND heartbeat < ?""",
+        (cutoff.isoformat(),),
+    )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return rows
