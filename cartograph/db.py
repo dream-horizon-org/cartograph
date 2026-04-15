@@ -52,3 +52,78 @@ def init_db(db_path: str) -> None:
     """)
     conn.commit()
     conn.close()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def create_agent_run(
+    agent_id: str,
+    agent_type: str,
+    workspace_path: str,
+    plane: str | None = None,
+    resource_id: str | None = None,
+) -> None:
+    now = _now()
+    conn = _connect()
+    conn.execute(
+        """INSERT INTO agent_runs
+           (agent_id, agent_type, workspace_path, plane, resource_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (agent_id, agent_type, workspace_path, plane, resource_id, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_agent(agent_id: str) -> dict | None:
+    conn = _connect()
+    cursor = conn.execute(
+        "SELECT * FROM agent_runs WHERE agent_id = ?", (agent_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def update_agent_status(agent_id: str, status: str) -> None:
+    conn = _connect()
+    conn.execute(
+        "UPDATE agent_runs SET status = ?, updated_at = ? WHERE agent_id = ?",
+        (status, _now(), agent_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_agent_session(agent_id: str, session_id: str) -> None:
+    conn = _connect()
+    conn.execute(
+        "UPDATE agent_runs SET session_id = ?, updated_at = ? WHERE agent_id = ?",
+        (session_id, _now(), agent_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_agent_heartbeat(agent_id: str) -> None:
+    conn = _connect()
+    conn.execute(
+        "UPDATE agent_runs SET heartbeat = ?, updated_at = ? WHERE agent_id = ?",
+        (_now(), _now(), agent_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def increment_invocation_count(agent_id: str) -> None:
+    conn = _connect()
+    conn.execute(
+        "UPDATE agent_runs SET invocation_count = invocation_count + 1, updated_at = ? WHERE agent_id = ?",
+        (_now(), agent_id),
+    )
+    conn.commit()
+    conn.close()
