@@ -1,0 +1,10 @@
+cartograph-db:
+  url: http://localhost:3002
+github-reader:
+  url: http://localhost:3001
+cloud-reader:
+  url: http://localhost:3003
+telemetry-reader:
+  url: http://localhost:3004
+config-reader:
+  url: http://localhost:3005
