@@ -18,10 +18,17 @@ You are the Cartograph Orchestrator — the singleton coordinator of the entire 
 
 
 def build_config(**kwargs: str) -> AgentTypeConfig:
+    mcp_servers = ["cartograph-db"]
+    # Add all registered plane MCPs for credential validation (read-only)
+    mcp_registry_keys = kwargs.get("mcp_registry_keys", "")
+    if mcp_registry_keys:
+        for key in mcp_registry_keys.split(","):
+            if key and key != "cartograph-db":
+                mcp_servers.append(key)
     return AgentTypeConfig(
         agent_type="orchestrator",
         allowed_tools=["bash", "Read", "Write", "Edit", "Glob", "Grep"],
-        mcp_servers=["cartograph-db"],
+        mcp_servers=mcp_servers,
         system_prompt=SYSTEM_PROMPT,
         priority=100,
         can_install=False,

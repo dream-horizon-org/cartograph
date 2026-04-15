@@ -27,6 +27,15 @@ def test_get_config_orchestrator():
     assert "Orchestrator" in config.system_prompt
 
 
+def test_get_config_orchestrator_includes_plane_mcps():
+    config = get_config("orchestrator", mcp_registry_keys="cartograph-db,github-mcp,aws-mcp")
+    assert "cartograph-db" in config.mcp_servers
+    assert "github-mcp" in config.mcp_servers
+    assert "aws-mcp" in config.mcp_servers
+    # No duplicates for cartograph-db
+    assert config.mcp_servers.count("cartograph-db") == 1
+
+
 def test_get_config_iterator_with_plane():
     config = get_config("iterator", plane="github")
     assert config.agent_type == "iterator"

@@ -199,6 +199,18 @@ def release_trigger_lock(agent_id: str) -> None:
     conn.close()
 
 
+def agent_type_exists(agent_type: str) -> bool:
+    """Check if a non-decommissioned agent of this type exists."""
+    conn = _connect()
+    cursor = conn.execute(
+        "SELECT 1 FROM agent_runs WHERE agent_type = ? AND status != 'decommissioned' LIMIT 1",
+        (agent_type,),
+    )
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+
 def get_stale_running_agents(timeout_seconds: int) -> list[dict]:
     conn = _connect()
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)

@@ -42,7 +42,12 @@ class AgentManager:
         else:
             agent_id = f"{prefix}-{short_id}"
 
-        config = get_config(agent_type, plane=plane or "", resource_id=resource_id or "")
+        config = get_config(
+            agent_type,
+            plane=plane or "",
+            resource_id=resource_id or "",
+            mcp_registry_keys=",".join(self.mcp_registry.keys()),
+        )
 
         workspace_path = os.path.join(self.workspace_root, agent_id)
         os.makedirs(workspace_path, exist_ok=True)
@@ -71,6 +76,7 @@ class AgentManager:
             agent["agent_type"],
             plane=agent.get("plane") or "",
             resource_id=agent.get("resource_id") or "",
+            mcp_registry_keys=",".join(self.mcp_registry.keys()),
         )
 
         cmd = [

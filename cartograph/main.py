@@ -20,18 +20,6 @@ _DEFAULT_MCP_CONFIG = os.path.join(
 )
 
 
-def _agent_type_exists(agent_type: str) -> bool:
-    """Check if a singleton agent of this type already exists (not decommissioned)."""
-    conn = db._connect()
-    cursor = conn.execute(
-        "SELECT 1 FROM agent_runs WHERE agent_type = ? AND status != 'decommissioned' LIMIT 1",
-        (agent_type,),
-    )
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
-
-
 def boot(
     db_path: str = _DEFAULT_DB_PATH,
     workspace_root: str = _DEFAULT_WORKSPACE_ROOT,
@@ -54,11 +42,11 @@ def boot(
         mcp_config_path=mcp_config_path,
     )
 
-    if not _agent_type_exists("orchestrator"):
+    if not db.agent_type_exists("orchestrator"):
         manager.create_agent("orchestrator")
         logger.info("Created orchestrator agent")
 
-    if not _agent_type_exists("resolver"):
+    if not db.agent_type_exists("resolver"):
         manager.create_agent("resolver")
         logger.info("Created resolver agent")
 

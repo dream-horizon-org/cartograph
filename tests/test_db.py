@@ -19,6 +19,7 @@ from cartograph.db import (
     acquire_trigger_lock,
     release_trigger_lock,
     get_stale_running_agents,
+    agent_type_exists,
 )
 
 
@@ -239,3 +240,25 @@ def test_get_stale_running_agents_ignores_fresh(initialized_db):
     update_agent_heartbeat("orch-1")
     stale = get_stale_running_agents(timeout_seconds=60)
     assert len(stale) == 0
+
+
+def test_agent_type_exists_returns_false_when_none(initialized_db):
+    assert agent_type_exists("orchestrator") is False
+
+
+def test_agent_type_exists_returns_true_when_active(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    assert agent_type_exists("orchestrator") is True
+
+
+def test_agent_type_exists_returns_false_when_all_decommissioned(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    update_agent_status("orch-1", "decommissioned")
+    assert agent_type_exists("orchestrator") is False
+
+
+def test_agent_type_exists_returns_true_when_some_active(initialized_db):
+    create_agent_run("orch-1", "orchestrator", "/tmp/ws/orch-1")
+    create_agent_run("orch-2", "orchestrator", "/tmp/ws/orch-2")
+    update_agent_status("orch-1", "decommissioned")
+    assert agent_type_exists("orchestrator") is True
