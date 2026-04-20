@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import threading
 import sys
 
 from agent_management import db
@@ -87,15 +88,28 @@ def boot(
 def main() -> None:
     invoke_loop = boot()
 
+    # Handle shutdown cleanly only on explicit SIGINT (Ctrl-C).
+    # Ignore SIGHUP (which the parent shell sends when it exits — we want
+    # the agent manager to survive shell death). SIGTERM is respected.
+    shutdown = threading.Event()
+
     def handle_shutdown(signum, frame):
-        logger.info("Shutting down...")
+        logger.info("Shutting down on signal %d...", signum)
         invoke_loop.stop()
-        sys.exit(0)
+        shutdown.set()
 
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
+    # Ignore SIGHUP so we survive parent-shell exit in nohup/background scenarios
+    try:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    except (AttributeError, ValueError):
+        pass  # Windows or unsupported context
 
-    signal.pause()
+    # Sleep forever (resilient to spurious signals that don't trigger shutdown)
+    while not shutdown.is_set():
+        shutdown.wait(60)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
