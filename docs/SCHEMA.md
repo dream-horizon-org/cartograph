@@ -40,6 +40,9 @@ CREATE TABLE components (
     metadata        JSONB NOT NULL DEFAULT '{}', -- runtime, framework, region, repo URL, etc.
     embedding       vector(1536),                -- for fuzzy matching during consolidation
     owned_by_agent  TEXT,                        -- agent_id of the SME that owns this component
+    split_from_component_id UUID REFERENCES components(id) ON DELETE SET NULL,
+                                                 -- if this component was born from a split, points to parent
+    split_briefing  TEXT,                        -- briefing doc from parent explaining what this component is
     scanned_at      TIMESTAMPTZ,                -- last time an SME analysed this
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -311,6 +314,8 @@ CREATE TABLE consolidations (
     mutation_assigned_to TEXT,                   -- agent_id responsible for executing mutation
                                                  -- merge: resolver picks A1 or A2 (more planes wins)
                                                  -- split: always A1 (self-nominator)
+    child_agent_id  TEXT,                        -- set by spawn_child_agent during split
+                                                 -- prevents duplicate spawns (one child per nomination)
     resolved_by     TEXT,                        -- resolver agent_id
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),

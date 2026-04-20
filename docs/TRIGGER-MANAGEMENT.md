@@ -574,11 +574,15 @@ absorb_agent(agent_id, target_agent_id)
   Decommissions target agent (status = 'decommissioned').
   Validates: agent is mutation_assigned_to on an active consolidation in state M.
 
-spawn_child_agent(parent_agent_id, component_data, briefing)
+spawn_child_agent(parent_agent_id, consolidation_id, component_data, briefing)
   SPLIT: create new agent + new component.
-  Briefing doc explains what the child component is and its attributions.
+  Sets component.split_from_component_id to parent's component.
+  Sets component.split_briefing to the briefing doc.
+  Sets consolidation.child_agent_id to the new agent (prevents duplicate spawns).
   Registers new agent in agent_runs (trigger manager will auto-invoke).
-  Validates: agent is mutation_assigned_to on an active consolidation in state M.
+  Validates:
+    - agent is mutation_assigned_to on this consolidation in state M
+    - consolidation.child_agent_id IS NULL (one spawn per nomination)
 
 transfer_attributions(from_component_id, to_component_id, attribution_ids[])
   Move specific attributions from one component to another.

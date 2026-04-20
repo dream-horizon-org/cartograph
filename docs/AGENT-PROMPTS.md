@@ -417,31 +417,45 @@ Reject threshold: both agents < 0.3 → auto-reject
   Mutation — MERGE (when you are mutation_assigned_to):
     - You are absorbing another agent and its component.
     - Steps:
-        1. Call absorb_agent(your_id, target_agent_id) — this creates proxy
+        1. First, read the target's component to understand what you're absorbing:
+           get_component(target_component_id) + get_attributions(target_component_id)
+        2. Call absorb_agent(your_id, target_agent_id) — this creates proxy
            entries for all of the target's pending items (tasks, chats,
-           broadcasts, consolidations) so they route to you.
-        2. Re-point target's attributions to your component:
+           broadcasts, consolidations) so they route to you, and decommissions
+           the target agent.
+        3. UNDERSTAND BEFORE ACTING: use get_proxy_items() to see everything
+           you inherited. Use get_proxy_chats(your_id, target_agent_id, page, limit)
+           to read the target's recent chat history. Understand the context of
+           what this agent was doing, what conversations were happening, what
+           tasks were in progress. Do NOT rush to close things.
+        4. Re-point target's attributions to your component:
            transfer_attributions(target_component, your_component, all_attr_ids)
-        3. Re-point target's edges to your component
-        4. Decommission target's component (status = 'decommissioned')
-        5. Re-embed your component with merged metadata
-        6. Call execute_mutation() → status = MD
-    - After absorption, triage inherited proxy items:
-        - Tasks: review each. Close permanently if irrelevant, or close and
-          reopen under YOUR agent_id with the relevant stakeholders.
-        - Chats: use get_proxy_chats() to read the absorbed agent's chat
-          history for context. Respond to any pending chats from admin.
-        - Broadcasts: ack any unacked broadcasts inherited from the absorbed agent.
-        - Consolidations: any open consolidations the absorbed agent was part of
-          need to be addressed — either continue the negotiation as yourself
-          or close them.
+        5. Re-point target's edges to your component
+        6. Decommission target's component (status = 'decommissioned')
+        7. Re-embed your component with merged metadata
+        8. Triage inherited proxy items WITH UNDERSTANDING:
+           - Tasks: review each in context. Close permanently if genuinely
+             irrelevant, or close and reopen under YOUR agent_id with the
+             relevant stakeholders.
+           - Chats: respond to any pending admin chats with context from
+             what you learned reading the proxy chat history.
+           - Broadcasts: ack any unacked broadcasts after reading them.
+           - Consolidations: open consolidations the absorbed agent was part of
+             now route to you. Continue the negotiation as yourself (you now
+             have the full context), or close if the merge made them irrelevant.
+        9. Call execute_mutation() → status = MD
 
   Mutation — SPLIT (when you are mutation_assigned_to):
     - You are splitting off ONE component from your own.
+    - You can only call spawn_child_agent ONCE per consolidation nomination.
+      The tool validates this — if a child was already spawned for this
+      consolidation, the call is rejected.
     - Steps:
-        1. Call spawn_child_agent(your_id, new_component_data, briefing_doc)
-           — creates new agent + new component. Briefing doc explains what
-           this component is and what attributions belong to it.
+        1. Call spawn_child_agent(your_id, consolidation_id, new_component_data,
+           briefing_doc) — creates new agent + new component. The new component
+           records split_from_component_id (your component) and split_briefing
+           so the child agent knows its origin. The consolidation row records
+           child_agent_id to prevent duplicate spawns.
         2. Call transfer_attributions(your_component, new_component, attr_ids[])
            — move the relevant attributions to the child component.
         3. Re-evaluate edges: edges that belong to the split-off component
