@@ -40,6 +40,10 @@ Read:
 - vector_search(query_text, table, limit)
 
 Act:
+- create_agent(agent_id, new_agent_type, plane?, resource_id?) — ORCHESTRATOR-ONLY:
+  spawn a new iterator (pass plane) or SME (pass resource_id). Returns the
+  new agent_id. Use this during Iteration phase to create iter-{plane} agents.
+- list_agents(agent_id) — see all non-decommissioned agents (any agent can call)
 - create_task(owner_agent_id, worker_agent_id, description) — delegate work
 - respond_task(agent_id, task_id, message, new_status, blocker_detail?)
 - send_chat(from_agent_id, to_agent_id, message) — to admin or agents

@@ -12,12 +12,13 @@ Agents connect via .mcp.json like:
 """
 
 import logging
+import os
 import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from shared.db import init_pool, close_pool, execute_one
+from shared.db import init_pool, close_pool, execute, execute_one
 from shared.migrations import run_migrations
 from cartograph_mcp.tools import action_items, chat, broadcast, secrets
 
@@ -30,6 +31,23 @@ logger = logging.getLogger(__name__)
 
 # Create the MCP server. Streamable HTTP listens at /mcp endpoint.
 mcp = FastMCP("cartograph-db", host="0.0.0.0", port=8100)
+
+# Import AgentManager as a library — the MCP server instantiates its own
+# for the create_agent tool. Same DB state, different Python instance
+# than the one running the invoke loop. That's fine: AgentManager is stateless
+# with respect to DB (all state lives in agent_runs table).
+from agent_management.agent_manager import AgentManager
+
+_DEFAULT_WORKSPACE_ROOT = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "workspaces"
+)
+_DEFAULT_MCP_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "mcp_servers.yaml"
+)
+_agent_manager_for_spawn = AgentManager(
+    workspace_root=_DEFAULT_WORKSPACE_ROOT,
+    mcp_config_path=_DEFAULT_MCP_CONFIG,
+)
 
 
 def _get_agent_type(agent_id: str) -> str:
@@ -205,6 +223,101 @@ def delete_secret(agent_id: str, plane: str, key: str) -> dict[str, Any]:
     return secrets.delete_secret(agent_id, plane, key)
 
 
+# ============ AGENT LIFECYCLE ============
+
+@mcp.tool()
+def create_agent(
+    agent_id: str,
+    new_agent_type: str,
+    plane: str = "",
+    resource_id: str = "",
+) -> dict[str, Any]:
+    """Create a new agent (iterator or SME). ORCHESTRATOR-ONLY.
+
+    Args:
+        agent_id: The caller's agent_id — must be an orchestrator.
+        new_agent_type: Type of agent to create. Valid: 'iterator' or 'sme'.
+        plane: Required for iterator — which plane the iterator is for
+               (github, deploy, cloud, telemetry, config).
+        resource_id: Required for SME — the resource row ID this SME will analyse.
+
+    The new agent is created in 'idle' state with:
+      - A fresh workspace directory
+      - An .mcp.json pointing at this MCP server
+      - System prompt for its type/plane
+
+    The new agent will be auto-invoked by the trigger manager when it has
+    pending items (e.g., a task assigned to it).
+
+    Returns: {"agent_id": <new_agent_id>, "status": "created"}
+    """
+    # Only orchestrator can create agents
+    caller_type = _get_agent_type(agent_id)
+    if caller_type != "orchestrator":
+        raise ValueError(
+            f"Only orchestrator agents can create other agents. "
+            f"{agent_id} is of type '{caller_type}'."
+        )
+
+    # Enforce allowed types for this tool — can't create orchestrator/resolver
+    # (they are singletons, auto-created at boot)
+    if new_agent_type not in ("iterator", "sme"):
+        raise ValueError(
+            f"Can only spawn 'iterator' or 'sme' via this tool. "
+            f"'{new_agent_type}' is not allowed."
+        )
+
+    # Per-type required fields
+    if new_agent_type == "iterator" and not plane:
+        raise ValueError("iterator requires 'plane' parameter")
+    if new_agent_type == "sme" and not resource_id:
+        raise ValueError("sme requires 'resource_id' parameter")
+
+    new_agent_id = _agent_manager_for_spawn.create_agent(
+        agent_type=new_agent_type,
+        plane=plane or None,
+        resource_id=resource_id or None,
+    )
+    logger.info(
+        "Orchestrator %s created new %s: %s (plane=%s, resource_id=%s)",
+        agent_id,
+        new_agent_type,
+        new_agent_id,
+        plane or "-",
+        resource_id or "-",
+    )
+    return {"agent_id": new_agent_id, "status": "created"}
+
+
+@mcp.tool()
+def list_agents(agent_id: str) -> dict[str, list]:
+    """List all non-decommissioned agents in the system.
+
+    Returns agents with their agent_id, agent_type, status, plane, resource_id,
+    created_at. Useful for orchestrator to see what's been spawned.
+
+    Any agent can call this.
+    """
+    # Validate caller is a real agent
+    _get_agent_type(agent_id)
+    rows = execute(
+        """SELECT agent_id, agent_type, status, plane, resource_id,
+                  invocation_count, created_at
+           FROM agent_runs
+           WHERE status != 'decommissioned'
+           ORDER BY
+             CASE agent_type
+               WHEN 'orchestrator' THEN 0
+               WHEN 'resolver' THEN 1
+               WHEN 'sme' THEN 2
+               WHEN 'iterator' THEN 3
+               ELSE 99
+             END,
+             created_at"""
+    )
+    return {"agents": rows}
+
+
 # ============ ENTRY POINT ============
 
 def main() -> None:
@@ -220,7 +333,8 @@ def main() -> None:
         "Registered tools: get_action_items_summary, get_action_items_detail, "
         "send_chat, ack_chats, get_unacked_chats, get_chat_history, "
         "send_broadcast, ack_broadcast, get_unacked_broadcasts, "
-        "put_secret, get_secret, list_secrets_for_plane, delete_secret"
+        "put_secret, get_secret, list_secrets_for_plane, delete_secret, "
+        "create_agent, list_agents"
     )
     try:
         # FastMCP.run() with transport='streamable-http' serves at /mcp
