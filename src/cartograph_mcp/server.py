@@ -19,7 +19,7 @@ from mcp.server.fastmcp import FastMCP
 
 from shared.db import init_pool, close_pool, execute_one
 from shared.migrations import run_migrations
-from cartograph_mcp.tools import action_items, chat, broadcast
+from cartograph_mcp.tools import action_items, chat, broadcast, secrets
 
 logging.basicConfig(
     level=logging.INFO,
@@ -154,6 +154,57 @@ def get_unacked_broadcasts(agent_id: str) -> dict[str, list]:
     return {"messages": broadcast.get_unacked_broadcasts(agent_id, agent_type)}
 
 
+# ============ SECRETS ============
+
+@mcp.tool()
+def put_secret(agent_id: str, plane: str, key: str, value: str) -> dict[str, Any]:
+    """Store a credential for a plane. ONLY the orchestrator can write secrets.
+
+    Args:
+        agent_id: The caller's agent_id (must be an orchestrator).
+        plane: The plane this credential is for (e.g., 'github', 'cloud').
+        key: Credential name (e.g., 'github_token', 'aws_access_key').
+        value: The secret value to store. Upserts on (plane, key).
+
+    Returns: the stored row metadata (NOT the value).
+    """
+    return secrets.put_secret(agent_id, plane, key, value)
+
+
+@mcp.tool()
+def get_secret(agent_id: str, plane: str, key: str) -> dict[str, Any]:
+    """Read a specific secret value. Any active agent can read.
+
+    Args:
+        agent_id: The caller's agent_id.
+        plane: The plane the credential is for.
+        key: The credential name.
+
+    Returns: {plane, key, value, created_at, updated_at}, or null if not found.
+    """
+    result = secrets.get_secret(agent_id, plane, key)
+    return result or {"error": "secret not found"}
+
+
+@mcp.tool()
+def list_secrets_for_plane(agent_id: str, plane: str) -> dict[str, list]:
+    """List all secret KEYS for a plane (values NOT returned for security).
+
+    Use this to discover what credentials are available, then call
+    get_secret() for the ones you need.
+    """
+    return {"secrets": secrets.list_secrets_for_plane(agent_id, plane)}
+
+
+@mcp.tool()
+def delete_secret(agent_id: str, plane: str, key: str) -> dict[str, Any]:
+    """Delete a credential. ONLY the orchestrator can delete secrets.
+
+    Returns: {"deleted": bool}.
+    """
+    return secrets.delete_secret(agent_id, plane, key)
+
+
 # ============ ENTRY POINT ============
 
 def main() -> None:
@@ -168,7 +219,8 @@ def main() -> None:
     logger.info(
         "Registered tools: get_action_items_summary, get_action_items_detail, "
         "send_chat, ack_chats, get_unacked_chats, get_chat_history, "
-        "send_broadcast, ack_broadcast, get_unacked_broadcasts"
+        "send_broadcast, ack_broadcast, get_unacked_broadcasts, "
+        "put_secret, get_secret, list_secrets_for_plane, delete_secret"
     )
     try:
         # FastMCP.run() with transport='streamable-http' serves at /mcp

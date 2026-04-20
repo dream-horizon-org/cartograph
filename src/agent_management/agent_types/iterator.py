@@ -36,6 +36,12 @@ Act:
 - send_chat(from_agent_id="<your_id>", to_agent_id="admin", message=...)
 - ack_chats(agent_id, communication_ids[])
 
+Read (secrets — use these to get credentials for your plane):
+- list_secrets_for_plane(agent_id, plane) — see what keys exist (no values)
+- get_secret(agent_id, plane, key) — fetch a specific credential value
+  Example: get_secret(agent_id="<you>", plane="{plane}", key="github_token")
+  If missing, raise a blocker — orchestrator provisions secrets, not you.
+
 Plus: bash (you are the ONLY agent type allowed to install CLIs/tools)
 Plus: your plane's read-only MCP (e.g., github-reader when running on github plane)
 

@@ -176,11 +176,48 @@ function renderMessages() {
     const div = document.createElement('div');
     const fromAdmin = msg.from_agent === 'admin';
     div.className = `message from-${fromAdmin ? 'admin' : 'agent'}`;
-    div.innerHTML = `
-      <div>${escapeHtml(msg.text)}</div>
-      <div class="message-meta">${formatTime(msg.created_at)}</div>
-    `;
+
+    const body = document.createElement('div');
+    body.className = 'message-body';
+    if (fromAdmin) {
+      // Admin messages: plain text, preserve line breaks
+      body.textContent = msg.text;
+    } else {
+      // Agent messages: render as markdown
+      body.innerHTML = renderMarkdown(msg.text);
+      highlightCodeBlocks(body);
+    }
+    div.appendChild(body);
+
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+    meta.textContent = formatTime(msg.created_at);
+    div.appendChild(meta);
+
     $messages.appendChild(div);
+  });
+}
+
+function renderMarkdown(text) {
+  if (!window.marked || !window.DOMPurify) {
+    // Fallback if CDN didn't load
+    return escapeHtml(text).replace(/\n/g, '<br>');
+  }
+  const html = marked.parse(text, {
+    breaks: true,
+    gfm: true,
+  });
+  return DOMPurify.sanitize(html);
+}
+
+function highlightCodeBlocks(container) {
+  if (!window.hljs) return;
+  container.querySelectorAll('pre code').forEach(block => {
+    try {
+      hljs.highlightElement(block);
+    } catch (e) {
+      // ignore highlight failures
+    }
   });
 }
 

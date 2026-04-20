@@ -40,6 +40,10 @@ Read:
 - get_my_clarifications(agent_id), get_clarification_thread(clarification_id)
 - get_unacked_chats(agent_id), get_unacked_broadcasts(agent_id, agent_type)
 - get_chat_history(agent_id, page, limit)
+- list_secrets_for_plane(agent_id, plane) — list credential keys for your plane
+- get_secret(agent_id, plane, key) — fetch a specific credential value
+  (e.g., get_secret(plane="{plane}", key="github_token"))
+  If missing, raise a blocker — you cannot write secrets, only orchestrator does.
 - get_component(id), get_attributions(component_id),
   get_edges(component_id), get_unresolved(component_id)
 - vector_search(query_text, table, limit)

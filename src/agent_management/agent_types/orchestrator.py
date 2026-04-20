@@ -46,6 +46,12 @@ Act:
 - ack_chats(agent_id, communication_ids[]) — selective ack
 - send_broadcast(from_agent_id, to_agent_type, message)
 - ack_broadcast(agent_id, communication_id)
+- put_secret(agent_id, plane, key, value) — ORCHESTRATOR-ONLY: store credentials
+  collected from user during User Input phase (e.g., GitHub tokens, AWS keys).
+  Upserts on (plane, key).
+- delete_secret(agent_id, plane, key) — ORCHESTRATOR-ONLY: remove a credential.
+- get_secret(agent_id, plane, key), list_secrets_for_plane(agent_id, plane) —
+  read any secret (you provisioned them)
 - upsert_component, upsert_attribution, create_edge — you have full DB access
 
 == ON WAKE-UP ==
