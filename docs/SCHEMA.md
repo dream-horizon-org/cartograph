@@ -1,8 +1,8 @@
 # Cartograph — Schema Document
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS vector;  -- pgvector for embedding search
+-- gen_random_uuid() is built into Postgres 13+, no extension needed
 ```
 
 ---
@@ -39,7 +39,6 @@ CREATE TABLE components (
     confidence      FLOAT NOT NULL DEFAULT 1.0,  -- 0.0 to 1.0, how sure we are this exists
     metadata        JSONB NOT NULL DEFAULT '{}', -- runtime, framework, region, repo URL, etc.
     embedding       vector(1536),                -- for fuzzy matching during consolidation
-    owned_by_agent  TEXT,                        -- agent_id of the SME that owns this component
     split_from_component_id UUID REFERENCES components(id) ON DELETE SET NULL,
                                                  -- if this component was born from a split, points to parent
     split_briefing  TEXT,                        -- briefing doc from parent explaining what this component is
@@ -51,7 +50,7 @@ CREATE TABLE components (
 CREATE INDEX idx_comp_embedding ON components USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX idx_comp_type ON components(component_type);
 CREATE INDEX idx_comp_status ON components(status) WHERE status = 'active';
-CREATE INDEX idx_comp_owner ON components(owned_by_agent);
+-- owned_by_agent removed — derivable via resource_component_agents table
 ```
 
 ### `attributions`
@@ -177,8 +176,7 @@ CREATE TABLE agent_runs (
                         'resolver'
                      )),
     session_id       TEXT,                        -- Claude session ID for resume
-    resource_ids     UUID[] NOT NULL DEFAULT '{}', -- FK(s) to resources table (grows on merge absorption)
-    planes           TEXT[] NOT NULL DEFAULT '{}', -- planes this agent covers (grows on merge absorption)
+    -- resource_ids and planes removed — derivable via resource_component_agents table
     status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                         'pending',                -- created, waiting for first invoke
                         'invoking',               -- trigger manager took lock, about to invoke
@@ -215,7 +213,7 @@ CREATE TABLE resources (
     identifier      TEXT NOT NULL,               -- "dream11/feeds-aggregator-v2", "feeds-agg-v2.dream11.local"
     access_desc     TEXT,                        -- how to access: "clone via SSH", "describe-asg", "kubectl get"
     metadata        JSONB NOT NULL DEFAULT '{}', -- pre-resolved chain data, cluster info, etc.
-    assigned_to     TEXT REFERENCES agent_runs(agent_id) ON DELETE SET NULL,
+    -- assigned_to removed — derivable via resource_component_agents table
     status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                         'pending',                -- discovered by iterator, not yet assigned
                         'assigned',               -- SME created and assigned
@@ -227,9 +225,38 @@ CREATE TABLE resources (
 );
 
 CREATE INDEX idx_res_status ON resources(status) WHERE status = 'pending';
-CREATE INDEX idx_res_assigned ON resources(assigned_to);
 CREATE INDEX idx_res_plane ON resources(plane);
+-- assigned_to index removed — use resource_component_agents table
 ```
+
+### `resource_component_agents`
+
+Single source of truth for the resource → component → agent relationship. Re-pointed during merges and splits. Replaces `owned_by_agent`, `resource_ids[]`, `planes[]`, and `assigned_to` which were scattered across three tables.
+
+```sql
+CREATE TABLE resource_component_agents (
+    resource_id     UUID NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+    component_id    UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+    agent_id        TEXT NOT NULL REFERENCES agent_runs(agent_id) ON DELETE CASCADE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY(resource_id, component_id)
+);
+
+-- "What does this agent own?" (components + resources)
+CREATE INDEX idx_rca_agent ON resource_component_agents(agent_id);
+-- "Who manages this component?"
+CREATE INDEX idx_rca_component ON resource_component_agents(component_id);
+-- "Who is assigned to this resource?"
+CREATE INDEX idx_rca_resource ON resource_component_agents(resource_id);
+```
+
+**Mutation behaviour:**
+- **Merge:** re-point `agent_id` on absorbed agent's rows to surviving agent. Re-point `component_id` to surviving component.
+- **Split:** add new row for child component + child agent. Parent row stays with trimmed component.
+- **Plane derivation:** `SELECT DISTINCT r.plane FROM resource_component_agents rca JOIN resources r ON r.id = rca.resource_id WHERE rca.agent_id = ?`
+
+---
 
 ### `tasks`
 
@@ -475,5 +502,6 @@ Model: `text-embedding-3-small` (1536 dims). All in pgvector.
 | clarifications | done   |
 | broadcast_acks | done   |
 | proxy_items    | done   |
+| resource_component_agents | done |
 
 
