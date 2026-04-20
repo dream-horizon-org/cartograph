@@ -11,6 +11,7 @@ from trigger_management.scanners import (
     consolidations,
     clarifications,
     auto_transitions,
+    recovery,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,13 @@ def run_once() -> int:
     """Run one scan cycle. Returns number of agents locked."""
     # 1. Run auto-transitions first (consolidation confidence breach)
     auto_transitions.run_auto_transitions()
+
+    # 1b. Recovery: flip errored agents back to idle after backoff.
+    # Must run BEFORE get_idle_agents so recovered agents get picked up
+    # in the same cycle.
+    recovered = recovery.run_recovery()
+    if recovered > 0:
+        logger.info("Recovered %d errored agent(s) this cycle", recovered)
 
     # 2. Get all idle, unlocked agents
     idle_agents = get_idle_agents()

@@ -130,8 +130,11 @@ def run_migrations() -> None:
                     access_desc     TEXT,
                     metadata        JSONB NOT NULL DEFAULT '{}',
                     status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
-                                        'pending','assigned','done'
+                                        'pending','assigned','done','rejected'
                                     )),
+                    rejected_at     TIMESTAMPTZ,
+                    rejected_by     TEXT,
+                    rejected_reason TEXT,
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE(plane, resource_type, identifier)
                 )
@@ -257,6 +260,37 @@ def run_migrations() -> None:
                 )
             """)
 
+            # --- Post-creation ALTERs (additive schema evolution) ---
+            # Recovery bookkeeping for errored agents. Idempotent — safe to
+            # run against existing databases; no data rewritten.
+            cur.execute(
+                "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS errored_at TIMESTAMPTZ"
+            )
+            cur.execute(
+                "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS recovery_attempts INT NOT NULL DEFAULT 0"
+            )
+
+            # Resource soft-delete: 'rejected' status + audit columns. Existing
+            # databases created before this migration have a narrower CHECK
+            # constraint; swap it out to include 'rejected'. All existing rows
+            # already match the new set so this is non-destructive.
+            cur.execute(
+                "ALTER TABLE resources ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ"
+            )
+            cur.execute(
+                "ALTER TABLE resources ADD COLUMN IF NOT EXISTS rejected_by TEXT"
+            )
+            cur.execute(
+                "ALTER TABLE resources ADD COLUMN IF NOT EXISTS rejected_reason TEXT"
+            )
+            cur.execute(
+                "ALTER TABLE resources DROP CONSTRAINT IF EXISTS resources_status_check"
+            )
+            cur.execute(
+                """ALTER TABLE resources ADD CONSTRAINT resources_status_check
+                   CHECK (status IN ('pending','assigned','done','rejected'))"""
+            )
+
             # --- Indexes ---
             _create_indexes(cur)
 
@@ -299,10 +333,14 @@ def _create_indexes(cur) -> None:
         "CREATE INDEX IF NOT EXISTS idx_agent_type ON agent_runs(agent_type)",
         "CREATE INDEX IF NOT EXISTS idx_agent_idle ON agent_runs(agent_type, status) WHERE status = 'idle'",
         "CREATE INDEX IF NOT EXISTS idx_agent_locked ON agent_runs(trigger_lock) WHERE trigger_lock = TRUE",
+        # Recovery scanner: scoped to errored rows so scan is cheap.
+        "CREATE INDEX IF NOT EXISTS idx_agent_errored ON agent_runs(errored_at) WHERE status = 'errored'",
 
         # Resources
         "CREATE INDEX IF NOT EXISTS idx_res_status ON resources(status) WHERE status = 'pending'",
         "CREATE INDEX IF NOT EXISTS idx_res_plane ON resources(plane)",
+        # Cascade safety check: fast existence lookup for SME assignments
+        "CREATE INDEX IF NOT EXISTS idx_rca_resource_id ON resource_component_agents(resource_id)",
 
         # Resource-Component-Agents
         "CREATE INDEX IF NOT EXISTS idx_rca_agent ON resource_component_agents(agent_id)",

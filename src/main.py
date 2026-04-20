@@ -47,17 +47,30 @@ def boot(
 
     os.makedirs(workspace_root, exist_ok=True)
 
-    # On startup, reset any leftover 'running' or 'errored' agents to 'idle'.
-    # They got stuck because the previous agent manager was killed mid-subprocess.
-    # New invocations via trigger_lock will restart them cleanly.
+    # On startup, flip any leftover 'running' agents to 'errored' so the
+    # bounded-recovery scanner (trigger_management/scanners/recovery.py) can
+    # decide whether to retry based on recovery_attempts. Leaves already-errored
+    # agents alone — their errored_at already records when they failed.
+    #
+    # This handles the "previous agent manager was killed mid-subprocess" case
+    # without blindly resurrecting agents that were deliberately errored (e.g.
+    # after 3 auto-recovery failures awaiting human triage).
     from shared.db import execute_mutate
-    reset = execute_mutate(
+    orphaned = execute_mutate(
         """UPDATE agent_runs
-           SET status = 'idle', trigger_lock = FALSE
-           WHERE status IN ('running', 'errored')"""
+           SET status = 'errored',
+               trigger_lock = FALSE,
+               error_msg = COALESCE(error_msg, '') ||
+                           E'\n[dirty shutdown: agent manager restarted while status=running]',
+               errored_at = COALESCE(errored_at, now())
+           WHERE status = 'running'"""
     )
-    if reset > 0:
-        logger.info("Reset %d running/errored agents to idle on startup", reset)
+    if orphaned > 0:
+        logger.info(
+            "Flipped %d orphaned running agents to errored on startup "
+            "(recovery scanner will retry them)",
+            orphaned,
+        )
 
     manager = AgentManager(
         workspace_root=workspace_root,

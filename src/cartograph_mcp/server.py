@@ -336,6 +336,32 @@ def upsert_resource(
 
 
 @mcp.tool()
+def upsert_resources_bulk(
+    agent_id: str,
+    plane: str,
+    items: list[dict],
+) -> dict[str, Any]:
+    """Bulk upsert many resources for one plane in a single transaction. ITERATOR-ONLY.
+
+    Use this instead of calling upsert_resource N times when you have enumerated
+    many resources at once — one round-trip, one transaction, same idempotency
+    on (plane, resource_type, identifier).
+
+    Args:
+        plane: one of github, deploy, cloud, telemetry, config
+        items: list of dicts, each with keys:
+               - resource_type (required)
+               - identifier (required)
+               - access_desc (optional)
+               - metadata (optional dict)
+
+    Returns: {"inserted_or_updated": N, "ids": [uuid, ...]}
+    Limit: 5000 items per call.
+    """
+    return resources_tool.upsert_resources_bulk(agent_id, plane, items)
+
+
+@mcp.tool()
 def get_resource(agent_id: str, resource_id: str) -> dict[str, Any]:
     """Read a single resource by id. Any active agent can read."""
     return resources_tool.get_resource(agent_id, resource_id)
@@ -377,6 +403,64 @@ def mark_resource_done(agent_id: str, resource_id: str) -> dict[str, Any]:
     Validates agent is the SME assigned to this resource.
     """
     return resources_tool.mark_resource_done(agent_id, resource_id)
+
+
+@mcp.tool()
+def reject_resource(
+    agent_id: str,
+    resource_id: str,
+    reason: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Soft-delete a single resource (status='rejected'). Prefer the bulk variant.
+
+    ITERATOR (own plane) or ORCHESTRATOR (force=True). Records rejected_by,
+    rejected_at, rejected_reason for audit. Skipped if an SME is already
+    assigned to the resource (decommission that SME first).
+
+    Args:
+        agent_id: caller
+        resource_id: row to reject
+        reason: required, used for audit trail
+        force: orchestrator-only override to bypass iterator/plane scoping
+    """
+    return resources_tool.reject_resource(agent_id, resource_id, reason, force)
+
+
+@mcp.tool()
+def reject_resources_bulk(
+    agent_id: str,
+    plane: str,
+    resource_ids: list[str] | None = None,
+    resource_types: list[str] | None = None,
+    reason: str = "",
+    force: bool = False,
+) -> dict[str, Any]:
+    """Bulk soft-delete resources in one transaction. Plane-scoped. ITERATOR or ORCHESTRATOR.
+
+    Filters AND together. At least one of (resource_ids, resource_types)
+    MUST be non-empty — the tool refuses a blank-wipe call. Useful for
+    cleaning up over-granular iterator emissions (e.g. sub-artifact rows
+    that should have been folded into parent metadata).
+
+    Example — iterator cleans up over-granular GitHub rows:
+      reject_resources_bulk(
+        agent_id="iter-github-abc",
+        plane="github",
+        resource_types=["branch","workflow","webhook","deployment","environment","team","org"],
+        reason="over-granular emission — folding sub-artifacts into repo metadata"
+      )
+
+    Cascade safety: rows with an SME already assigned (via
+    resource_component_agents) are skipped and returned in
+    'skipped_cascade'. Rows in terminal status ('done' or already
+    'rejected') are skipped and returned in 'skipped_terminal'.
+
+    Returns: {rejected: N, ids: [...], skipped_cascade: [...], skipped_terminal: [...]}
+    """
+    return resources_tool.reject_resources_bulk(
+        agent_id, plane, resource_ids, resource_types, reason, force
+    )
 
 
 # ============ AGENT LIFECYCLE ============
@@ -474,6 +558,41 @@ def list_agents(agent_id: str) -> dict[str, list]:
     return {"agents": rows}
 
 
+@mcp.tool()
+def reset_agent(agent_id: str, target_agent_id: str) -> dict[str, Any]:
+    """Force-reset a permanently-errored agent back to idle. ORCHESTRATOR-ONLY.
+
+    Use only when bounded auto-recovery has given up (recovery_attempts maxed
+    out) and you've diagnosed the underlying cause. Clears error state entirely:
+    status='idle', error_msg cleared, recovery_attempts=0, trigger_lock=FALSE.
+
+    Pending items (tasks, chats, etc.) remain untouched, so the trigger manager
+    will pick the agent up again on the next scan cycle.
+
+    Args:
+        agent_id: Caller (must be orchestrator).
+        target_agent_id: The errored agent to reset.
+
+    Returns: {"reset": true, "agent_id": <target_agent_id>} on success.
+    Raises ValueError if target is not currently errored.
+    """
+    # Import here to avoid circular imports at module load
+    from agent_management import db as am_db
+
+    caller_type = _get_agent_type(agent_id)
+    if caller_type != "orchestrator":
+        raise ValueError(
+            f"Only orchestrator can force-reset agents. "
+            f"{agent_id} is of type '{caller_type}'."
+        )
+    if not am_db.force_reset_agent(target_agent_id):
+        raise ValueError(
+            f"Agent {target_agent_id} is not currently errored (or not found)."
+        )
+    logger.info("Orchestrator %s force-reset agent %s", agent_id, target_agent_id)
+    return {"reset": True, "agent_id": target_agent_id}
+
+
 # ============ ENTRY POINT ============
 
 def main() -> None:
@@ -491,9 +610,10 @@ def main() -> None:
         "send_broadcast, ack_broadcast, get_unacked_broadcasts, "
         "put_secret, get_secret, list_secrets_for_plane, delete_secret, "
         "create_task, respond_task, raise_blocker, get_my_tasks, get_task_thread, "
-        "upsert_resource, get_resource, list_resources_for_plane, "
-        "list_all_resources, get_resource_counts, mark_resource_done, "
-        "create_agent, list_agents"
+        "upsert_resource, upsert_resources_bulk, get_resource, "
+        "list_resources_for_plane, list_all_resources, get_resource_counts, "
+        "mark_resource_done, reject_resource, reject_resources_bulk, "
+        "create_agent, list_agents, reset_agent"
     )
     try:
         # FastMCP.run() with transport='streamable-http' serves at /mcp

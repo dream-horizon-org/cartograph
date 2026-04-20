@@ -37,6 +37,107 @@ def update_agent_status(agent_id: str, status: str) -> None:
     )
 
 
+def set_agent_errored(agent_id: str, error_msg: str) -> None:
+    """Mark agent errored and persist a diagnostic message. Truncates to 8KB.
+
+    Stamps errored_at so the recovery scanner can compute backoff.
+    Leaves recovery_attempts alone — the scanner increments it on each retry.
+    """
+    execute_mutate(
+        """UPDATE agent_runs
+           SET status = 'errored',
+               error_msg = %s,
+               errored_at = now(),
+               trigger_lock = FALSE,
+               updated_at = now()
+           WHERE agent_id = %s""",
+        (error_msg[:8000], agent_id),
+    )
+
+
+# Backoff ladder for automatic recovery of errored agents.
+# Index = recovery_attempts already made. After 3 strikes we give up and
+# leave the agent errored for human triage (visible in admin UI).
+_RECOVERY_BACKOFF_SECONDS = [60, 300, 1800]
+MAX_RECOVERY_ATTEMPTS = len(_RECOVERY_BACKOFF_SECONDS)
+
+
+def get_recoverable_errored_agents() -> list[dict]:
+    """Return errored agents whose backoff has elapsed and still have retries.
+
+    Scanner uses this to decide who to flip back to idle. Backoff is computed
+    per-agent based on recovery_attempts so far.
+    """
+    # Build a CASE expression matching the backoff ladder above.
+    when_clauses = "\n               ".join(
+        f"WHEN {i} THEN INTERVAL '{sec} seconds'"
+        for i, sec in enumerate(_RECOVERY_BACKOFF_SECONDS)
+    )
+    return execute(
+        f"""SELECT * FROM agent_runs
+            WHERE status = 'errored'
+              AND recovery_attempts < {MAX_RECOVERY_ATTEMPTS}
+              AND errored_at IS NOT NULL
+              AND now() - errored_at >= (CASE recovery_attempts
+               {when_clauses}
+               END)"""
+    )
+
+
+def reset_agent_for_recovery(agent_id: str) -> bool:
+    """Flip an errored agent back to idle for another try. Returns True if updated.
+
+    Increments recovery_attempts. Keeps error_msg for history (debugging).
+    Clears errored_at + trigger_lock so normal flow re-engages.
+    Gated on status='errored' to prevent double-flips in a race.
+    """
+    row = execute_returning(
+        """UPDATE agent_runs
+           SET status = 'idle',
+               errored_at = NULL,
+               trigger_lock = FALSE,
+               recovery_attempts = recovery_attempts + 1,
+               updated_at = now()
+           WHERE agent_id = %s AND status = 'errored'
+           RETURNING agent_id""",
+        (agent_id,),
+    )
+    return row is not None
+
+
+def clear_recovery_state(agent_id: str) -> None:
+    """Reset recovery counter after a successful invocation.
+
+    Called when an agent transitions back to idle from running — it means
+    the retry worked and past errors shouldn't count against it anymore.
+    """
+    execute_mutate(
+        """UPDATE agent_runs
+           SET recovery_attempts = 0, error_msg = NULL, updated_at = now()
+           WHERE agent_id = %s AND recovery_attempts > 0""",
+        (agent_id,),
+    )
+
+
+def force_reset_agent(agent_id: str) -> bool:
+    """Admin/orchestrator override: reset an errored agent regardless of
+    recovery_attempts cap. Clears error state entirely. Returns True on update.
+    """
+    row = execute_returning(
+        """UPDATE agent_runs
+           SET status = 'idle',
+               errored_at = NULL,
+               trigger_lock = FALSE,
+               recovery_attempts = 0,
+               error_msg = NULL,
+               updated_at = now()
+           WHERE agent_id = %s AND status = 'errored'
+           RETURNING agent_id""",
+        (agent_id,),
+    )
+    return row is not None
+
+
 def update_agent_session(agent_id: str, session_id: str) -> None:
     execute_mutate(
         "UPDATE agent_runs SET session_id = %s, updated_at = now() WHERE agent_id = %s",

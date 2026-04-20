@@ -131,13 +131,12 @@ class AgentManager:
 
         workspace_path = agent.get("workspace_path")
         if not workspace_path:
-            logger.error(
-                "Agent %s has no workspace_path — was it created via AgentManager? "
-                "Manually-inserted agents lack workspace/MCP config.",
-                agent_id,
+            msg = (
+                "Agent has no workspace_path — was it created via AgentManager? "
+                "Manually-inserted agents lack workspace/MCP config."
             )
-            db.update_agent_status(agent_id, "errored")
-            db.release_trigger_lock(agent_id)
+            logger.error("Agent %s: %s", agent_id, msg)
+            db.set_agent_errored(agent_id, msg)
             return ""
 
         # Use --resume if we have a session; otherwise --session-id lets us
@@ -175,6 +174,17 @@ class AgentManager:
         hb_thread = threading.Thread(target=_heartbeat_keeper, daemon=True)
         hb_thread.start()
 
+        # Timeout tuned per agent_type. Iterators do heavy enumeration
+        # (cloning, GitHub API sweeps, paginated listings) and frequently need
+        # >5 minutes. Others yield faster so a tighter bound is fine.
+        timeout_by_type = {
+            "iterator": 1800,   # 30 min
+            "sme":      1800,   # 30 min (deep resource analysis)
+            "orchestrator": 900,
+            "resolver":     900,
+        }
+        subprocess_timeout = timeout_by_type.get(agent["agent_type"], 900)
+
         try:
             # Run claude in the agent's workspace (cwd) so .mcp.json is loaded
             result = subprocess.run(
@@ -182,7 +192,7 @@ class AgentManager:
                 cwd=workspace_path,
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=subprocess_timeout,
             )
 
             logger.info(
@@ -201,7 +211,14 @@ class AgentManager:
                     result.stderr[:2000],
                     result.stdout[:2000],
                 )
-                db.update_agent_status(agent_id, "errored")
+                err_tail = (result.stderr or "")[-2000:]
+                out_tail = (result.stdout or "")[-500:]
+                db.set_agent_errored(
+                    agent_id,
+                    f"subprocess exit {result.returncode}\n"
+                    f"--- stderr tail ---\n{err_tail}\n"
+                    f"--- stdout tail ---\n{out_tail}",
+                )
                 return result.stderr
 
             output = result.stdout
@@ -217,19 +234,30 @@ class AgentManager:
 
             db.update_agent_status(agent_id, "idle")
             db.update_agent_heartbeat(agent_id)
+            db.clear_recovery_state(agent_id)
             logger.info("Agent %s completed, set to idle", agent_id)
             return output
 
-        except subprocess.TimeoutExpired:
-            logger.error("Agent %s timed out after 300s", agent_id)
-            db.update_agent_status(agent_id, "errored")
+        except subprocess.TimeoutExpired as e:
+            logger.error("Agent %s timed out after %ds", agent_id, subprocess_timeout)
+            err_tail = ""
+            if e.stderr:
+                err_tail = (e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else e.stderr)[-2000:]
+            db.set_agent_errored(
+                agent_id,
+                f"TimeoutExpired after {subprocess_timeout}s — subprocess killed.\n"
+                f"--- stderr tail ---\n{err_tail}",
+            )
             return "TIMEOUT"
         except FileNotFoundError as e:
-            logger.error(
-                "claude CLI not found — is Claude Code installed and on PATH? %s", e
-            )
-            db.update_agent_status(agent_id, "errored")
+            msg = f"claude CLI not found — is Claude Code installed and on PATH? {e}"
+            logger.error(msg)
+            db.set_agent_errored(agent_id, msg)
             return str(e)
+        except Exception as e:
+            logger.exception("Unexpected error invoking agent %s", agent_id)
+            db.set_agent_errored(agent_id, f"{type(e).__name__}: {e}")
+            raise
         finally:
             # Stop heartbeat keeper regardless of outcome
             heartbeat_stop.set()

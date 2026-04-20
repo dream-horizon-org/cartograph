@@ -31,7 +31,7 @@ class InvokeLoop:
         self,
         agent_manager: AgentManager,
         poll_interval: float = 2.0,
-        heartbeat_timeout: int = 300,
+        heartbeat_timeout: int = 120,
     ) -> None:
         self.agent_manager = agent_manager
         self.poll_interval = poll_interval
@@ -64,12 +64,22 @@ class InvokeLoop:
             time.sleep(self.poll_interval)
 
     def _handle_stale_agents(self) -> None:
-        """Agents stuck in 'running' past heartbeat timeout → errored."""
+        """Agents stuck in 'running' past heartbeat timeout → errored.
+
+        This is a safety net — in the normal path agent_manager.invoke_agent
+        catches subprocess errors/timeouts and writes error_msg itself. Stale
+        detection only fires if the heartbeat thread stopped updating (e.g.
+        process crash, DB outage mid-run).
+        """
         stale = db.get_stale_running_agents(self.heartbeat_timeout)
         for agent in stale:
             agent_id = agent["agent_id"]
             logger.warning("Agent %s is stale, marking as errored", agent_id)
-            db.update_agent_status(agent_id, "errored")
+            db.set_agent_errored(
+                agent_id,
+                f"Heartbeat stale for >{self.heartbeat_timeout}s while "
+                f"status='running' (heartbeat keeper stopped or process died).",
+            )
 
     def _process_locked_agents(self) -> None:
         """Pick up locked agents (in priority order) and invoke them."""
@@ -93,7 +103,8 @@ class InvokeLoop:
             )
             try:
                 self.agent_manager.invoke_agent(agent_id)
-            except Exception:
+            except Exception as e:
                 logger.exception("Failed to invoke agent %s", agent_id)
-                db.update_agent_status(agent_id, "errored")
-                db.release_trigger_lock(agent_id)
+                db.set_agent_errored(
+                    agent_id, f"Invoke loop caught {type(e).__name__}: {e}"
+                )

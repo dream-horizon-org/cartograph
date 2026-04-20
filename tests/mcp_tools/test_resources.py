@@ -82,6 +82,73 @@ def test_unknown_agent_rejected(agent_factory):
         resources.upsert_resource("nobody", "github", "repo", "x")
 
 
+# ============ upsert_resources_bulk ============
+
+
+def test_bulk_upsert_inserts_many(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    items = [
+        {"resource_type": "repo", "identifier": f"dream11/svc-{i}",
+         "access_desc": "clone via SSH", "metadata": {"idx": i}}
+        for i in range(25)
+    ]
+    out = resources.upsert_resources_bulk("iter-gh", "github", items)
+    assert out["inserted_or_updated"] == 25
+    assert len(out["ids"]) == 25
+
+    listed = resources.list_resources_for_plane("iter-gh", "github")
+    assert len(listed) == 25
+    assert all(r["plane"] == "github" for r in listed)
+
+
+def test_bulk_upsert_is_idempotent(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    items = [{"resource_type": "repo", "identifier": "dream11/a"}]
+    r1 = resources.upsert_resources_bulk("iter-gh", "github", items)
+    r2 = resources.upsert_resources_bulk(
+        "iter-gh", "github",
+        [{"resource_type": "repo", "identifier": "dream11/a", "access_desc": "updated"}],
+    )
+    assert r1["ids"] == r2["ids"]
+    listed = resources.list_resources_for_plane("iter-gh", "github")
+    assert len(listed) == 1
+    assert listed[0]["access_desc"] == "updated"
+
+
+def test_bulk_upsert_non_iterator_rejected(agent_factory):
+    agent_factory("sme-1", "sme")
+    with pytest.raises(ValueError, match="Only iterator"):
+        resources.upsert_resources_bulk(
+            "sme-1", "github", [{"resource_type": "repo", "identifier": "x"}]
+        )
+
+
+def test_bulk_upsert_wrong_plane_rejected(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    with pytest.raises(ValueError, match="cannot write resources for plane"):
+        resources.upsert_resources_bulk(
+            "iter-gh", "cloud", [{"resource_type": "r53_chain", "identifier": "x"}]
+        )
+
+
+def test_bulk_upsert_empty_fields_rejected(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    with pytest.raises(ValueError, match=r"items\[1\]\.identifier cannot be empty"):
+        resources.upsert_resources_bulk(
+            "iter-gh", "github",
+            [
+                {"resource_type": "repo", "identifier": "ok"},
+                {"resource_type": "repo", "identifier": "  "},
+            ],
+        )
+
+
+def test_bulk_upsert_empty_list_rejected(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    with pytest.raises(ValueError, match="non-empty list"):
+        resources.upsert_resources_bulk("iter-gh", "github", [])
+
+
 # ============ get_resource / list ============
 
 
@@ -153,6 +220,164 @@ def test_get_resource_counts(agent_factory):
     bp = {(r["plane"], r["status"]): r["cnt"] for r in rows}
     assert bp[("github", "pending")] == 2
     assert bp[("cloud", "pending")] == 1
+
+
+# ============ reject_resource / reject_resources_bulk ============
+
+
+def test_iterator_can_reject_own_plane_resource(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    r = resources.upsert_resource("iter-gh", "github", "branch", "main")
+    out = resources.reject_resource("iter-gh", r["id"], reason="sub-artifact")
+    assert out["rejected"] == 1
+    assert out["ids"] == [str(r["id"])]
+
+    from shared.db import execute_one
+    row = execute_one("SELECT status, rejected_by, rejected_reason FROM resources WHERE id=%s", (r["id"],))
+    assert row["status"] == "rejected"
+    assert row["rejected_by"] == "iter-gh"
+    assert row["rejected_reason"] == "sub-artifact"
+
+
+def test_reject_requires_reason(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    r = resources.upsert_resource("iter-gh", "github", "branch", "main")
+    with pytest.raises(ValueError, match="reason is required"):
+        resources.reject_resource("iter-gh", r["id"], reason="")
+    with pytest.raises(ValueError, match="reason is required"):
+        resources.reject_resources_bulk(
+            "iter-gh", "github", resource_types=["branch"], reason=""
+        )
+
+
+def test_reject_blank_wipe_refused(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    with pytest.raises(ValueError, match="blank-wipe"):
+        resources.reject_resources_bulk(
+            "iter-gh", "github", reason="nope"
+        )
+
+
+def test_iterator_cannot_reject_other_plane(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    _iterator(agent_factory, "iter-cloud", "cloud")
+    r = resources.upsert_resource("iter-cloud", "cloud", "r53", "x.local")
+    with pytest.raises(ValueError, match="cannot reject resources on plane"):
+        resources.reject_resource("iter-gh", r["id"], reason="not mine")
+
+
+def test_non_iterator_cannot_reject(agent_factory):
+    agent_factory("sme-1", "sme")
+    _iterator(agent_factory, "iter-gh", "github")
+    r = resources.upsert_resource("iter-gh", "github", "branch", "main")
+    with pytest.raises(ValueError, match="Only iterator"):
+        resources.reject_resource("sme-1", r["id"], reason="no")
+
+
+def test_orchestrator_force_reject(agent_factory):
+    agent_factory("orch-1", "orchestrator")
+    _iterator(agent_factory, "iter-gh", "github")
+    r = resources.upsert_resource("iter-gh", "github", "branch", "main")
+    out = resources.reject_resource("orch-1", r["id"], reason="override", force=True)
+    assert out["rejected"] == 1
+
+
+def test_bulk_reject_by_types(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    resources.upsert_resource("iter-gh", "github", "repo", "dream11/svc")
+    resources.upsert_resource("iter-gh", "github", "branch", "main")
+    resources.upsert_resource("iter-gh", "github", "workflow", "ci.yml")
+    resources.upsert_resource("iter-gh", "github", "webhook", "hook-1")
+
+    out = resources.reject_resources_bulk(
+        "iter-gh", "github",
+        resource_types=["branch", "workflow", "webhook"],
+        reason="over-granular",
+    )
+    assert out["rejected"] == 3
+    assert out["skipped_cascade"] == []
+
+    remaining = resources.list_resources_for_plane("iter-gh", "github")
+    # list_resources_for_plane doesn't filter rejected; check status
+    pending = [r for r in remaining if r["status"] == "pending"]
+    rejected = [r for r in remaining if r["status"] == "rejected"]
+    assert len(pending) == 1
+    assert pending[0]["resource_type"] == "repo"
+    assert len(rejected) == 3
+
+
+def test_bulk_reject_by_ids(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    a = resources.upsert_resource("iter-gh", "github", "branch", "main")
+    b = resources.upsert_resource("iter-gh", "github", "branch", "dev")
+    c = resources.upsert_resource("iter-gh", "github", "branch", "prod")
+    out = resources.reject_resources_bulk(
+        "iter-gh", "github",
+        resource_ids=[str(a["id"]), str(c["id"])],
+        reason="targeted",
+    )
+    assert out["rejected"] == 2
+    assert set(out["ids"]) == {str(a["id"]), str(c["id"])}
+
+    from shared.db import execute_one
+    bb = execute_one("SELECT status FROM resources WHERE id=%s", (b["id"],))
+    assert bb["status"] == "pending"
+
+
+def test_bulk_reject_cascade_skip(agent_factory):
+    """Rows already assigned to an SME via RCA are skipped."""
+    from shared.db import execute_mutate, execute_one
+    _iterator(agent_factory, "iter-gh", "github")
+    agent_factory("sme-1", "sme")
+    r = resources.upsert_resource("iter-gh", "github", "repo", "dream11/svc")
+
+    execute_mutate(
+        """INSERT INTO components (canonical_name, display_name, component_type)
+           VALUES ('test/svc', 'svc', 'application')"""
+    )
+    comp = execute_one("SELECT id FROM components WHERE canonical_name='test/svc'")
+    execute_mutate(
+        """INSERT INTO resource_component_agents (resource_id, component_id, agent_id)
+           VALUES (%s, %s, %s)""",
+        (r["id"], comp["id"], "sme-1"),
+    )
+
+    out = resources.reject_resources_bulk(
+        "iter-gh", "github", resource_ids=[str(r["id"])], reason="try"
+    )
+    assert out["rejected"] == 0
+    assert out["skipped_cascade"] == [str(r["id"])]
+
+
+def test_bulk_reject_skips_done(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    r = resources.upsert_resource("iter-gh", "github", "branch", "main")
+    from shared.db import execute_mutate
+    execute_mutate("UPDATE resources SET status='done' WHERE id=%s", (r["id"],))
+
+    out = resources.reject_resources_bulk(
+        "iter-gh", "github", resource_ids=[str(r["id"])], reason="try"
+    )
+    assert out["rejected"] == 0
+    assert out["skipped_terminal"] == [str(r["id"])]
+
+
+def test_list_all_resources_excludes_rejected_by_default(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    agent_factory("orch-1", "orchestrator")
+    a = resources.upsert_resource("iter-gh", "github", "repo", "a")
+    resources.upsert_resource("iter-gh", "github", "branch", "b")
+    resources.reject_resources_bulk(
+        "iter-gh", "github", resource_types=["branch"], reason="x"
+    )
+
+    active = resources.list_all_resources("orch-1")
+    assert len(active) == 1
+    assert active[0]["id"] == a["id"]
+
+    rejected = resources.list_all_resources("orch-1", status="rejected")
+    assert len(rejected) == 1
+    assert rejected[0]["resource_type"] == "branch"
 
 
 # ============ mark_resource_done ============
