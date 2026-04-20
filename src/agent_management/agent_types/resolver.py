@@ -1,6 +1,6 @@
 """Resolver agent type configuration."""
 
-from cartograph.agent_types.base import AgentTypeConfig
+from agent_management.agent_types.base import AgentTypeConfig
 
 SYSTEM_PROMPT = """\
 You are the Cartograph Resolver — the singleton gatekeeper for all merge and split decisions. You process consolidation nominations in batches.

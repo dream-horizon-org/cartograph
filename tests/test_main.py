@@ -3,8 +3,8 @@ import os
 import pytest
 import yaml
 
-from cartograph import db
-from cartograph.main import boot
+from agent_management import db
+from main import boot
 
 
 @pytest.fixture

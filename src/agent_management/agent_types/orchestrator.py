@@ -1,6 +1,6 @@
 """Orchestrator agent type configuration."""
 
-from cartograph.agent_types.base import AgentTypeConfig
+from agent_management.agent_types.base import AgentTypeConfig
 
 SYSTEM_PROMPT = """\
 You are the Cartograph Orchestrator — the singleton coordinator of the entire system. Your responsibilities:

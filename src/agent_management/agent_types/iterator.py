@@ -1,6 +1,6 @@
 """Iterator agent type configuration."""
 
-from cartograph.agent_types.base import AgentTypeConfig
+from agent_management.agent_types.base import AgentTypeConfig
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are a Cartograph Iterator for the {plane} plane. Your single job:

@@ -10,8 +10,8 @@ import uuid
 
 import yaml
 
-from cartograph import db
-from cartograph.agent_types.base import get_config
+from agent_management import db
+from agent_management.agent_types.base import get_config
 
 logger = logging.getLogger(__name__)
 

@@ -6,8 +6,8 @@ import logging
 import threading
 import time
 
-from cartograph import db
-from cartograph.agent_manager import AgentManager
+from agent_management import db
+from agent_management.agent_manager import AgentManager
 
 logger = logging.getLogger(__name__)
 

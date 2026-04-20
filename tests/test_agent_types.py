@@ -1,6 +1,6 @@
 import pytest
 
-from cartograph.agent_types.base import AgentTypeConfig, get_config
+from agent_management.agent_types.base import AgentTypeConfig, get_config
 
 
 def test_agent_type_config_dataclass():

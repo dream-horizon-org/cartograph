@@ -7,9 +7,9 @@ import os
 import signal
 import sys
 
-from cartograph import db
-from cartograph.agent_manager import AgentManager
-from cartograph.trigger_manager import TriggerManager
+from agent_management import db
+from agent_management.agent_manager import AgentManager
+from agent_management.trigger_manager import TriggerManager
 
 logger = logging.getLogger(__name__)
 

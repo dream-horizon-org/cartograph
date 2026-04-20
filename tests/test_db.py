@@ -4,7 +4,7 @@ import tempfile
 
 import pytest
 
-from cartograph.db import (
+from agent_management.db import (
     init_db,
     create_agent_run,
     get_agent,

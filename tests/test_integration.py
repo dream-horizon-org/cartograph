@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from cartograph import db
-from cartograph.main import boot
+from agent_management import db
+from main import boot
 
 
 @pytest.fixture
@@ -46,7 +46,7 @@ def test_full_lifecycle(tmp_project):
         return '{"session_id": "session-' + agent_id + '"}'
 
     with patch(
-        "cartograph.agent_manager.AgentManager.invoke_agent", mock_invoke
+        "agent_management.agent_manager.AgentManager.invoke_agent", mock_invoke
     ):
         trigger_mgr = boot(
             db_path=tmp_project["db_path"],

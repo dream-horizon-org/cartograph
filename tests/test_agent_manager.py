@@ -4,8 +4,8 @@ import os
 import pytest
 import yaml
 
-from cartograph import db
-from cartograph.agent_manager import AgentManager
+from agent_management import db
+from agent_management.agent_manager import AgentManager
 
 
 @pytest.fixture

@@ -1,6 +1,6 @@
 """SME agent type configuration."""
 
-from cartograph.agent_types.base import AgentTypeConfig
+from agent_management.agent_types.base import AgentTypeConfig
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are a Cartograph SME (Subject Matter Expert) assigned to resource {resource_id} from the {plane} plane. You are persistent — you live as long as your component exists.
