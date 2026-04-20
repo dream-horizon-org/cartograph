@@ -29,16 +29,16 @@ Cartograph uses four types of AI agents working in phases:
 
 ```
 PHASE 1                    PHASE 2                   PHASE 3                    PHASE 4
-ITERATE                    DISCOVER                  CONSOLIDATE                RESOLVE
+ITERATE                    MATERIALISE               CONSOLIDATE                RESOLVE
 
 ┌──────────────┐          ┌──────────────────┐      ┌────────────────────┐     ┌──────────────┐
 │  Iterators   │          │   SME Agents     │      │   SME Negotiation  │     │   Resolver   │
 │              │          │                  │      │                    │     │              │
-│  One per     │   ──►    │  One per         │ ──►  │  SMEs propose      │ ──► │  Checks      │
-│  data source │          │  resource        │      │  merges/splits     │     │  evidence    │
+│  One per     │   ──►    │  One per         │ ──►  │  SMEs propose      │ ──► │  Approves    │
+│  data source │          │  resource        │      │  merges/splits     │     │  decisions   │
 │              │          │                  │      │                    │     │              │
-│  Just lists  │          │  Deep analysis   │      │  Back-and-forth    │     │  Executes    │
-│  resources   │          │  of each         │      │  with evidence     │     │  decisions   │
+│  Just lists  │          │  Deep analysis   │      │  Back-and-forth    │     │  SMEs        │
+│  resources   │          │  of each         │      │  with evidence     │     │  execute     │
 │              │          │  resource        │      │  and confidence    │     │              │
 └──────────────┘          └──────────────────┘      └────────────────────┘     └──────────────┘
 ```

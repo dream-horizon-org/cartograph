@@ -200,7 +200,7 @@ Why only iterators install: they understand the plane's tooling, they run one-at
 │    8. Loop back to 1                                             │
 │                                                                  │
 │  PRIORITY (invocation count tracks this):                        │
-│    Orchestrator > Resolver > Iterator > SME                      │
+│    Orchestrator > Resolver > SME > Iterator                      │
 │    If multiple agents need waking, higher priority goes first    │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -437,34 +437,33 @@ NEGOTIATION (driven by trigger manager):
   │      │                                                         │
   │      ▼                                                         │
   │  Consolidation table:                                          │
-  │    proposed_by=SME-A, pending_on=SME-B, status=open            │
+  │    proposed_by=SME-A, status=B2 (SME-B's turn)                 │
   │      │                                                         │
   │      ▼                                                         │
-  │  Trigger manager wakes SME-B (idle + has pending nomination)   │
+  │  Trigger manager wakes SME-B (idle + status=B2)                │
   │      │                                                         │
   │      ▼                                                         │
   │  SME-B investigates:                                           │
   │    grep, DB queries, vector search, check attributions         │
-  │    updates own confidence + appends chat                       │
-  │    flips pending_on = SME-A                                    │
+  │    updates own confidence + appends communication              │
+  │    sets status = B1 (flips to SME-A's turn)                    │
   │    yields                                                      │
   │      │                                                         │
   │      ▼                                                         │
-  │  Trigger manager wakes SME-A (idle + pending_on = SME-A)       │
+  │  Trigger manager wakes SME-A (idle + status=B1)                │
   │      │                                                         │
   │      ▼                                                         │
   │  SME-A reads response, investigates further                    │
-  │    updates own confidence + appends chat                       │
-  │    flips pending_on = SME-B                                    │
+  │    updates own confidence + appends communication              │
+  │    sets status = B2 (flips to SME-B's turn)                    │
   │    yields                                                      │
   │      │                                                         │
   │      ▼                                                         │
-  │  ... back and forth until both confidence scores breach        │
-  │      threshold (up for merge, down for reject)                 │
+  │  ... back and forth (B1↔B2) until both confidence scores       │
+  │      breach threshold → system auto-transitions to R           │
   │      │                                                         │
   │      ▼                                                         │
-  │  TRIGGER MANAGER: both scores > merge threshold                │
-  │    → wake RESOLVER                                             │
+  │  TRIGGER MANAGER: status=R → wake RESOLVER                     │
   │                                                                │
   └────────────────────────────────────────────────────────────────┘
 
@@ -474,30 +473,25 @@ RESOLVER (batch processing):
   Resolver wakes up
       │
       ├── Scans consolidation table for all actionable rows:
-      │   • Both scores > merge threshold → ready for merge review
-      │   • Both scores < reject threshold → ready for rejection
-      │   • Self-nominated split → ready for split review
+      │   • status = R → ready for review
+      │   • status = MD → ready for completion verification
       │
       ├── Processes batch:
       │   │
-      │   ├── Merge candidate:
-      │   │     Read conversation, verify evidence claims
+      │   ├── Merge/split candidate (status=R):
+      │   │     Read conversation thread, verify evidence claims
       │   │     Basic sanity: shared hostname? same runtime?
       │   │     Any glaring contradictions?
-      │   │     ├── OK → grant merge (status = 'approved_merge')
-      │   │     └── Issue → inject own concern into chat,
-      │   │               add own confidence, continue conversation
-      │   │               (only if something very basic/major is off)
+      │   │     ├── OK → status=M, set mutation_assigned_to
+      │   │     │         (merge: agent with more planes)
+      │   │     │         (split: always agent_a)
+      │   │     ├── Issue → set r_conf_score, send back to B1 or B2
+      │   │     │           (only if something very basic/major is off)
+      │   │     └── Clearly wrong → status=F (rejected)
       │   │
-      │   ├── Reject candidate:
-      │   │     Verify agents genuinely disagree
-      │   │     → status = 'rejected'
-      │   │
-      │   └── Split candidate:
-      │         Verify: different entry points? deploy configs? runtimes?
-      │         Check consistency with SME's other nominations
-      │         ├── OK → grant split (status = 'approved_split')
-      │         └── Issue → ask SME for clarification
+      │   └── Mutation complete (status=MD):
+      │         Verify mutation was executed correctly
+      │         → status=D (done)
       │
       ├── Yields control → status = idle
       │
@@ -506,61 +500,62 @@ RESOLVER (batch processing):
 
 ### 4.4 Mutation Phase
 
-Mutations are executed by SMEs, not the resolver. Resolver grants permission, SMEs do the work.
+Mutations are executed by SMEs (the mutation_assigned_to agent), not the resolver. Resolver grants permission, SMEs do the work.
 
 ```
-MERGE EXECUTION:
+MERGE EXECUTION (consolidation status = M):
 
-  Consolidation row: status = 'approved_merge'
-  Agent-A has 3 planes of attribution, Agent-B has 1 plane
+  Trigger manager wakes mutation_assigned_to agent (agent with more planes)
       │
-      ▼
-  Trigger manager wakes Agent-A (higher plane count = absorber)
+      ├── Read target's component + attributions (understand what you're absorbing)
+      ├── Call absorb_agent() → creates proxy entries for target's pending
+      │     items (tasks, chats, broadcasts, consolidations), decommissions target
+      ├── Read proxy items + target's chat history (understand context)
       │
-      ├── Read Agent-B's component + all attributions
-      ├── Absorb into own component:
-      │     • Re-point B's attributions → A's component
-      │     • Re-point B's edges → A's component
-      │     • Merge metadata (A wins on conflicts)
-      │     • Re-embed component with merged data
+      ├── Transfer target's attributions → own component
+      ├── Re-point target's edges → own component
+      ├── Re-point resource_component_agents rows → own agent + component
+      ├── Decommission target's component (status = 'decommissioned')
+      ├── Re-embed own component with merged metadata
       │
-      ├── Decommission Agent-B's component (status = 'decommissioned')
-      ├── Decommission Agent-B (status = 'decommissioned' in agent_runs)
+      ├── Triage inherited proxy items with understanding:
+      │     • Tasks: close if irrelevant, or reopen under own agent_id
+      │     • Chats: respond to pending admin messages
+      │     • Broadcasts: ack inherited unacked broadcasts
+      │     • Consolidations: continue as yourself or close
       │
-      ├── Update consolidation: status = 'merged'
+      ├── execute_mutation() → status = MD
       └── Yield
 
 
-SPLIT EXECUTION:
+SPLIT EXECUTION (consolidation status = M):
 
-  Consolidation row: status = 'approved_split'
-  SME-parent owns component with 3 deploy artifacts
+  Trigger manager wakes mutation_assigned_to agent (always agent_a / self-nominator)
       │
-      ▼
-  Trigger manager wakes SME-parent
+      ├── Call spawn_child_agent(consolidation_id, component_data, briefing)
+      │     • Creates ONE new agent + ONE new component
+      │     • Sets component.split_from_component_id to parent component
+      │     • Sets component.split_briefing with context
+      │     • Sets consolidation.child_agent_id (prevents duplicate spawns)
+      │     • One spawn per consolidation nomination
       │
-      ├── Create new component(s) for the split-off parts
-      │     e.g., component-admin, component-cron
+      ├── transfer_attributions() → move relevant attributions to child
+      ├── Re-point relevant edges to child component
+      ├── Add row to resource_component_agents for child
+      ├── Re-embed both components
       │
-      ├── Redistribute attributions:
-      │     • Attributions belonging to admin → move to component-admin
-      │     • Attributions belonging to cron → move to component-cron
-      │     • Remaining attributions stay on parent's component
+      ├── Triage own communications:
+      │     close items that belong to child, nudge stakeholders to reopen
+      │     with the new agent
       │
-      ├── Write briefing docs for new components
-      │     (what they are, what was discovered, what's pending)
-      │
-      ├── Create new agents in agent_runs for each new component
-      │     (trigger manager will auto-invoke them)
-      │
-      ├── Update own component (trimmed — only its own attributions remain)
-      ├── Re-embed all affected components
-      │
-      ├── Update consolidation: status = 'split'
-      └── Yield → parent continues as SME for its trimmed component
+      ├── execute_mutation() → status = MD
+      └── Yield → parent continues with trimmed component
 
-  New SMEs are auto-invoked by trigger manager
-  (new entry in agent_runs with status = 'pending')
+  If MORE components to split: nominate another split in a NEW consolidation
+  entry AFTER this one completes. One child per split.
+
+  Child agent auto-invoked by trigger manager — reads split_briefing to
+  understand its origin and what it owns.
 ```
 
 ### 4.5 Resolution Phase
@@ -790,148 +785,101 @@ Orchestrator's job across ALL phases: identify blockers that are common, broadca
 ### 8.1 Table Map
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    POSTGRESQL + pgvector                       │
-│                                                              │
-│  COMPONENT GRAPH         AGENT INFRA        COMMUNICATION    │
-│  ────────────────        ──────────────     ──────────────   │
-│  components              agent_runs         communications   │
-│  attributions            resources          clarifications   │
-│  edges                   tasks                               │
-│  unresolved              secrets                             │
-│                                                              │
-│  CONSOLIDATION                                               │
-│  ─────────────                                               │
-│  consolidations                                              │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                      POSTGRESQL + pgvector                        │
+│                                                                  │
+│  COMPONENT GRAPH         RELATIONS              AGENT INFRA      │
+│  ────────────────        ─────────              ──────────────   │
+│  components              resource_component_    agent_runs        │
+│  attributions              agents              resources          │
+│  edges                                         tasks              │
+│  unresolved                                    secrets            │
+│                                                                  │
+│  CONSOLIDATION           COMMUNICATION          MUTATION          │
+│  ─────────────           ──────────────         ────────         │
+│  consolidations          communications         proxy_items      │
+│                          clarifications                          │
+│                          broadcast_acks                           │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### 8.2 Schemas
+
+See SCHEMA.md for full CREATE TABLE statements with constraints and indexes.
+Below is a summary for quick reference.
 
 **Component Graph:**
 
 ```
 components
-  id              UUID PK
-  canonical_name  TEXT UNIQUE
-  display_name    TEXT
-  component_type  TEXT (application|database|cache|queue|lambda|
-                       cron|external-service|library|infrastructure)
-  status          TEXT (active|deprecated|decommissioned)
-  confidence      FLOAT
-  metadata        JSONB
-  embedding       vector(1536)
-  owned_by_agent  TEXT → agent_runs.agent_id
-  scanned_at      TIMESTAMPTZ
-  created_at      TIMESTAMPTZ
-  updated_at      TIMESTAMPTZ
+  id, canonical_name (UNIQUE), display_name, component_type, status,
+  confidence, metadata (JSONB), embedding (vector), split_from_component_id,
+  split_briefing, scanned_at, created_at, updated_at
 
 attributions
-  id              UUID PK
-  component_id    UUID FK → components
-  plane           TEXT
-  resource_type   TEXT      (key — repeatable: many "endpoint" rows per component)
-  identifier      TEXT      (value)
-  evidence        TEXT
-  confidence      FLOAT
-  metadata        JSONB
-  embedding       vector(1536)
-  discovered_by   TEXT → agent_runs.agent_id
-  discovered_at   TIMESTAMPTZ
-  last_seen_at    TIMESTAMPTZ
+  id, component_id (FK), plane, resource_type, identifier, evidence,
+  confidence, metadata (JSONB), embedding (vector), discovered_by,
+  discovered_at, last_seen_at
   UNIQUE(plane, resource_type, identifier)
 
 edges
-  id              UUID PK
-  source_id       UUID FK → components
-  target_id       UUID FK → components
-  edge_type       TEXT (calls|reads_from|writes_to|triggers|
-                       publishes_to|consumes_from|runs_on)
-  evidence        JSONB
-  confidence      FLOAT
-  metadata        JSONB
-  discovered_by   TEXT
-  created_at      TIMESTAMPTZ
-  last_seen_at    TIMESTAMPTZ
-  UNIQUE(source_id, target_id, edge_type)
+  id, source_id (FK), target_id (FK), edge_type, identifier,
+  source_attr_id (FK → attributions), target_attr_id (FK → attributions),
+  evidence (JSONB), confidence, metadata (JSONB), embedding (vector),
+  discovered_by, created_at, last_seen_at
+  UNIQUE(source_id, target_id, edge_type, identifier)
 
 unresolved
-  id                       UUID PK
-  found_in_component_id    UUID FK → components
-  reference_type           TEXT
-  reference_value          TEXT
-  context                  JSONB
-  embedding                vector(1536)
-  resolved                 BOOLEAN
-  resolved_to_component_id UUID FK → components
-  found_by_agent           TEXT
-  attempts                 INT
-  created_at               TIMESTAMPTZ
+  id, found_in_component_id (FK), reference_type, reference_value,
+  context (JSONB), embedding (vector), resolved, resolved_to_component_id (FK),
+  found_by_agent, attempts, created_at
+```
+
+**Relations:**
+
+```
+resource_component_agents
+  resource_id (FK → resources), component_id (FK → components),
+  agent_id (FK → agent_runs), created_at
+  PRIMARY KEY(resource_id, component_id)
+
+  Single source of truth for resource → component → agent relationship.
+  Replaces: components.owned_by_agent, agent_runs.resource_ids[],
+            agent_runs.planes[], resources.assigned_to
 ```
 
 **Consolidation:**
 
 ```
 consolidations
-  id              UUID PK
-  proposed_by     TEXT → agent_runs.agent_id
-  agent_a_id      TEXT
-  agent_b_id      TEXT
-  component_a_id  UUID FK → components
-  component_b_id  UUID FK → components
-  nomination_type TEXT (merge|split)
-  a_conf_score    FLOAT
-  b_conf_score    FLOAT
-  pending_on      TEXT → agent_runs.agent_id (whose turn)
-  status          TEXT (open|approved_merge|approved_split|merged|split|rejected)
-  resolved_by     TEXT
-  created_at      TIMESTAMPTZ
-  updated_at      TIMESTAMPTZ
-  resolved_at     TIMESTAMPTZ
+  id, proposed_by, agent_a_id, agent_b_id, component_a_id (FK),
+  component_b_id (FK), nomination_type (merge|split),
+  a_conf_score, b_conf_score, r_conf_score,
+  status (B1|B2|R|M|MD|D|F) — initial state = B2,
+  mutation_assigned_to, child_agent_id, resolved_by,
+  created_at, updated_at, resolved_at
 ```
 
 **Agent Infrastructure:**
 
 ```
 agent_runs
-  agent_id        TEXT PK
-  agent_type      TEXT (orchestrator|iterator|sme|resolver)
-  session_id      TEXT
-  resource_id     TEXT → resources.id
-  plane           TEXT
-  status          TEXT (pending|invoking|running|idle|done|errored|decommissioned)
-  phase           TEXT
-  heartbeat       TIMESTAMPTZ
-  invocation_count INT (for trigger priority)
-  created_at      TIMESTAMPTZ
-  updated_at      TIMESTAMPTZ
+  agent_id (PK), agent_type (orchestrator|iterator|sme|resolver),
+  session_id, status (pending|invoking|running|idle|done|errored|decommissioned),
+  phase, heartbeat, invocation_count, error_msg, created_at, updated_at
 
 resources
-  id              UUID PK
-  plane           TEXT
-  resource_type   TEXT
-  identifier      TEXT
-  access_desc     TEXT (how to access — e.g., "clone via SSH", "describe-asg")
-  metadata        JSONB
-  assigned_to     TEXT → agent_runs.agent_id
-  status          TEXT (pending|assigned|done)
-  created_at      TIMESTAMPTZ
+  id, plane, resource_type, identifier, access_desc, metadata (JSONB),
+  status (pending|assigned|done), created_at
   UNIQUE(plane, resource_type, identifier)
 
 tasks
-  id              UUID PK
-  agent_id        TEXT → agent_runs.agent_id
-  description     TEXT
-  status          TEXT (pending|in_progress|done|blocked)
-  created_at      TIMESTAMPTZ
-  updated_at      TIMESTAMPTZ
+  id, owner_agent_id, worker_agent_id (FK), description,
+  status (BW|BO|WD|TC) — initial state = BW,
+  blocker_detail, created_at, updated_at
 
 secrets
-  id              UUID PK
-  plane           TEXT
-  key             TEXT
-  value           TEXT (encrypted)
-  created_at      TIMESTAMPTZ
+  id, plane, key, value (encrypted), created_at, updated_at
   UNIQUE(plane, key)
 ```
 
@@ -939,25 +887,21 @@ secrets
 
 ```
 communications
-  id              UUID PK
-  text            TEXT
-  from_agent      TEXT
-  to_agent        TEXT
-  type            TEXT (consolidation|task|clarification|broadcast)
-  source_id       UUID
-  metadata        JSONB
-  created_at      TIMESTAMPTZ
+  id, from_agent, to_agent, type (consolidation|task|clarification|
+  broadcast|chat), source_id, text, metadata (JSONB), acked_at, created_at
 
 clarifications
-  id              UUID PK
-  from_agent      TEXT
-  status          TEXT (open|answered|dismissed)
-  created_at      TIMESTAMPTZ
-  answered_at     TIMESTAMPTZ
+  id, asker_agent_id, responder_agent_id,
+  status (B1|B2|QR|QC|CC) — initial state = B2,
+  created_at, updated_at
 
-  Note: clarification question text, answers, and back-and-forth
-  all flow through the communications table with type='clarification'
-  and source_id pointing here. This table only holds status metadata.
+broadcast_acks
+  communication_id (FK), agent_id (FK), acked_at
+  PRIMARY KEY(communication_id, agent_id)
+
+proxy_items
+  id, surviving_agent_id (FK), decommissioned_agent_id, item_type,
+  item_id, status (pending|adopted|closed), created_at, resolved_at
 ```
 
 ### 8.3 Embedding Strategy
@@ -966,9 +910,10 @@ Embeddings generated at write time via `cartograph-db` MCP. No batch step.
 
 | Table | What's embedded | Purpose |
 |-------|----------------|---------|
-| components | `"{type}: {name} {display_name} {metadata}"` | Fuzzy matching during consolidation |
+| components | `"{type}: {canonical_name} {display_name} {metadata}"` | Fuzzy matching during consolidation |
 | attributions | `"{resource_type}: {identifier}"` | Fuzzy resource lookup across planes |
 | unresolved | `"{reference_type}: {reference_value}"` | Match dangling refs to components |
+| edges | `"{edge_type}: {identifier}"` | Fuzzy match calls across components |
 
 Lookup protocol: exact match first → vector fallback (>0.85 match, 0.7-0.85 hint, <0.7 create new).
 

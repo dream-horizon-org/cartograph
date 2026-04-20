@@ -352,8 +352,9 @@ Reject threshold: both agents < 0.3 → auto-reject
     - absorb_agent(agent_id, target_agent_id) → MERGE: re-point all of
         target's items (tasks, chats, broadcasts, consolidations) to you via
         proxy table. Decommission target agent.
-    - spawn_child_agent(parent_agent_id, component_data, briefing) → SPLIT:
-        create new agent + component for the split-off part.
+    - spawn_child_agent(parent_agent_id, consolidation_id, component_data, briefing)
+        → SPLIT: create new agent + component for the split-off part.
+        One spawn per consolidation nomination (gated by child_agent_id).
     - transfer_attributions(from_component_id, to_component_id, attribution_ids[])
         → move specific attributions during split.
     - get_proxy_items(agent_id) → read items inherited from absorbed agents.
@@ -659,9 +660,9 @@ The system prompt is injected via:
 
 Template variables filled at invoke time:
   {agent_id}           → from agent_runs table
-  {component_ids}      → from components table WHERE owned_by_agent = agent_id
-  {resource_identifier} → from resources table via agent's resource_ids
-  {plane}              → derived from resource
+  {component_ids}      → from resource_component_agents WHERE agent_id = ?
+  {resource_identifier} → from resource_component_agents JOIN resources
+  {plane}              → from resource_component_agents JOIN resources → plane
   {plane-specific tools} → based on plane, from MCP config
 ```
 

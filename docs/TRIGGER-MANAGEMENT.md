@@ -314,7 +314,7 @@ trigger_scan_tasks(agent_id)
   → Returns task rows where this agent should act
   │
   │  Logic:
-  │    WHERE (worker_agent_id = agent_id AND status IN ('P', 'BW'))
+  │    WHERE (worker_agent_id = agent_id AND status = 'BW')
   │       OR (owner_agent_id = agent_id AND status IN ('BO', 'WD'))
 
 trigger_scan_clarifications(agent_id)
@@ -542,7 +542,7 @@ ack_broadcast(agent_id, communication_id)
 ```
 upsert_component(agent_id, component_data)
   Create or update a component.
-  Validates: agent_id = component.owned_by_agent (or new component).
+  Validates: agent_id owns this component via resource_component_agents (or new component).
   Auto-embeds at write time.
 
 upsert_attribution(agent_id, component_id, attribution_data)
@@ -655,7 +655,7 @@ TASK-SPECIFIC:
 CHAT-SPECIFIC:
   - Agents can initially only message admin
   - Admin can message any agent
-  - Ack is bulk (all pending chats at once)
+  - Ack is selective by message IDs (agent chooses which to ack)
 
 BROADCAST-SPECIFIC:
   - Only orchestrator/admin can broadcast
