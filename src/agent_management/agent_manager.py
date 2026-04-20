@@ -22,14 +22,20 @@ _TYPE_PREFIXES = {
     "resolver": "res",
 }
 
-_GENERIC_INVOCATION_PROMPT = """You have been woken up because you have pending action items.
+_GENERIC_INVOCATION_PROMPT_TEMPLATE = """You have been woken up because you have pending action items.
+
+YOUR agent_id is: {agent_id}
+YOUR agent_type is: {agent_type}
+
+Always pass this exact agent_id to every tool call. Never invent, abbreviate, or modify it.
+For example: get_action_items_summary(agent_id="{agent_id}")
 
 Action items may be arriving concurrently — always use your tools to get the latest state, don't rely on stale information.
 
 Your workflow:
-1. Call get_action_items_summary() to see current counts
-2. Call get_action_items_detail() for full details on items you want to address
-3. Address each item using your act tools
+1. Call get_action_items_summary(agent_id="{agent_id}") to see current counts
+2. Call get_action_items_detail(agent_id="{agent_id}") for full details on items you want to address
+3. Address each item using your act tools (always passing agent_id="{agent_id}")
 4. You MUST change state on every response — no empty replies
 5. Work on as many items as you can handle, then yield control
 6. You will be woken again if more items arrive
@@ -109,7 +115,10 @@ class AgentManager:
             return ""
 
         if prompt is None:
-            prompt = _GENERIC_INVOCATION_PROMPT
+            prompt = _GENERIC_INVOCATION_PROMPT_TEMPLATE.format(
+                agent_id=agent_id,
+                agent_type=agent["agent_type"],
+            )
 
         config = get_config(
             agent["agent_type"],

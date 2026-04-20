@@ -1,12 +1,29 @@
 """Chat tools — send_chat, ack_chats, get_unacked_chats, get_chat_history."""
 
-from shared.db import execute, execute_returning, execute_mutate
+from shared.db import execute, execute_one, execute_returning, execute_mutate
 
 
 def send_chat(from_agent_id: str, to_agent_id: str, message: str) -> dict:
-    """Send a chat message. Agents can only message 'admin'; admin can message any agent."""
+    """Send a chat message. Agents can only message 'admin'; admin can message any agent.
+
+    Validates that from_agent_id is a real agent (or 'admin') to prevent
+    agents from impersonating or hallucinating their own ID.
+    """
     if from_agent_id != "admin" and to_agent_id != "admin":
         raise ValueError("Agents can only chat with admin. Use consolidation/clarification for agent-to-agent.")
+
+    # Validate from_agent_id is a real registered agent (or literal 'admin')
+    if from_agent_id != "admin":
+        row = execute_one(
+            "SELECT 1 FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
+            (from_agent_id,),
+        )
+        if row is None:
+            raise ValueError(
+                f"from_agent_id='{from_agent_id}' is not a registered agent. "
+                "Use your actual agent_id as shown in the invocation prompt. "
+                "Never invent or abbreviate your agent_id."
+            )
 
     row = execute_returning(
         """INSERT INTO communications (from_agent, to_agent, type, text)
