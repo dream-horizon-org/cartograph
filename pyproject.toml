@@ -2,7 +2,7 @@
 name = "cartograph"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["pyyaml"]
+dependencies = ["pyyaml", "psycopg[binary]>=3.1", "psycopg-pool>=3.1"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
