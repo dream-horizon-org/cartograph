@@ -1,4 +1,12 @@
-"""Cartograph Agent Runtime — entry point."""
+"""Cartograph Agent Manager — entry point.
+
+Boots the agent-management-side services:
+- Creates singleton orchestrator + resolver agents if they don't exist
+- Starts the invoke loop (polls for locked agents, invokes them)
+
+The trigger manager (scanning + locking) runs separately in
+src/trigger_management/main.py. Same DB, different process.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +17,7 @@ import sys
 
 from agent_management import db
 from agent_management.agent_manager import AgentManager
-from agent_management.trigger_manager import TriggerManager
+from agent_management.invoke_loop import InvokeLoop
 from shared.db import init_pool
 from shared.migrations import run_migrations
 
@@ -24,10 +32,10 @@ _DEFAULT_MCP_CONFIG = os.path.join(
 def boot(
     workspace_root: str = _DEFAULT_WORKSPACE_ROOT,
     mcp_config_path: str = _DEFAULT_MCP_CONFIG,
-    start_trigger_manager: bool = True,
+    start_invoke_loop: bool = True,
     poll_interval: float = 2.0,
     heartbeat_timeout: int = 300,
-) -> TriggerManager:
+) -> InvokeLoop:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -51,25 +59,25 @@ def boot(
         manager.create_agent("resolver")
         logger.info("Created resolver agent")
 
-    trigger_mgr = TriggerManager(
+    invoke_loop = InvokeLoop(
         agent_manager=manager,
         poll_interval=poll_interval,
         heartbeat_timeout=heartbeat_timeout,
     )
 
-    if start_trigger_manager:
-        trigger_mgr.start()
-        logger.info("Cartograph Agent Runtime is running")
+    if start_invoke_loop:
+        invoke_loop.start()
+        logger.info("Cartograph Agent Manager is running")
 
-    return trigger_mgr
+    return invoke_loop
 
 
 def main() -> None:
-    trigger_mgr = boot()
+    invoke_loop = boot()
 
     def handle_shutdown(signum, frame):
         logger.info("Shutting down...")
-        trigger_mgr.stop()
+        invoke_loop.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_shutdown)

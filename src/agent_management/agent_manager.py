@@ -166,20 +166,6 @@ class AgentManager:
         with open(path, "w") as f:
             json.dump(mcp_json, f, indent=2)
 
-    def _initial_prompt(
-        self, agent_type: str, plane: str | None, resource_id: str | None
-    ) -> str:
-        if agent_type == "orchestrator":
-            return "System boot. You are the orchestrator. Review the current state of agent_runs and begin coordination."
-        elif agent_type == "iterator":
-            return f"Begin iteration for the {plane} plane. List all accessible resources and insert them into the resources table."
-        elif agent_type == "sme":
-            return f"You have been assigned resource {resource_id} from the {plane} plane. Begin materialisation — analyze the resource and build components."
-        elif agent_type == "resolver":
-            return "System boot. You are the resolver. Wait for consolidation nominations to process."
-        else:
-            return "Begin work."
-
     def _extract_session_id(self, output: str) -> str | None:
         try:
             data = json.loads(output)

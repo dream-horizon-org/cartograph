@@ -1,7 +1,7 @@
-"""Agent Manager Poller — polls for locked agents and invokes them.
+"""Invoke Loop — polls for locked agents and invokes them.
 
-This is the agent-management-side loop. It is NOT the trigger manager
-(which lives in src/trigger_management/ and handles scanning + locking).
+This is the agent-management-side loop. Separate from the trigger manager
+(src/trigger_management/) which scans tables and sets locks.
 
 Flow:
   1. Poll agent_runs WHERE trigger_lock = TRUE (ordered by priority)
@@ -10,8 +10,6 @@ Flow:
      - Invoke with generic prompt
      - On yield: set status = 'idle'
   3. Handle stale 'running' agents (heartbeat timeout)
-
-Kept name TriggerManager for backwards compatibility with existing tests/main.
 """
 
 from __future__ import annotations
@@ -26,8 +24,8 @@ from agent_management.agent_manager import AgentManager
 logger = logging.getLogger(__name__)
 
 
-class TriggerManager:
-    """Agent manager poller — picks up locked agents and invokes them."""
+class InvokeLoop:
+    """Polls locked agents from agent_runs and invokes them via AgentManager."""
 
     def __init__(
         self,
@@ -46,7 +44,7 @@ class TriggerManager:
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         logger.info(
-            "Agent manager poller started (poll_interval=%.1fs)",
+            "Invoke loop started (poll_interval=%.1fs)",
             self.poll_interval,
         )
 
@@ -54,7 +52,7 @@ class TriggerManager:
         self.running = False
         if self._thread is not None:
             self._thread.join(timeout=self.poll_interval * 2)
-        logger.info("Agent manager poller stopped")
+        logger.info("Invoke loop stopped")
 
     def _loop(self) -> None:
         while self.running:
@@ -62,7 +60,7 @@ class TriggerManager:
                 self._handle_stale_agents()
                 self._process_locked_agents()
             except Exception:
-                logger.exception("Error in agent manager poller loop")
+                logger.exception("Error in invoke loop")
             time.sleep(self.poll_interval)
 
     def _handle_stale_agents(self) -> None:
