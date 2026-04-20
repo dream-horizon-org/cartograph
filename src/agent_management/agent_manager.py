@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import subprocess
+import threading
+import time
 import uuid
 
 import yaml
@@ -160,6 +162,19 @@ class AgentManager:
             agent["session_id"] or "<new>",
         )
 
+        # Background thread to keep the heartbeat fresh while subprocess runs.
+        heartbeat_stop = threading.Event()
+
+        def _heartbeat_keeper():
+            while not heartbeat_stop.wait(10):  # every 10s
+                try:
+                    db.update_agent_heartbeat(agent_id)
+                except Exception:
+                    logger.exception("Heartbeat update failed for %s", agent_id)
+
+        hb_thread = threading.Thread(target=_heartbeat_keeper, daemon=True)
+        hb_thread.start()
+
         try:
             # Run claude in the agent's workspace (cwd) so .mcp.json is loaded
             result = subprocess.run(
@@ -215,6 +230,9 @@ class AgentManager:
             )
             db.update_agent_status(agent_id, "errored")
             return str(e)
+        finally:
+            # Stop heartbeat keeper regardless of outcome
+            heartbeat_stop.set()
 
     def deactivate_agent(self, agent_id: str) -> None:
         db.update_agent_status(agent_id, "decommissioned")

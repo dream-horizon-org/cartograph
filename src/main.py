@@ -46,6 +46,18 @@ def boot(
 
     os.makedirs(workspace_root, exist_ok=True)
 
+    # On startup, reset any leftover 'running' or 'errored' agents to 'idle'.
+    # They got stuck because the previous agent manager was killed mid-subprocess.
+    # New invocations via trigger_lock will restart them cleanly.
+    from shared.db import execute_mutate
+    reset = execute_mutate(
+        """UPDATE agent_runs
+           SET status = 'idle', trigger_lock = FALSE
+           WHERE status IN ('running', 'errored')"""
+    )
+    if reset > 0:
+        logger.info("Reset %d running/errored agents to idle on startup", reset)
+
     manager = AgentManager(
         workspace_root=workspace_root,
         mcp_config_path=mcp_config_path,
