@@ -688,7 +688,7 @@ communications
   ├── text       TEXT (the message)
   ├── from       TEXT (agent_id or "admin")
   ├── to         TEXT (agent_id, agent_type for broadcast, or "admin")
-  ├── type       TEXT (consolidation | task | clarification | broadcast)
+  ├── type       TEXT (consolidation | task | clarification | broadcast | chat)
   ├── source_id  UUID (FK to consolidations | tasks | clarifications)
   ├── created_at TIMESTAMPTZ
   └── metadata   JSONB
@@ -705,7 +705,7 @@ CONSOLIDATION
   SME-A ←→ SME-B negotiation
   source_id → consolidations.id
   All back-and-forth with evidence and confidence flows here.
-  Consolidation table holds state (scores, status, pending_on).
+  Consolidation table holds state (scores, status B1/B2/R/M/MD/D/F).
   Communication table holds the conversation.
 
 TASK
@@ -755,7 +755,7 @@ System prompt rule:
 ```
 ANY AGENT encounters a blocker:
     │
-    ├── Create task (status = blocked, description = what's needed)
+    ├── raise_blocker() → sets task status = BO, notifies owner
     ├── Send communication to orchestrator
     └── Yield → status = idle
     │
@@ -962,9 +962,9 @@ MONITORING (future):
   ├── Agent status dashboard    — agent_runs table (running/idle/errored counts)
   ├── Token usage per agent     — logged from SDK yield stream
   ├── Phase progress            — timestamps on status transitions
-  ├── Consolidation progress    — open/approved/merged/rejected/split counts
+  ├── Consolidation progress    — B1/B2/R/M/MD/D/F counts
   ├── Unresolved count          — WHERE resolved = FALSE
-  ├── Blocker count             — tasks WHERE status = 'blocked'
+  ├── Blocker count             — tasks WHERE status = 'BO'
   └── Communication volume      — row counts per type
 
 COST CONTROLS (future):
