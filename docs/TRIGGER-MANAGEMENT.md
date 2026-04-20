@@ -565,6 +565,36 @@ raise_blocker(agent_id, task_id, blocker_detail)
   Shortcut: sets task status to BO + sends communication to owner.
 ```
 
+**Mutation acts (only available when agent is mutation_assigned_to on consolidation in state M):**
+
+```
+absorb_agent(agent_id, target_agent_id)
+  MERGE: re-point all of target's pending items to agent via proxy table.
+  Creates proxy_items entries for target's tasks, chats, broadcasts, consolidations.
+  Decommissions target agent (status = 'decommissioned').
+  Validates: agent is mutation_assigned_to on an active consolidation in state M.
+
+spawn_child_agent(parent_agent_id, component_data, briefing)
+  SPLIT: create new agent + new component.
+  Briefing doc explains what the child component is and its attributions.
+  Registers new agent in agent_runs (trigger manager will auto-invoke).
+  Validates: agent is mutation_assigned_to on an active consolidation in state M.
+
+transfer_attributions(from_component_id, to_component_id, attribution_ids[])
+  Move specific attributions from one component to another.
+  Used during both merge (move target's attrs to survivor) and split
+  (move split-off attrs to child component).
+  Auto-re-embeds both components after transfer.
+
+get_proxy_items(agent_id)
+  Read all items inherited from absorbed agents via proxy routing.
+  Returns tasks, chats, broadcasts, consolidations that were proxied.
+
+get_proxy_chats(agent_id, proxy_agent_id, page, limit)
+  Read paginated chat history of an absorbed agent.
+  Used for context when handling inherited items.
+```
+
 ---
 
 ## 4. Prompt Construction

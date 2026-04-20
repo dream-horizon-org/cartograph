@@ -404,6 +404,33 @@ CREATE INDEX idx_clar_asker ON clarifications(asker_agent_id) WHERE status IN ('
 CREATE INDEX idx_clar_responder ON clarifications(responder_agent_id) WHERE status = 'B2';
 ```
 
+### `proxy_items`
+
+Routes decommissioned agent's pending items to the surviving agent after a merge. The surviving agent triages these: close permanently or reopen under its own name.
+
+```sql
+CREATE TABLE proxy_items (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    surviving_agent_id  TEXT NOT NULL REFERENCES agent_runs(agent_id),
+    decommissioned_agent_id TEXT NOT NULL,        -- the absorbed agent
+    item_type           TEXT NOT NULL CHECK (item_type IN (
+                            'task', 'consolidation', 'clarification',
+                            'chat', 'broadcast'
+                        )),
+    item_id             UUID NOT NULL,            -- FK to the source table row
+    status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+                            'pending',             -- not yet triaged by surviving agent
+                            'adopted',             -- reopened under surviving agent's name
+                            'closed'               -- permanently closed
+                        )),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at         TIMESTAMPTZ
+);
+
+CREATE INDEX idx_proxy_surviving ON proxy_items(surviving_agent_id) WHERE status = 'pending';
+CREATE INDEX idx_proxy_decom ON proxy_items(decommissioned_agent_id);
+```
+
 ---
 
 ## Embedding Strategy
@@ -442,5 +469,6 @@ Model: `text-embedding-3-small` (1536 dims). All in pgvector.
 | communications | done   |
 | clarifications | done   |
 | broadcast_acks | done   |
+| proxy_items    | done   |
 
 
