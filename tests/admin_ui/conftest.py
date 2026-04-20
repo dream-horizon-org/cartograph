@@ -1,16 +1,31 @@
-"""Shared test fixtures for admin_ui tests."""
+"""Shared test fixtures for admin_ui tests.
 
+CRITICAL SAFETY: forces tests to use a separate 'cartograph_test' database.
+Without this, tests DELETE production data.
+"""
+
+import os
 import pytest
 from fastapi.testclient import TestClient
 
+# Force test DB — MUST be set BEFORE importing shared.db
+os.environ["CARTOGRAPH_DB_NAME"] = "cartograph_test"
+
 from shared.db import init_pool, close_pool, execute_mutate
 from shared.migrations import run_migrations
+from shared import config
 from admin_ui.server import create_app
 
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_db():
     """Initialize the DB pool and run migrations once per test session."""
+    if config.DB_NAME == "cartograph":
+        raise RuntimeError(
+            "Tests refused to run against the 'cartograph' database — "
+            "set CARTOGRAPH_DB_NAME=cartograph_test. "
+            "See tests/admin_ui/conftest.py."
+        )
     init_pool()
     run_migrations()
     yield
@@ -19,7 +34,8 @@ def setup_db():
 
 @pytest.fixture(autouse=True)
 def clean_tables():
-    """Clean test data before each test."""
+    """Clean test data before each test (test DB only)."""
+    assert config.DB_NAME != "cartograph", "Refusing to wipe dev DB"
     execute_mutate("DELETE FROM broadcast_acks")
     execute_mutate("DELETE FROM communications")
     execute_mutate("DELETE FROM agent_runs")

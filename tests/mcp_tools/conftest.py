@@ -1,13 +1,30 @@
-"""Shared test fixtures for MCP tool tests."""
+"""Shared test fixtures for MCP tool tests.
 
+CRITICAL SAFETY: forces tests to use a separate 'cartograph_test' database.
+Without this, tests DELETE production data. The setup_db fixture refuses
+to run if the configured DB name is 'cartograph' (the dev DB).
+"""
+
+import os
 import pytest
 
+# Force tests to use a separate DB — MUST be set BEFORE importing shared.db
+os.environ["CARTOGRAPH_DB_NAME"] = "cartograph_test"
+
 from shared.db import init_pool, close_pool, execute_mutate
+from shared import config
 
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_db():
     from shared.migrations import run_migrations
+    # Safety check: refuse to run if we're pointed at the dev DB
+    if config.DB_NAME == "cartograph":
+        raise RuntimeError(
+            "Tests refused to run against the 'cartograph' database — "
+            "set CARTOGRAPH_DB_NAME=cartograph_test or run tests in CI. "
+            "See tests/mcp_tools/conftest.py."
+        )
     init_pool()
     run_migrations()
     yield
@@ -16,7 +33,8 @@ def setup_db():
 
 @pytest.fixture(autouse=True)
 def clean_tables():
-    """Clean test data before each test (preserves singleton agents)."""
+    """Clean test data before each test (test DB only)."""
+    assert config.DB_NAME != "cartograph", "Refusing to wipe dev DB"
     execute_mutate("DELETE FROM broadcast_acks")
     execute_mutate("DELETE FROM communications")
     execute_mutate("DELETE FROM tasks")
