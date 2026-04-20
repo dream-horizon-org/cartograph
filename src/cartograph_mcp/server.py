@@ -21,6 +21,7 @@ from mcp.server.fastmcp import FastMCP
 from shared.db import init_pool, close_pool, execute, execute_one
 from shared.migrations import run_migrations
 from cartograph_mcp.tools import action_items, chat, broadcast, secrets
+from cartograph_mcp.tools import tasks as tasks_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -223,6 +224,80 @@ def delete_secret(agent_id: str, plane: str, key: str) -> dict[str, Any]:
     return secrets.delete_secret(agent_id, plane, key)
 
 
+# ============ TASKS ============
+
+@mcp.tool()
+def create_task(owner_agent_id: str, worker_agent_id: str, description: str) -> dict[str, Any]:
+    """Create a task and assign it to a worker agent.
+
+    Only orchestrator (or 'admin') can create tasks.
+    Task starts in state 'BW' (Blocked-on-Worker — worker's turn).
+
+    Returns the created task row.
+    """
+    return tasks_tool.create_task(owner_agent_id, worker_agent_id, description)
+
+
+@mcp.tool()
+def respond_task(
+    agent_id: str,
+    task_id: str,
+    message: str,
+    new_status: str,
+    blocker_detail: str | None = None,
+) -> dict[str, Any]:
+    """Respond to a task with a message AND a state transition.
+
+    States: BW (worker's turn), BO (owner's turn, blocker raised),
+            WD (worker done), TC (task completed — terminal).
+
+    Worker allowed transitions:
+      BW → BO (raise blocker — pass blocker_detail)
+      BW → WD (mark complete)
+
+    Owner allowed transitions:
+      BO → BW (resolve blocker, back to worker)
+      BO → TC (close task directly)
+      WD → BW (reject, send back to worker)
+      WD → TC (accept — task complete)
+
+    Every response MUST include a valid state change. Cannot respond without moving.
+    """
+    return tasks_tool.respond_task(agent_id, task_id, message, new_status, blocker_detail)
+
+
+@mcp.tool()
+def raise_blocker(agent_id: str, task_id: str, blocker_detail: str) -> dict[str, Any]:
+    """Shortcut: worker raises a blocker (BW → BO).
+
+    Equivalent to respond_task(new_status='BO', blocker_detail=...) with a
+    standardised message. Use this when you can't proceed — orchestrator
+    will see it and unblock you.
+    """
+    return tasks_tool.raise_blocker(agent_id, task_id, blocker_detail)
+
+
+@mcp.tool()
+def get_my_tasks(agent_id: str) -> dict[str, list]:
+    """Get all non-terminal tasks where you are owner or worker.
+
+    Returns tasks with status BW/BO/WD (not TC). Ordered by most recent update.
+    """
+    return {"tasks": tasks_tool.get_my_tasks(agent_id)}
+
+
+@mcp.tool()
+def get_task_thread(
+    task_id: str, agent_id: str, page: int = 1, limit: int = 50
+) -> dict[str, list]:
+    """Get the conversation thread for a task.
+
+    Scoping: only the task's owner or worker can read.
+    Paginated, oldest-first (default limit=50).
+    """
+    return {"messages": tasks_tool.get_task_thread(task_id, agent_id, page, limit)}
+
+
 # ============ AGENT LIFECYCLE ============
 
 @mcp.tool()
@@ -334,6 +409,7 @@ def main() -> None:
         "send_chat, ack_chats, get_unacked_chats, get_chat_history, "
         "send_broadcast, ack_broadcast, get_unacked_broadcasts, "
         "put_secret, get_secret, list_secrets_for_plane, delete_secret, "
+        "create_task, respond_task, raise_blocker, get_my_tasks, get_task_thread, "
         "create_agent, list_agents"
     )
     try:
