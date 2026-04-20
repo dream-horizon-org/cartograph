@@ -223,8 +223,8 @@ LOOP (continuous):
   │
   ├── 1. Scan for actionable items across all tables
   │
-  ├── 2. Build wake queue:
-  │     For each idle agent, check:
+  ├── 2. Build wake list:
+  │     For each idle agent (status='idle' AND trigger_lock=FALSE), check:
   │       ├── consolidations where status triggers this agent?
   │       ├── tasks where status triggers this agent?
   │       ├── clarifications where status triggers this agent?
@@ -238,12 +238,12 @@ LOOP (continuous):
   │     (spread work evenly, don't starve idle agents)
   │
   ├── 4. For each agent to wake (by priority):
-  │     ├── Check status = 'idle' (skip if running)
-  │     ├── Take lock: UPDATE agent_runs SET status='invoking'
-  │     │              WHERE agent_id=? AND status='idle'
-  │     ├── Build prompt with pending items summary
-  │     ├── Call invoke(agent_id, prompt)
-  │     └── Agent atomically: release lock + set status='running'
+  │     ├── Take lock:
+  │     │     UPDATE agent_runs SET trigger_lock = TRUE
+  │     │     WHERE agent_id = ? AND status = 'idle' AND trigger_lock = FALSE
+  │     │     RETURNING agent_id
+  │     │     (0 rows = someone else got it or agent not idle → skip)
+  │     └── Done. Trigger manager does NOT invoke. Just sets the lock.
   │
   ├── 5. Check for auto-transitions:
   │     ├── Consolidation: both conf scores breach threshold
@@ -253,38 +253,62 @@ LOOP (continuous):
   └── 6. Sleep briefly → loop
 ```
 
-### 2.2 Lock Mechanism
+### 2.2 Agent Manager (separate loop)
+
+Agent manager is a separate process that reads trigger locks and invokes agents.
 
 ```
-Trigger Manager                          Agent
-      │                                    │
-      │  1. Find idle agent with           │
-      │     pending action items           │
-      │                                    │
-      ├── 2. Atomic lock ────────────────► │
-      │     UPDATE agent_runs              │
-      │     SET status = 'invoking'        │
-      │     WHERE agent_id = ?             │
-      │     AND status = 'idle'            │
-      │     RETURNING agent_id             │
-      │                                    │
-      │     (if 0 rows → someone else      │
-      │      took it, skip)                │
-      │                                    │
-      ├── 3. invoke(agent_id, prompt) ───► │
-      │                                    │
-      │     4. Agent atomically:           │
-      │        SET status = 'running'      │
-      │        invocation_count += 1       │
-      │        heartbeat = now()           │
-      │                                    │
-      │     5. Agent does work...          │
-      │                                    │
-      │     6. Agent yields:               │
-      │        SET status = 'idle'         │
-      │                                    │
-      │◄── 7. Next loop picks it up ───────│
-      │     if more pending items          │
+AGENT MANAGER LOOP:
+  │
+  ├── 1. Poll: SELECT * FROM agent_runs
+  │           WHERE trigger_lock = TRUE
+  │           ORDER BY priority (orchestrator > resolver > sme > iterator)
+  │
+  ├── 2. For each locked agent:
+  │     ├── UPDATE agent_runs
+  │     │   SET status = 'running', trigger_lock = FALSE,
+  │     │       invocation_count = invocation_count + 1,
+  │     │       heartbeat = now()
+  │     │   WHERE agent_id = ? AND trigger_lock = TRUE
+  │     │
+  │     ├── Invoke agent with generic prompt:
+  │     │   "You've been woken up. Check get_action_items_summary()."
+  │     │
+  │     └── When agent yields:
+  │           SET status = 'idle'
+  │
+  └── 3. Sleep briefly → loop
+```
+
+### 2.3 Flow Diagram
+
+```
+TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
+(scans for work)                   (shared state)                  (invokes agents)
+      │                                  │                              │
+      │  scan tables, find               │                              │
+      │  agent X has pending items       │                              │
+      │                                  │                              │
+      ├── SET trigger_lock=TRUE ────────►│                              │
+      │   WHERE status='idle'            │                              │
+      │   AND trigger_lock=FALSE         │                              │
+      │                                  │                              │
+      │  (trigger manager done           │                              │
+      │   with this agent)               │                              │
+      │                                  │◄── poll trigger_lock=TRUE ───┤
+      │                                  │                              │
+      │                                  │    SET status='running'      │
+      │                                  │◄── SET trigger_lock=FALSE ───┤
+      │                                  │                              │
+      │                                  │    invoke(agent_id, prompt)  │
+      │                                  │                              │
+      │                                  │    ... agent works ...       │
+      │                                  │                              │
+      │                                  │◄── SET status='idle' ────────┤
+      │                                  │                              │
+      │  next scan: agent idle           │                              │
+      │  + has more pending items        │                              │
+      │  → lock again                    │                              │
 ```
 
 ---
@@ -603,29 +627,23 @@ get_proxy_chats(agent_id, proxy_agent_id, page, limit)
 
 ## 4. Prompt Construction
 
-When trigger manager wakes an agent, it builds a lightweight prompt. The prompt is a **snapshot, not the source of truth** — more items may arrive while the agent works.
+Agent manager invokes every agent with the same generic prompt. No snapshot — agent discovers its own action items via tools.
 
 ```
-PROMPT TEMPLATE (injected by trigger manager on each invocation):
+INVOCATION PROMPT (same for every agent, every invocation):
 
-  You have been woken up. Here is a snapshot of your pending action items:
+  You have been woken up because you have pending action items.
 
-  CONSOLIDATIONS: {count} pending
-  TASKS: {count} pending
-  CLARIFICATIONS: {count} pending
-  UNACKED CHATS: {count}
-  UNACKED BROADCASTS: {count}
-
-  IMPORTANT: This snapshot is tentative. Other action items may have arrived
-  or changed since this was generated. Always use get_action_items_summary()
-  and get_action_items_detail() to get the latest state before acting.
+  Action items may be arriving concurrently — always use your tools
+  to get the latest state, don't rely on stale information.
 
   Your workflow:
   1. Call get_action_items_summary() to see current counts
   2. Call get_action_items_detail() for full details on items you want to address
   3. Address each item using your act tools
   4. You MUST change state on every response — no empty replies
-  5. After addressing all items, yield control
+  5. Work on as many items as you can handle, then yield control
+  6. You will be woken again if more items arrive
 
   Refer to your system prompt for phase-specific instructions and tool usage.
 ```

@@ -179,13 +179,16 @@ CREATE TABLE agent_runs (
     -- resource_ids and planes removed — derivable via resource_component_agents table
     status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                         'pending',                -- created, waiting for first invoke
-                        'invoking',               -- trigger manager took lock, about to invoke
                         'running',                -- actively executing
                         'idle',                   -- done with current work, waiting for next trigger
                         'done',                   -- finished all work across all phases
                         'errored',                -- failed, needs recovery
                         'decommissioned'          -- merged away or no longer needed
                      )),
+    trigger_lock     BOOLEAN NOT NULL DEFAULT FALSE,
+                                                 -- TRUE = trigger manager wants this agent woken
+                                                 -- agent manager picks up, sets running, clears lock
+                                                 -- only set when status = 'idle'
     phase            TEXT,                        -- current phase the agent is in
     heartbeat        TIMESTAMPTZ,                -- last sign of life
     invocation_count INT NOT NULL DEFAULT 0,      -- for trigger priority (higher = more active)
@@ -197,6 +200,7 @@ CREATE TABLE agent_runs (
 CREATE INDEX idx_agent_status ON agent_runs(status);
 CREATE INDEX idx_agent_type ON agent_runs(agent_type);
 CREATE INDEX idx_agent_idle ON agent_runs(agent_type, status) WHERE status = 'idle';
+CREATE INDEX idx_agent_locked ON agent_runs(trigger_lock) WHERE trigger_lock = TRUE;
 ```
 
 ### `resources`

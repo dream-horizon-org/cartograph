@@ -185,24 +185,29 @@ Why only iterators install: they understand the plane's tooling, they run one-at
 
 ### 3.1 Overview
 
+Trigger manager and agent manager are two separate loops communicating
+via `agent_runs.trigger_lock` + `agent_runs.status`.
+
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                       TRIGGER MANAGER                             │
-│                                                                  │
-│  LOOP:                                                           │
-│    1. Scan tables for actionable events                          │
-│    2. Identify which agents need to wake                         │
-│    3. Filter: only invoke IDLE agents (skip running ones)        │
-│    4. Take lock on agent in agent table                          │
-│    5. Call agent.invoke(prompt)                                   │
-│    6. Agent's invoke releases lock + sets status = running       │
-│    7. When agent yields → status = idle                          │
-│    8. Loop back to 1                                             │
-│                                                                  │
-│  PRIORITY (invocation count tracks this):                        │
-│    Orchestrator > Resolver > SME > Iterator                      │
-│    If multiple agents need waking, higher priority goes first    │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────┐    ┌──────────────────────────────┐
+│       TRIGGER MANAGER        │    │        AGENT MANAGER         │
+│                              │    │                              │
+│  LOOP:                       │    │  LOOP:                       │
+│  1. Scan tables for          │    │  1. Poll agent_runs WHERE    │
+│     actionable events        │    │     trigger_lock = TRUE      │
+│  2. Identify agents that     │    │  2. For each locked agent:   │
+│     need waking              │    │     SET status = 'running',  │
+│  3. Filter: status='idle'    │    │         trigger_lock = FALSE │
+│     AND trigger_lock=FALSE   │    │     Invoke with generic      │
+│  4. SET trigger_lock = TRUE  │    │     prompt                   │
+│     (atomic, skip if 0 rows) │    │  3. When agent yields:       │
+│  5. Does NOT invoke agents   │    │     SET status = 'idle'      │
+│  6. Sleep briefly → loop     │    │  4. Sleep briefly → loop     │
+│                              │    │                              │
+│  PRIORITY:                   │    │  PRIORITY:                   │
+│  orchestrator > resolver     │    │  Same as trigger manager     │
+│  > sme > iterator            │    │                              │
+└──────────────────────────────┘    └──────────────────────────────┘
 ```
 
 ### 3.2 Trigger Conditions Per Agent Type
@@ -246,30 +251,31 @@ RESOLVER triggers:
 ### 3.3 Lock Mechanism
 
 ```
-Trigger Manager                          Agent
-      │                                    │
-      │  1. Identify idle agent with       │
-      │     pending action items           │
-      │                                    │
-      ├── 2. Take lock on agent ──────────►│
-      │     (UPDATE agent SET              │
-      │      status = 'invoking'           │
-      │      WHERE status = 'idle')        │
-      │                                    │
-      ├── 3. Call invoke(prompt) ─────────►│
-      │                                    │
-      │     4. Agent atomically:           │
-      │        • Releases lock             │
-      │        • Sets status = 'running'   │
-      │        • Begins work               │
-      │                                    │
-      │     5. Agent does work...          │
-      │                                    │
-      │     6. Agent yields control        │
-      │        • Sets status = 'idle'      │
-      │                                    │
-      │◄── 7. Trigger manager sees idle ───┤
-      │     with pending items → repeat    │
+Trigger Manager              agent_runs              Agent Manager
+      │                          │                         │
+      │  1. Find idle agent      │                         │
+      │     with pending items   │                         │
+      │                          │                         │
+      ├── SET trigger_lock=TRUE ►│                         │
+      │   WHERE status='idle'    │                         │
+      │   AND trigger_lock=FALSE │                         │
+      │   (0 rows → skip)       │                         │
+      │                          │                         │
+      │  (done — does NOT        │                         │
+      │   invoke anything)       │                         │
+      │                          │◄── poll lock=TRUE ──────┤
+      │                          │                         │
+      │                          │    SET status='running' │
+      │                          │◄── SET lock=FALSE ──────┤
+      │                          │    invocation_count++   │
+      │                          │                         │
+      │                          │    invoke(agent, prompt)│
+      │                          │    ... agent works ...  │
+      │                          │                         │
+      │                          │◄── SET status='idle' ───┤
+      │                          │                         │
+      │  next scan: idle +       │                         │
+      │  more pending → lock     │                         │
 ```
 
 ---
@@ -865,7 +871,8 @@ consolidations
 ```
 agent_runs
   agent_id (PK), agent_type (orchestrator|iterator|sme|resolver),
-  session_id, status (pending|invoking|running|idle|done|errored|decommissioned),
+  session_id, status (pending|running|idle|done|errored|decommissioned),
+  trigger_lock (BOOLEAN, default FALSE — set by trigger manager, cleared by agent manager),
   phase, heartbeat, invocation_count, error_msg, created_at, updated_at
 
 resources

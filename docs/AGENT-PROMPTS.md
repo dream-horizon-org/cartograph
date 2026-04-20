@@ -1,6 +1,6 @@
 # Cartograph — Agent System Prompts
 
-Each agent type has a system prompt injected on every invocation. This is the agent's permanent instruction set — it never changes between invocations. Phase-specific context is added by the trigger manager's invocation prompt (see TRIGGER-MANAGEMENT.md Section 4).
+Each agent type has a system prompt injected on every invocation. This is the agent's permanent instruction set — it never changes between invocations. The agent manager invokes agents with a generic prompt (see TRIGGER-MANAGEMENT.md Section 4) — agents discover their own action items via tools.
 
 ---
 

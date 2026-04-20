@@ -1,6 +1,6 @@
 # Cartograph
 
-### Automatically map every service, dependency, and resource across your organisation
+### AI-Powered Automatic Mapping of Services and Dependencies in Organisations. Automatically map every service, dependency, and resource across your organisation
 
 ---
 
