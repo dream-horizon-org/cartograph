@@ -22,6 +22,20 @@ _TYPE_PREFIXES = {
     "resolver": "res",
 }
 
+_GENERIC_INVOCATION_PROMPT = """You have been woken up because you have pending action items.
+
+Action items may be arriving concurrently — always use your tools to get the latest state, don't rely on stale information.
+
+Your workflow:
+1. Call get_action_items_summary() to see current counts
+2. Call get_action_items_detail() for full details on items you want to address
+3. Address each item using your act tools
+4. You MUST change state on every response — no empty replies
+5. Work on as many items as you can handle, then yield control
+6. You will be woken again if more items arrive
+
+Refer to your system prompt for phase-specific instructions and tool usage."""
+
 
 class AgentManager:
     def __init__(self, workspace_root: str, mcp_config_path: str) -> None:
@@ -62,15 +76,32 @@ class AgentManager:
             resource_id=resource_id,
         )
 
-        initial_prompt = self._initial_prompt(agent_type, plane, resource_id)
-        db.enqueue_trigger(agent_id, initial_prompt, config.priority)
+        # Transition new agent to 'idle' so trigger manager can lock it when
+        # it has pending items. Initial wake-up comes from a task, chat, or
+        # direct admin trigger — no more enqueued initial prompt.
+        db.update_agent_status(agent_id, "idle")
 
         return agent_id
 
-    def invoke_agent(self, agent_id: str, prompt: str) -> str:
+    def invoke_agent(self, agent_id: str, prompt: str | None = None) -> str:
+        """Pick up a locked agent and invoke it.
+
+        Atomically transitions trigger_lock=TRUE → status='running',
+        trigger_lock=FALSE, invocation_count+=1, heartbeat=now().
+
+        If prompt is None, uses the generic invocation prompt.
+        """
         agent = db.get_agent(agent_id)
         if agent is None:
             raise ValueError(f"Agent not found: {agent_id}")
+
+        # Atomic pickup: lock → running
+        if not db.pickup_agent(agent_id):
+            logger.warning("Agent %s was not locked; skipping invocation", agent_id)
+            return ""
+
+        if prompt is None:
+            prompt = _GENERIC_INVOCATION_PROMPT
 
         config = get_config(
             agent["agent_type"],
@@ -89,10 +120,6 @@ class AgentManager:
         ]
         if agent["session_id"]:
             cmd.extend(["--session-id", agent["session_id"]])
-
-        db.update_agent_status(agent_id, "running")
-        db.release_trigger_lock(agent_id)
-        db.update_agent_heartbeat(agent_id)
 
         try:
             result = subprocess.run(
@@ -117,7 +144,6 @@ class AgentManager:
                     db.update_agent_session(agent_id, session_id)
 
             db.update_agent_status(agent_id, "idle")
-            db.increment_invocation_count(agent_id)
             db.update_agent_heartbeat(agent_id)
             return output
 
@@ -128,7 +154,7 @@ class AgentManager:
 
     def deactivate_agent(self, agent_id: str) -> None:
         db.update_agent_status(agent_id, "decommissioned")
-        db.cancel_pending_triggers(agent_id)
+        db.release_trigger_lock(agent_id)
 
     def _write_mcp_json(self, workspace_path: str, mcp_server_names: list[str]) -> None:
         servers = {}

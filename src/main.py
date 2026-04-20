@@ -10,10 +10,11 @@ import sys
 from agent_management import db
 from agent_management.agent_manager import AgentManager
 from agent_management.trigger_manager import TriggerManager
+from shared.db import init_pool
+from shared.migrations import run_migrations
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DB_PATH = "cartograph.db"
 _DEFAULT_WORKSPACE_ROOT = "workspaces"
 _DEFAULT_MCP_CONFIG = os.path.join(
     os.path.dirname(__file__), "mcp_servers.yaml"
@@ -21,7 +22,6 @@ _DEFAULT_MCP_CONFIG = os.path.join(
 
 
 def boot(
-    db_path: str = _DEFAULT_DB_PATH,
     workspace_root: str = _DEFAULT_WORKSPACE_ROOT,
     mcp_config_path: str = _DEFAULT_MCP_CONFIG,
     start_trigger_manager: bool = True,
@@ -33,7 +33,8 @@ def boot(
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    db.init_db(db_path)
+    init_pool()
+    run_migrations()
 
     os.makedirs(workspace_root, exist_ok=True)
 

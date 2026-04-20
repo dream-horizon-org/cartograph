@@ -103,6 +103,9 @@ def run_migrations() -> None:
                                         'orchestrator','iterator','sme','resolver'
                                      )),
                     session_id       TEXT,
+                    workspace_path   TEXT,
+                    plane            TEXT,
+                    resource_id      TEXT,
                     status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                                         'pending','running','idle','done','errored','decommissioned'
                                      )),
