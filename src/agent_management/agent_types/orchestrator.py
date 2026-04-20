@@ -81,9 +81,13 @@ def build_config(**kwargs: str) -> AgentTypeConfig:
         for key in mcp_registry_keys.split(","):
             if key and key != "cartograph-db":
                 mcp_servers.append(key)
+    # Allow built-in tools + all cartograph-db MCP tools
+    allowed = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+    for server in mcp_servers:
+        allowed.append(f"mcp__{server}__*")
     return AgentTypeConfig(
         agent_type="orchestrator",
-        allowed_tools=["bash", "Read", "Write", "Edit", "Glob", "Grep"],
+        allowed_tools=allowed,
         mcp_servers=mcp_servers,
         system_prompt=SYSTEM_PROMPT,
         priority=100,

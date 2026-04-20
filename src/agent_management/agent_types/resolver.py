@@ -85,10 +85,14 @@ Plus: bash
 
 
 def build_config(**kwargs: str) -> AgentTypeConfig:
+    mcp_servers = ["cartograph-db"]
+    allowed = ["Bash", "Read", "Glob", "Grep"]
+    for server in mcp_servers:
+        allowed.append(f"mcp__{server}__*")
     return AgentTypeConfig(
         agent_type="resolver",
-        allowed_tools=["bash", "Read", "Glob", "Grep"],
-        mcp_servers=["cartograph-db"],
+        allowed_tools=allowed,
+        mcp_servers=mcp_servers,
         system_prompt=SYSTEM_PROMPT,
         priority=80,
         can_install=False,

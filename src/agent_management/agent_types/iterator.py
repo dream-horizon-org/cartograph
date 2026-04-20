@@ -77,15 +77,17 @@ If a task asks you to install helm/kubectl/etc:
 def build_config(**kwargs: str) -> AgentTypeConfig:
     plane = kwargs.get("plane", "unknown")
     mcp_servers = ["cartograph-db"]
-    # Include plane-specific reader if registered (Phase 4+)
     mcp_registry_keys = kwargs.get("mcp_registry_keys", "")
     if mcp_registry_keys:
         plane_reader = f"{plane}-reader"
         if plane_reader in mcp_registry_keys.split(","):
             mcp_servers.append(plane_reader)
+    allowed = ["Bash", "Read", "Glob", "Grep"]
+    for server in mcp_servers:
+        allowed.append(f"mcp__{server}__*")
     return AgentTypeConfig(
         agent_type="iterator",
-        allowed_tools=["bash", "Read", "Glob", "Grep"],
+        allowed_tools=allowed,
         mcp_servers=mcp_servers,
         system_prompt=SYSTEM_PROMPT_TEMPLATE.format(plane=plane),
         priority=60,

@@ -95,6 +95,14 @@ class AgentManager:
         if agent is None:
             raise ValueError(f"Agent not found: {agent_id}")
 
+        logger.info(
+            "invoke_agent: %s (type=%s, session_id=%s, workspace=%s)",
+            agent_id,
+            agent["agent_type"],
+            agent.get("session_id"),
+            agent.get("workspace_path"),
+        )
+
         # Atomic pickup: lock → running
         if not db.pickup_agent(agent_id):
             logger.warning("Agent %s was not locked; skipping invocation", agent_id)
@@ -110,61 +118,120 @@ class AgentManager:
             mcp_registry_keys=",".join(self.mcp_registry.keys()),
         )
 
+        workspace_path = agent.get("workspace_path")
+        if not workspace_path:
+            logger.error(
+                "Agent %s has no workspace_path — was it created via AgentManager? "
+                "Manually-inserted agents lack workspace/MCP config.",
+                agent_id,
+            )
+            db.update_agent_status(agent_id, "errored")
+            db.release_trigger_lock(agent_id)
+            return ""
+
+        # Use --resume if we have a session; otherwise --session-id lets us
+        # provide a fresh UUID so we can persist and resume later.
         cmd = [
             "claude",
             "-p", prompt,
             "--output-format", "json",
             "--allowedTools", ",".join(config.allowed_tools),
             "--system-prompt", config.system_prompt,
-            "--cwd", agent["workspace_path"],
+            "--setting-sources", "project",  # loads .mcp.json from cwd
+            "--dangerously-skip-permissions",  # non-interactive mode
         ]
         if agent["session_id"]:
-            cmd.extend(["--session-id", agent["session_id"]])
+            cmd.extend(["--resume", agent["session_id"]])
+
+        logger.info(
+            "Spawning claude subprocess for %s: cwd=%s, tools=%s, session=%s",
+            agent_id,
+            workspace_path,
+            config.allowed_tools,
+            agent["session_id"] or "<new>",
+        )
 
         try:
+            # Run claude in the agent's workspace (cwd) so .mcp.json is loaded
             result = subprocess.run(
                 cmd,
+                cwd=workspace_path,
                 capture_output=True,
                 text=True,
                 timeout=300,
             )
 
+            logger.info(
+                "claude subprocess for %s finished: returncode=%d, stdout_len=%d, stderr_len=%d",
+                agent_id,
+                result.returncode,
+                len(result.stdout),
+                len(result.stderr),
+            )
+
             if result.returncode != 0:
                 logger.error(
-                    "Agent %s failed: %s", agent_id, result.stderr
+                    "Agent %s failed (returncode=%d)\nSTDERR:\n%s\nSTDOUT:\n%s",
+                    agent_id,
+                    result.returncode,
+                    result.stderr[:2000],
+                    result.stdout[:2000],
                 )
                 db.update_agent_status(agent_id, "errored")
                 return result.stderr
 
             output = result.stdout
+            logger.debug("Agent %s output: %s", agent_id, output[:500])
 
             if agent["session_id"] is None:
                 session_id = self._extract_session_id(output)
                 if session_id:
+                    logger.info("Captured new session_id for %s: %s", agent_id, session_id)
                     db.update_agent_session(agent_id, session_id)
+                else:
+                    logger.warning("No session_id in output for %s", agent_id)
 
             db.update_agent_status(agent_id, "idle")
             db.update_agent_heartbeat(agent_id)
+            logger.info("Agent %s completed, set to idle", agent_id)
             return output
 
         except subprocess.TimeoutExpired:
-            logger.error("Agent %s timed out", agent_id)
+            logger.error("Agent %s timed out after 300s", agent_id)
             db.update_agent_status(agent_id, "errored")
             return "TIMEOUT"
+        except FileNotFoundError as e:
+            logger.error(
+                "claude CLI not found — is Claude Code installed and on PATH? %s", e
+            )
+            db.update_agent_status(agent_id, "errored")
+            return str(e)
 
     def deactivate_agent(self, agent_id: str) -> None:
         db.update_agent_status(agent_id, "decommissioned")
         db.release_trigger_lock(agent_id)
 
     def _write_mcp_json(self, workspace_path: str, mcp_server_names: list[str]) -> None:
+        """Write .mcp.json for Claude Code to load MCP servers.
+
+        Our cartograph-db MCP runs at /mcp (FastMCP streamable-http endpoint).
+        Format: {"mcpServers": {"name": {"type": "http", "url": ".../mcp"}}}
+        """
         servers = {}
         for name in mcp_server_names:
             if name in self.mcp_registry:
-                servers[name] = {"url": self.mcp_registry[name]["url"]}
+                base_url = self.mcp_registry[name]["url"].rstrip("/")
+                # FastMCP streamable-http exposes /mcp endpoint
+                mcp_url = base_url if base_url.endswith("/mcp") else f"{base_url}/mcp"
+                servers[name] = {
+                    "type": "http",
+                    "url": mcp_url,
+                }
         mcp_json = {"mcpServers": servers}
         path = os.path.join(workspace_path, ".mcp.json")
         with open(path, "w") as f:
             json.dump(mcp_json, f, indent=2)
+        logger.info("Wrote MCP config for %s: %s", workspace_path, list(servers.keys()))
 
     def _extract_session_id(self, output: str) -> str | None:
         try:

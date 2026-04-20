@@ -74,11 +74,23 @@ class InvokeLoop:
     def _process_locked_agents(self) -> None:
         """Pick up locked agents (in priority order) and invoke them."""
         locked = db.get_locked_agents()
+        if locked:
+            logger.info(
+                "Found %d locked agent(s) to invoke: %s",
+                len(locked),
+                [a["agent_id"] for a in locked],
+            )
         for agent in locked:
             if not self.running:
                 break
 
             agent_id = agent["agent_id"]
+            logger.info(
+                "Picking up locked agent %s (type=%s, status=%s)",
+                agent_id,
+                agent["agent_type"],
+                agent["status"],
+            )
             try:
                 self.agent_manager.invoke_agent(agent_id)
             except Exception:
