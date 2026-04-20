@@ -960,7 +960,108 @@ WRITE TARGET (single, shared by all agents):
 
 ---
 
-## 10. Future Scope
+## 10. Admin Chat UI
+
+Lightweight web UI for humans to chat with any agent. Kicks off agent activity
+(e.g., admin tells orchestrator "start iteration") and surfaces agent responses.
+
+Lives in `src/admin_ui/` — separate from the MCP server. Reads/writes the
+`communications` table directly via `shared/db.py` (no MCP hop).
+
+```
+ ┌─────────────────────────────────────────────────────────────────┐
+ │                    ADMIN CHAT UI (Browser)                      │
+ │                                                                 │
+ │  ┌──────────────┐  ┌─────────────────────────────────────────┐ │
+ │  │  AGENTS      │  │  CHAT: orch-abc123                       │ │
+ │  │              │  │                                          │ │
+ │  │ ▸ orch-abc   │  │   [admin] kick off iteration             │ │
+ │  │   orchestr.  │  │   [orch] starting github iteration...   │ │
+ │  │   idle       │  │   [admin] any blockers?                  │ │
+ │  │              │  │   [orch] yes, missing AWS creds          │ │
+ │  │   iter-gh-1  │  │                                          │ │
+ │  │   iterator   │  │   ─────────────────────                  │ │
+ │  │   running    │  │   [type message...]              [Send]  │ │
+ │  │              │  │                                          │ │
+ │  │   sme-fav2   │  └─────────────────────────────────────────┘ │
+ │  │   sme        │                                               │
+ │  │   idle       │  Scroll up → loads older messages             │
+ │  └──────────────┘  Auto-refresh 2s → new messages appear        │
+ └─────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+ ┌─────────────────────────────────────────────────────────────────┐
+ │              FastAPI Backend (src/admin_ui/)                    │
+ │                                                                 │
+ │  GET  /api/agents                    → list all active agents   │
+ │  GET  /api/chat/:id?before=&limit=   → paginated chat history   │
+ │  GET  /api/chat/:id/new?after=       → messages since timestamp │
+ │  POST /api/chat/:id                  → admin sends message      │
+ │  POST /api/chat/:id/ack              → ack agent messages       │
+ │                                                                 │
+ └─────────────────────────────┬───────────────────────────────────┘
+                               │
+                               ▼
+ ┌─────────────────────────────────────────────────────────────────┐
+ │                  PostgreSQL (communications table)              │
+ │                                                                 │
+ │  Insert from admin → trigger manager sees unacked chat          │
+ │  → locks target agent → agent manager invokes                   │
+ │  → agent reads chat, responds, inserts reply                    │
+ │  → UI polls /new, appends reply                                 │
+ └─────────────────────────────────────────────────────────────────┘
+```
+
+### 10.1 API Contract
+
+```
+GET /api/agents
+  Returns: [{agent_id, agent_type, status, created_at}]
+  Filters: excludes decommissioned
+
+GET /api/chat/:agent_id?before=<iso_timestamp>&limit=20
+  Returns: {messages: [...], has_more: bool}
+  Paginated older messages — cursor on created_at (before)
+  Default limit 20, max 100
+
+GET /api/chat/:agent_id/new?after=<iso_timestamp>
+  Returns: {messages: [...]}
+  Polling endpoint — messages with created_at > after
+
+POST /api/chat/:agent_id
+  Body: {message: "..."}
+  Inserts communication (from='admin', to=agent_id, type='chat')
+  Returns: the inserted row
+
+POST /api/chat/:agent_id/ack
+  Body: {communication_ids: ["uuid", ...]}
+  Sets acked_at on messages where to='admin' and id IN (...)
+  Admin-side ack — optional (for read receipts in UI)
+```
+
+### 10.2 Frontend Behaviour
+
+- **Agent list panel:** fetched on load, refreshed every 5s
+- **Chat panel:** shows messages from `communications` where
+  `(from_agent = selected_agent AND to_agent = 'admin')` OR
+  `(from_agent = 'admin' AND to_agent = selected_agent)` AND `type = 'chat'`
+- **Infinite scroll up:** when scroll reaches top, fetch with `before` cursor
+- **New message polling:** every 2s, fetch with `after` = latest message timestamp
+- **Message alignment:** admin messages right-aligned, agent messages left-aligned
+
+### 10.3 Why Direct DB Access (not MCP)
+
+The admin UI is for humans, not agents. MCP tools are agent-facing with
+agent_id validation and scoping. Admin UI has different concerns:
+- List all agents (MCP has no such tool)
+- Pagination over chat history (MCP's `get_chat_history` is per-agent-scoped)
+- No agent_id in the caller (it's "admin")
+
+Cleaner to have admin UI talk to DB directly via shared/db.py.
+
+---
+
+## 11. Future Scope
 
 ### 10.1 Observability & Cost Controls
 

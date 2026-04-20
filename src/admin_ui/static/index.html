@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cartograph Admin Chat</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header>
+        <h1>Cartograph</h1>
+        <button id="refresh-btn" title="Refresh agents">↻</button>
+      </header>
+      <ul id="agent-list">
+        <li class="empty">Loading agents...</li>
+      </ul>
+    </aside>
+
+    <main id="chat-pane">
+      <header id="chat-header">
+        <h2 id="chat-title">Select an agent</h2>
+        <span id="chat-subtitle"></span>
+      </header>
+      <div id="messages">
+        <p class="empty">Select an agent on the left to start chatting.</p>
+      </div>
+      <form id="chat-form">
+        <input type="text" id="chat-input" placeholder="Type a message..." disabled>
+        <button type="submit" disabled>Send</button>
+      </form>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
