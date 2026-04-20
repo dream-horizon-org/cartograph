@@ -1,8 +1,12 @@
 # Cartograph — Implementation Phases
 
+**Status (2026-04-20):** Phase 0 ✅ complete · Phase 1 ✅ complete · Phase 2–4 pending.
+- 26 MCP tools registered · 61 tests passing (27 tasks, 17 resources, 17 admin_ui).
+- Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with orchestrator + resolver singletons.
+
 ---
 
-## Phase 0: Foundation
+## Phase 0: Foundation ✅
 
 Everything that all subsequent phases depend on.
 
@@ -50,15 +54,27 @@ Everything that all subsequent phases depend on.
 - Auto-transitions: consolidation confidence breach check (both > 0.85 AND r_conf IS NULL → set status='R')
 - Configurable sleep interval between scans
 
-### Agent Manager Contract (NOT our implementation — just the interface)
-- Polls: `SELECT * FROM agent_runs WHERE trigger_lock = TRUE`
-- Picks up: `SET status='running', trigger_lock=FALSE, invocation_count=invocation_count+1, heartbeat=now()`
-- Invokes with generic prompt (system prompt + "check get_action_items_summary()")
-- On yield: `SET status='idle'`
+### Agent Manager (implemented in `src/agent_management/`)
+- Polls agents with `trigger_lock=TRUE`; atomic pickup: `SET status='running', trigger_lock=FALSE, invocation_count++, heartbeat=now()`.
+- Spawns `claude -p` subprocess per-agent in workspace dir with `.mcp.json` pointing at `http://localhost:8100/mcp` (streamable-http FastMCP).
+- Flags used: `--setting-sources project --dangerously-skip-permissions --allowedTools Bash,Read,Write,Edit,Glob,Grep,mcp__cartograph-db__*`.
+- Background heartbeat thread updates every 10s; stale `running` agents (heartbeat > HEARTBEAT_TIMEOUT) reset to `idle`.
+- Survives parent shell death via `SIGHUP = SIG_IGN`; on startup resets any `running`/`errored` back to `idle`.
+- Agent type configs in `agent_types/{orchestrator,iterator,sme,resolver}.py` supply system prompt, allowed tools, MCP servers.
+
+### Admin Chat UI (`src/admin_ui/`)
+- FastAPI server on :8200 · 5 endpoints: list agents, get chat (paginated), poll-new, send, ack.
+- Vanilla JS with marked.js + DOMPurify + highlight.js for safe markdown rendering.
+- 2s polling, infinite-scroll pagination via `before` cursor.
+
+### Test Isolation (operational best practice — learned the hard way)
+- All test conftest.py files set `os.environ["CARTOGRAPH_DB_NAME"] = "cartograph_test"` **before** importing `shared.db`.
+- `setup_db` fixture raises `RuntimeError` if `config.DB_NAME == "cartograph"`.
+- `cartograph_test` DB must exist (`CREATE DATABASE cartograph_test` in same Postgres container).
 
 ---
 
-## Phase 1: Iteration
+## Phase 1: Iteration ✅
 
 Task management — orchestrator assigns work to iterators.
 
@@ -80,8 +96,24 @@ Task management — orchestrator assigns work to iterators.
 - Scan tasks: `WHERE (worker_agent_id = agent_id AND status = 'BW') OR (owner_agent_id = agent_id AND status IN ('BO', 'WD'))`
 - Include task counts in action items summary/detail
 
+### Additional Phase-1 Tools (built while implementing)
+**Secrets (`tools/secrets.py`):**
+- `put_secret(agent_id, plane, key, value)` — ORCHESTRATOR-only. Upserts on `(plane, key)`.
+- `get_secret(agent_id, plane, key)` — any agent can read.
+- `list_secrets_for_plane(agent_id, plane)` — returns keys only (no values).
+- `delete_secret(agent_id, plane, key)` — ORCHESTRATOR-only.
+
+**Agent lifecycle (`cartograph_mcp/server.py` via colocated AgentManager):**
+- `create_agent(agent_id, new_agent_type, plane?, resource_id?)` — ORCHESTRATOR-only. Spawns iterator (plane) or SME (resource_id). Creates workspace, writes `.mcp.json`, inserts `agent_runs` row.
+- `list_agents(agent_id)` — any agent can see all non-decommissioned agents.
+
+**Resources (`tools/resources.py`):**
+- `upsert_resource(agent_id, plane, resource_type, identifier, access_desc, metadata?)` — ITERATOR-only, own plane only. Idempotent on `(plane, resource_type, identifier)`.
+- `get_resource(agent_id, resource_id)`, `list_resources_for_plane(agent_id, plane)`, `list_all_resources(agent_id, status?)`, `get_resource_counts(agent_id)`.
+- `mark_resource_done(agent_id, resource_id)` — SME-only; validated via `resource_component_agents`.
+
 ### Tables Active
-- agent_runs, resources, tasks, communications, secrets
+- agent_runs, resources, tasks, communications, secrets, (resource_component_agents written on mark_resource_done check path)
 
 ---
 
@@ -238,47 +270,58 @@ Executing approved merges/splits, resolving references, building the edge graph.
 
 ---
 
-## File Structure
+## File Structure (actual — as of 2026-04-20)
 
 ```
 cartograph/
-  docker-compose.yml          — Postgres + pgvector
-  docs/                       — Design docs (existing)
+  docker-compose.yml          — Postgres + pgvector (pg16)
+  requirements.txt            — psycopg[binary], psycopg-pool, fastapi, uvicorn, mcp>=1.0, pyyaml
+  pyproject.toml              — pythonpath=["src"]
+  docs/                       — Design docs
+  src/
+    main.py                   — entry point (SIGHUP ignore, startup state reset)
+    mcp_servers.yaml          — registry of plane-reader MCP servers
 
-  trigger-management/         — Trigger manager
-    requirements.txt
-    config.py                 — env vars, DB config
-    db.py                     — connection pool, query helpers
-    models.py                 — shared types/dataclasses
-    scanners/
-      consolidations.py       — scan consolidation table (Phase 3)
-      tasks.py                — scan tasks table (Phase 1)
-      clarifications.py       — scan clarifications table (Phase 3)
-      chats.py                — scan unacked chats (Phase 0)
-      broadcasts.py           — scan unacked broadcasts (Phase 0)
-      auto_transitions.py     — confidence breach → R (Phase 3)
-      auto_spawn.py           — resource pending → spawn SME (Phase 2)
-    trigger_loop.py           — main loop: scan all → prioritise → lock
-    main.py                   — entry point
+    shared/
+      config.py               — env-based config (DB, embedding, timeouts, thresholds)
+      db.py                   — psycopg3 ConnectionPool; execute/_one/_mutate/_returning
+      migrations.py           — idempotent CREATE TABLE for all 14 tables + indexes
 
-  cartograph-mcp/             — MCP server (agent tools)
-    requirements.txt
-    config.py
-    db.py                     — shared DB client (or import from trigger-management)
-    embedding.py              — embedding client (text-embedding-3-small)
-    models.py
-    server.py                 — MCP server entry point
-    tools/
-      action_items.py         — get_action_items_summary, get_action_items_detail (Phase 0)
-      chat.py                 — send_chat, ack_chats, get_unacked_chats, get_chat_history (Phase 0)
-      broadcast.py            — send_broadcast, ack_broadcast, get_unacked_broadcasts (Phase 0)
-      tasks.py                — create_task, respond_task, raise_blocker, get_my_tasks, get_task_thread (Phase 1)
-      components.py           — upsert_component, get_component (Phase 2)
-      attributions.py         — upsert_attribution, get_attributions (Phase 2)
-      edges.py                — create_edge, get_edges (Phase 2)
-      unresolved.py           — insert_unresolved, resolve_reference, get_unresolved (Phase 2)
-      vector_search.py        — vector_search (Phase 2)
-      consolidations.py       — nominate, respond, review, execute_mutation, complete (Phase 3)
-      clarifications.py       — create, respond, get_my, get_thread (Phase 3)
-      mutations.py            — absorb_agent, spawn_child_agent, transfer_attributions, get_proxy_items, get_proxy_chats (Phase 4)
+    trigger_management/
+      scanners/{chats,broadcasts,tasks,consolidations,clarifications,auto_transitions}.py
+      trigger_loop.py         — idle-agent scan → prioritise → trigger_lock=TRUE
+      main.py
+
+    cartograph_mcp/
+      server.py               — FastMCP("cartograph-db") on :8100, 26 @mcp.tool registrations
+      tools/
+        action_items.py       — Phase 0: summary + detail
+        chat.py               — Phase 0: send/ack/unacked/history
+        broadcast.py          — Phase 0: send/ack/unacked
+        tasks.py              — Phase 1: create/respond/raise_blocker/my/thread
+        secrets.py            — Phase 1: put/get/list/delete
+        resources.py          — Phase 1: upsert/get/list/counts/mark_done
+
+    agent_management/
+      agent_manager.py        — workspace + .mcp.json + subprocess spawn + heartbeat
+      invoke_loop.py          — polls trigger_lock=TRUE, invokes claude -p
+      db.py                   — pickup/heartbeat/status helpers
+      agent_types/{orchestrator,iterator,sme,resolver,base}.py
+
+    admin_ui/
+      server.py               — FastAPI :8200 (5 endpoints)
+      static/{index.html, app.js, style.css}
+
+  tests/
+    admin_ui/                 — 17 tests (+ conftest.py with test-DB isolation)
+    mcp_tools/                — 44 tests (tasks: 27, resources: 17, + conftest.py)
+    test_{db, agent_manager, agent_types, trigger_manager, integration, main}.py
 ```
+
+---
+
+## Deferred to Phase 2+
+
+- `embedding.py` / `vector_search` tool — not built yet (needed for materialisation lookups).
+- Components/attributions/edges/unresolved/consolidations/clarifications/mutations tool modules — not built.
+- Auto-spawn scanner for SMEs from pending resources — not built (orchestrator currently spawns via `create_agent`).

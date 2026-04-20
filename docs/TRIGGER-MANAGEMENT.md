@@ -440,6 +440,28 @@ vector_search(query_text, table, limit) → Row[]
   Embed query_text, search against specified table's embeddings.
   Returns top N results with similarity scores.
   Available to all agents.
+
+get_resource(agent_id, resource_id) → ResourceRow
+  Read a single resource row.
+
+list_resources_for_plane(agent_id, plane) → ResourceRow[]
+  Read all resources for a plane (iterator monitors its own, orchestrator any).
+
+list_all_resources(agent_id, status?) → ResourceRow[]
+  Read every resource, optionally filtered by status (pending/assigned/done).
+  Orchestrator dashboard view.
+
+get_resource_counts(agent_id) → { by_plane_status: [...] }
+  Aggregate counts grouped by (plane, status).
+
+list_agents(agent_id) → AgentRow[]
+  See all non-decommissioned agents (any agent can call).
+
+get_secret(agent_id, plane, key) → string
+  Read a credential value (any agent).
+
+list_secrets_for_plane(agent_id, plane) → string[]
+  List credential keys for a plane (values not returned).
 ```
 
 ### 3.3 Act Tools (what can I do — scoped writes with mandatory state change)
@@ -621,6 +643,38 @@ get_proxy_items(agent_id)
 get_proxy_chats(agent_id, proxy_agent_id, page, limit)
   Read paginated chat history of an absorbed agent.
   Used for context when handling inherited items.
+```
+
+**Resource acts (iterator writes own plane; SME marks done when assigned):**
+
+```
+upsert_resource(agent_id, plane, resource_type, identifier, access_desc, metadata?)
+  Iterator-only. Idempotent on (plane, resource_type, identifier).
+  Validates: agent_type='iterator' AND agent.plane == plane.
+  Status starts 'pending'.
+
+mark_resource_done(agent_id, resource_id)
+  SME-only. Validates: agent is linked via resource_component_agents
+  to the resource. Sets status='done'.
+```
+
+**Secret acts (orchestrator writes; all agents read):**
+
+```
+put_secret(agent_id, plane, key, value)
+  Orchestrator-only. Upserts on (plane, key).
+
+delete_secret(agent_id, plane, key)
+  Orchestrator-only. Removes a credential.
+```
+
+**Agent lifecycle (orchestrator only):**
+
+```
+create_agent(agent_id, new_agent_type, plane?, resource_id?)
+  Orchestrator-only. Spawns an iterator (pass plane) or SME (pass resource_id).
+  Creates workspace dir, writes .mcp.json pointing at cartograph-db on :8100,
+  inserts agent_runs row (status='idle'). Returns new agent_id.
 ```
 
 ---

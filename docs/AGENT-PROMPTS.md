@@ -2,6 +2,36 @@
 
 Each agent type has a system prompt injected on every invocation. This is the agent's permanent instruction set — it never changes between invocations. The agent manager invokes agents with a generic prompt (see TRIGGER-MANAGEMENT.md Section 4) — agents discover their own action items via tools.
 
+> **Source of truth:** the runnable prompts live in `src/agent_management/agent_types/{orchestrator,iterator,sme,resolver}.py`. This doc tracks intent + rules; the code holds the exact wording shipped to Claude. They are kept aligned — if they drift, treat the code as authoritative and update this file.
+
+---
+
+## 0. Shared Mission & Vocabulary (injected into every agent prompt)
+
+Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULARY` and included in all four agent type prompts. Every agent shares the same mental model of what we're building.
+
+**What Cartograph does:** build a complete, queryable map of every deployable component in an organisation + their dependencies. Enables blast-radius analysis, impact analysis, environment setup, ownership tracking.
+
+**Vocabulary:**
+
+| Term | Definition | Examples | NOT this |
+|------|------------|----------|----------|
+| **Component** | The final authoritative entity representing ONE thing that runs independently. | API service, Lambda, DB instance, CronJob. | A branch, a workflow, a webhook, an org, an ALB/TG. |
+| **Resource** | Iterator's GUESS at a component. One row = one candidate. SME later validates, merges, splits, or rejects. | 1 repo, 1 R53 chain (walked), 1 Lambda, 1 RDS, 1 K8s workload. | Every branch / workflow / listener / DNS record as its own row. |
+| **Attribution** | Evidence owned by a component — a deploy config, endpoint, hostname, ASG name, log group — tying real things to the component. SMEs hydrate these. | `hostname=feeds-agg.dream11.local`, `asg=feeds-agg-v2-api-prod`. | — |
+| **Edge** | Dependency fact: "A calls B at GET /X" or "A writes to DB B". One per specific call/query. SMEs create during Edge Discovery. | `source=feeds-api → target=feeds-db, identifier=SELECT...`. | — |
+
+**Iterator granularity rule (per plane):**
+
+| Plane | One row = | NOT one row per |
+|-------|-----------|-----------------|
+| github / deploy | repo | branch, workflow, deployment event, webhook, environment |
+| cloud | service / store / job (R53→ALB→TG→ASG walked as one; Lambda; RDS; K8s workload) | ALB, TG, listener, SG, subnet, pod |
+| telemetry | catalogued service | trace, log line, metric, dashboard |
+| config | logical store / key prefix | individual key |
+
+**Scale sanity check:** a plane's resource count should be on the order of the number of *deployable services* in the org — hundreds to low thousands for a mid-size org, NOT tens of thousands. If >2× expected, granularity is wrong.
+
 ---
 
 ## 1. Orchestrator System Prompt
@@ -92,6 +122,13 @@ Reject threshold: both agents < 0.3 → auto-reject
     - send_broadcast(from_agent_id, to_agent_type, message) → broadcast to all
       agents of a type
     - ack_broadcast(agent_id, communication_id)
+    - put_secret / get_secret / list_secrets_for_plane / delete_secret →
+      manage per-plane credentials (orchestrator-only for put/delete)
+    - create_agent(agent_id, new_agent_type, plane?, resource_id?) →
+      ORCHESTRATOR-only. Spawn iterator (plane) or SME (resource_id)
+    - list_agents(agent_id) → see all non-decommissioned agents
+    - list_all_resources(agent_id, status?), list_resources_for_plane,
+      get_resource, get_resource_counts → monitor iteration/materialisation
     - upsert_component, upsert_attribution, create_edge (full DB access)
 
   Bash: available for system operations
@@ -201,13 +238,18 @@ You are active ONLY during the ITERATION phase and when asked to install tools.
     - respond_task(agent_id, task_id, message, new_status, blocker_detail?)
     - send_chat(from_agent_id, to_agent_id, message) → message admin
     - ack_chats(agent_id, communication_ids[])
+    - upsert_resource(agent_id, plane, resource_type, identifier, access_desc,
+      metadata?) → register discoveries; idempotent on (plane, type, identifier).
+      You can only write for YOUR own plane.
+    - get_resource(agent_id, resource_id), list_resources_for_plane(agent_id,
+      plane) → read back your registrations.
+    - get_secret(agent_id, plane, key), list_secrets_for_plane(agent_id, plane)
+      → read credentials the orchestrator provisioned for your plane.
 
   Plane MCP (read-only, scoped to your plane):
     {plane-specific tools listed here — e.g., github-reader: list_repos, clone_repo}
 
   Bash: available — you are the ONLY agent type that can install tools/CLIs
-
-  Resources table: you can write to the resources table to register discoveries
 
 == YOUR JOB ==
 
@@ -330,6 +372,10 @@ Reject threshold: both agents < 0.3 → auto-reject
     - get_edges(component_id) → read ANY component's edges
     - get_unresolved(component_id) → unresolved references for a component
     - vector_search(query_text, table, limit) → fuzzy search
+    - get_resource(agent_id, resource_id) → read the resource you are assigned to
+    - get_secret(agent_id, plane, key), list_secrets_for_plane(agent_id, plane)
+      → read credentials for your plane (raise blocker if missing — you cannot
+      write secrets)
 
   Act (component graph — SCOPED TO YOUR OWN COMPONENTS):
     - upsert_component(agent_id, component_data) → create/update YOUR component
@@ -369,6 +415,8 @@ Reject threshold: both agents < 0.3 → auto-reject
     - ack_chats(agent_id, communication_ids[])
     - ack_broadcast(agent_id, communication_id)
     - raise_blocker(agent_id, task_id, blocker_detail)
+    - mark_resource_done(agent_id, resource_id) → SME-ONLY: call this when
+      materialisation of your assigned resource is complete.
 
   Plane MCP (read-only, scoped to your assigned resource):
     {plane-specific tools — e.g., github-reader scoped to your repo}
@@ -699,7 +747,26 @@ These rules apply to ALL agent types:
 
 ---
 
-## 7. Tool Usage Patterns (all agents)
+## 7. Workspace Discipline (all agents)
+
+Every agent is spawned with `cwd` set to its own dedicated workspace
+(`src/workspaces/<agent_id>/`). The subprocess's `.mcp.json` lives there,
+and the workspace persists across invocations.
+
+Rules (enforced by prompting, not code):
+- **Use `./` for every scratch file, helper script, cloned repo, cached
+  API response, and intermediate JSON.** Your workspace is where you work.
+- **Do NOT write to `/tmp`.** `/tmp` collides with other agents, is wiped on
+  reboot, and makes debugging impossible (no link back to which agent
+  produced the file).
+- **Leverage persistence.** When you wake up again, everything in `./` is
+  still there. Iterators should cache long API sweeps; SMEs should keep
+  their cloned repo and analysis notes.
+- `.mcp.json` in your cwd configures MCP servers — don't delete it.
+
+---
+
+## 8. Tool Usage Patterns (all agents)
 
 ```
 WAKE-UP PATTERN (every invocation):
@@ -755,7 +822,7 @@ ERROR HANDLING:
 
 ---
 
-## 8. Deferred Items
+## 9. Deferred Items
 
 ```
 TO BE DETAILED LATER:
