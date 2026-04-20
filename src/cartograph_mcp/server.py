@@ -1,13 +1,21 @@
-"""Cartograph MCP Server — exposes agent tools over HTTP.
+"""Cartograph MCP Server — proper MCP protocol over streamable HTTP.
 
 Phase 0: action_items, chat, broadcast tools.
 More tools added in subsequent phases.
+
+Agents connect via .mcp.json like:
+  {
+    "mcpServers": {
+      "cartograph-db": { "type": "http", "url": "http://localhost:8100/mcp" }
+    }
+  }
 """
 
-import json
 import logging
 import sys
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
 
 from shared.db import init_pool, close_pool, execute_one
 from shared.migrations import run_migrations
@@ -20,141 +28,152 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Create the MCP server. Streamable HTTP listens at /mcp endpoint.
+mcp = FastMCP("cartograph-db", host="0.0.0.0", port=8100)
 
-def _get_agent_type(agent_id: str) -> str | None:
+
+def _get_agent_type(agent_id: str) -> str:
+    """Look up an agent's type; raise if not found."""
     row = execute_one(
         "SELECT agent_type FROM agent_runs WHERE agent_id = %s",
         (agent_id,),
     )
-    return row["agent_type"] if row else None
-
-
-TOOL_HANDLERS = {}
-
-
-def register_tool(name: str):
-    def decorator(fn):
-        TOOL_HANDLERS[name] = fn
-        return fn
-    return decorator
-
-
-# --- Phase 0 Tools ---
-
-@register_tool("get_action_items_summary")
-def handle_get_action_items_summary(params: dict) -> dict:
-    agent_id = params["agent_id"]
-    agent_type = _get_agent_type(agent_id)
-    if agent_type is None:
+    if row is None:
         raise ValueError(f"Agent {agent_id} not found")
+    return row["agent_type"]
+
+
+# ============ ACTION ITEMS ============
+
+@mcp.tool()
+def get_action_items_summary(agent_id: str) -> dict[str, int]:
+    """Quick counts of all pending action items for this agent.
+
+    Returns a dict with keys: consolidations_pending, tasks_pending,
+    clarifications_pending, unacked_chats, unacked_broadcasts.
+
+    Call this FIRST on every wake-up to see what needs attention.
+    """
+    agent_type = _get_agent_type(agent_id)
     return action_items.get_action_items_summary(agent_id, agent_type)
 
 
-@register_tool("get_action_items_detail")
-def handle_get_action_items_detail(params: dict) -> dict:
-    agent_id = params["agent_id"]
+@mcp.tool()
+def get_action_items_detail(agent_id: str) -> dict[str, Any]:
+    """Full rows for every pending action item across all categories.
+
+    Returns a dict with keys: consolidations, tasks, clarifications,
+    chats, broadcasts — each a list of full row objects.
+
+    Call this after get_action_items_summary to get details on items
+    you plan to address.
+    """
     agent_type = _get_agent_type(agent_id)
-    if agent_type is None:
-        raise ValueError(f"Agent {agent_id} not found")
     return action_items.get_action_items_detail(agent_id, agent_type)
 
 
-@register_tool("send_chat")
-def handle_send_chat(params: dict) -> dict:
-    return chat.send_chat(params["from_agent_id"], params["to_agent_id"], params["message"])
+# ============ CHAT ============
+
+@mcp.tool()
+def send_chat(from_agent_id: str, to_agent_id: str, message: str) -> dict[str, Any]:
+    """Send a chat message.
+
+    Restrictions: agents can only message 'admin'; admin can message any agent.
+    Use this for free-form communication with the admin user.
+
+    Returns the inserted communication row.
+    """
+    return chat.send_chat(from_agent_id, to_agent_id, message)
 
 
-@register_tool("ack_chats")
-def handle_ack_chats(params: dict) -> dict:
-    count = chat.ack_chats(params["agent_id"], params["communication_ids"])
+@mcp.tool()
+def ack_chats(agent_id: str, communication_ids: list[str]) -> dict[str, int]:
+    """Acknowledge specific chat messages by ID.
+
+    Selective ack — agent chooses which messages to mark as read.
+    Only affects messages where to_agent = agent_id, type = 'chat'.
+
+    Returns: {"acked": <count>}.
+    """
+    count = chat.ack_chats(agent_id, communication_ids)
     return {"acked": count}
 
 
-@register_tool("get_unacked_chats")
-def handle_get_unacked_chats(params: dict) -> dict:
-    return {"messages": chat.get_unacked_chats(params["agent_id"])}
+@mcp.tool()
+def get_unacked_chats(agent_id: str) -> dict[str, list]:
+    """Get all unacked chat messages addressed to this agent.
+
+    Returns: {"messages": [...]}.
+    """
+    return {"messages": chat.get_unacked_chats(agent_id)}
 
 
-@register_tool("get_chat_history")
-def handle_get_chat_history(params: dict) -> dict:
-    return {
-        "messages": chat.get_chat_history(
-            params["agent_id"],
-            params.get("page", 1),
-            params.get("limit", 20),
-        )
-    }
+@mcp.tool()
+def get_chat_history(agent_id: str, page: int = 1, limit: int = 20) -> dict[str, list]:
+    """Get paginated chat history involving this agent.
+
+    Returns messages where agent is from_agent OR to_agent, ordered newest-first.
+    Default page=1, limit=20.
+
+    Returns: {"messages": [...]}.
+    """
+    return {"messages": chat.get_chat_history(agent_id, page, limit)}
 
 
-@register_tool("send_broadcast")
-def handle_send_broadcast(params: dict) -> dict:
-    return broadcast.send_broadcast(
-        params["from_agent_id"], params["to_agent_type"], params["message"]
-    )
+# ============ BROADCAST ============
+
+@mcp.tool()
+def send_broadcast(from_agent_id: str, to_agent_type: str, message: str) -> dict[str, Any]:
+    """Send a broadcast to all agents of a type.
+
+    Restriction: only orchestrator and admin can broadcast.
+
+    Returns the inserted communication row.
+    """
+    return broadcast.send_broadcast(from_agent_id, to_agent_type, message)
 
 
-@register_tool("ack_broadcast")
-def handle_ack_broadcast(params: dict) -> dict:
-    result = broadcast.ack_broadcast(params["agent_id"], params["communication_id"])
+@mcp.tool()
+def ack_broadcast(agent_id: str, communication_id: str) -> dict[str, Any]:
+    """Acknowledge a broadcast message.
+
+    Once acked, trigger manager stops re-invoking this agent for this broadcast.
+    Idempotent — safe to call multiple times.
+    """
+    result = broadcast.ack_broadcast(agent_id, communication_id)
     return result or {"status": "already_acked"}
 
 
-@register_tool("get_unacked_broadcasts")
-def handle_get_unacked_broadcasts(params: dict) -> dict:
-    agent_type = _get_agent_type(params["agent_id"])
-    if agent_type is None:
-        raise ValueError(f"Agent {params['agent_id']} not found")
-    return {
-        "messages": broadcast.get_unacked_broadcasts(params["agent_id"], agent_type)
-    }
+@mcp.tool()
+def get_unacked_broadcasts(agent_id: str) -> dict[str, list]:
+    """Get broadcast messages this agent hasn't acked yet.
+
+    Returns: {"messages": [...]}.
+    """
+    agent_type = _get_agent_type(agent_id)
+    return {"messages": broadcast.get_unacked_broadcasts(agent_id, agent_type)}
 
 
-# --- HTTP Handler ---
+# ============ ENTRY POINT ============
 
-class MCPHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
-        try:
-            request = json.loads(body)
-            tool_name = request.get("tool")
-            params = request.get("params", {})
+def main() -> None:
+    """Start the MCP server on streamable-http transport.
 
-            if tool_name not in TOOL_HANDLERS:
-                self._respond(404, {"error": f"Unknown tool: {tool_name}"})
-                return
-
-            result = TOOL_HANDLERS[tool_name](params)
-            self._respond(200, {"result": result})
-
-        except ValueError as e:
-            self._respond(400, {"error": str(e)})
-        except Exception as e:
-            logger.exception("Tool call failed")
-            self._respond(500, {"error": str(e)})
-
-    def _respond(self, status: int, body: dict):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(body, default=str).encode())
-
-    def log_message(self, format, *args):
-        logger.debug(format, *args)
-
-
-def main(port: int = 8100) -> None:
+    Agents connect at http://localhost:8100/mcp via .mcp.json:
+      {"mcpServers": {"cartograph-db": {"type": "http", "url": "http://localhost:8100/mcp"}}}
+    """
     init_pool()
     run_migrations()
-    server = HTTPServer(("0.0.0.0", port), MCPHandler)
-    logger.info("Cartograph MCP server listening on port %d", port)
-    logger.info("Registered tools: %s", list(TOOL_HANDLERS.keys()))
+    logger.info("Cartograph MCP server starting on port 8100 (streamable-http)")
+    logger.info(
+        "Registered tools: get_action_items_summary, get_action_items_detail, "
+        "send_chat, ack_chats, get_unacked_chats, get_chat_history, "
+        "send_broadcast, ack_broadcast, get_unacked_broadcasts"
+    )
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        # FastMCP.run() with transport='streamable-http' serves at /mcp
+        mcp.run(transport="streamable-http")
     finally:
-        server.server_close()
         close_pool()
 
 
