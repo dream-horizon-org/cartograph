@@ -22,6 +22,7 @@ from shared.db import init_pool, close_pool, execute, execute_one
 from shared.migrations import run_migrations
 from cartograph_mcp.tools import action_items, chat, broadcast, secrets
 from cartograph_mcp.tools import tasks as tasks_tool
+from cartograph_mcp.tools import resources as resources_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -298,6 +299,86 @@ def get_task_thread(
     return {"messages": tasks_tool.get_task_thread(task_id, agent_id, page, limit)}
 
 
+# ============ RESOURCES ============
+
+@mcp.tool()
+def upsert_resource(
+    agent_id: str,
+    plane: str,
+    resource_type: str,
+    identifier: str,
+    access_desc: str = "",
+    metadata: dict | None = None,
+) -> dict[str, Any]:
+    """Register a discovered resource. ITERATOR-ONLY.
+
+    Idempotent on (plane, resource_type, identifier). If the same resource
+    already exists, only access_desc and metadata are updated; status and
+    created_at are preserved.
+
+    Iterators can only write resources for their own plane.
+
+    Args:
+        plane: one of github, deploy, cloud, telemetry, config
+        resource_type: e.g., 'repo', 'r53_chain', 'k8s_workload', 'rds',
+                       'elasticache', 'lambda', 'service' (Datadog), etc.
+        identifier: stable identifier (e.g., 'dream11/feeds-agg-v2',
+                    'feeds-agg-v2.dream11.local', 'sg-3e743b49')
+        access_desc: brief note on how to access it ('clone via SSH',
+                     'kubectl get', 'aws describe-asg')
+        metadata: any extra context (pre-resolved chain data, cluster name, etc.)
+
+    Returns: the stored row.
+    """
+    return resources_tool.upsert_resource(
+        agent_id, plane, resource_type, identifier, access_desc, metadata
+    )
+
+
+@mcp.tool()
+def get_resource(agent_id: str, resource_id: str) -> dict[str, Any]:
+    """Read a single resource by id. Any active agent can read."""
+    return resources_tool.get_resource(agent_id, resource_id)
+
+
+@mcp.tool()
+def list_resources_for_plane(agent_id: str, plane: str) -> dict[str, list]:
+    """List all resources registered for a plane. Any active agent can read.
+
+    Useful for iterators checking what's already registered (to avoid
+    duplicate work across re-invocations) and for orchestrator monitoring.
+    """
+    return {"resources": resources_tool.list_resources_for_plane(agent_id, plane)}
+
+
+@mcp.tool()
+def list_all_resources(agent_id: str, status: str | None = None) -> dict[str, list]:
+    """List all resources across all planes, optionally filtered by status.
+
+    status values: pending, assigned, done.
+    """
+    return {"resources": resources_tool.list_all_resources(agent_id, status)}
+
+
+@mcp.tool()
+def get_resource_counts(agent_id: str) -> dict[str, Any]:
+    """Get counts of resources grouped by plane and status.
+
+    Returns: {"by_plane_status": [{plane, status, cnt}, ...]}
+    """
+    return resources_tool.get_resource_counts(agent_id)
+
+
+@mcp.tool()
+def mark_resource_done(agent_id: str, resource_id: str) -> dict[str, Any]:
+    """Mark a resource as done (SME only, for its own resource).
+
+    Called by an SME when materialisation of this resource is complete.
+    Validates agent is the SME assigned to this resource.
+    """
+    return resources_tool.mark_resource_done(agent_id, resource_id)
+
+
 # ============ AGENT LIFECYCLE ============
 
 @mcp.tool()
@@ -410,6 +491,8 @@ def main() -> None:
         "send_broadcast, ack_broadcast, get_unacked_broadcasts, "
         "put_secret, get_secret, list_secrets_for_plane, delete_secret, "
         "create_task, respond_task, raise_blocker, get_my_tasks, get_task_thread, "
+        "upsert_resource, get_resource, list_resources_for_plane, "
+        "list_all_resources, get_resource_counts, mark_resource_done, "
         "create_agent, list_agents"
     )
     try:

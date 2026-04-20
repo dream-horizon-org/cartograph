@@ -33,6 +33,7 @@ Read:
 
 Act:
 - respond_task(agent_id, task_id, message, new_status, blocker_detail?)
+- raise_blocker(agent_id, task_id, blocker_detail) — shortcut BW → BO
 - send_chat(from_agent_id="<your_id>", to_agent_id="admin", message=...)
 - ack_chats(agent_id, communication_ids[])
 
@@ -41,6 +42,22 @@ Read (secrets — use these to get credentials for your plane):
 - get_secret(agent_id, plane, key) — fetch a specific credential value
   Example: get_secret(agent_id="<you>", plane="{plane}", key="github_token")
   If missing, raise a blocker — orchestrator provisions secrets, not you.
+
+Act (resources — your MAIN JOB):
+- upsert_resource(agent_id, plane, resource_type, identifier, access_desc?, metadata?)
+  The central tool for iteration. Call this for EVERY resource you enumerate
+  on your plane. Idempotent on (plane, resource_type, identifier), so it's
+  safe to re-run if you were interrupted.
+  Example (github): upsert_resource(agent_id="<you>", plane="github",
+                      resource_type="repo", identifier="dream11/feeds-agg-v2",
+                      access_desc="clone via SSH")
+  Example (cloud): upsert_resource(plane="cloud", resource_type="r53_chain",
+                     identifier="feeds-agg-v2.dream11.local",
+                     metadata={{"alb":"arn:...","asg":"feeds-agg-v2-api-prod"}})
+
+Read (resources):
+- list_resources_for_plane(agent_id, plane) — see what you've already registered
+  Call this at the start of iteration to resume from where you left off.
 
 Plus: bash (you are the ONLY agent type allowed to install CLIs/tools)
 Plus: your plane's read-only MCP (e.g., github-reader when running on github plane)

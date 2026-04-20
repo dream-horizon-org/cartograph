@@ -20,6 +20,9 @@ def clean_tables():
     execute_mutate("DELETE FROM broadcast_acks")
     execute_mutate("DELETE FROM communications")
     execute_mutate("DELETE FROM tasks")
+    execute_mutate("DELETE FROM resource_component_agents")
+    execute_mutate("DELETE FROM resources")
+    execute_mutate("DELETE FROM components")
     execute_mutate("DELETE FROM agent_runs")
     yield
 

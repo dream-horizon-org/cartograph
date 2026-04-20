@@ -44,6 +44,10 @@ Read:
 - get_secret(agent_id, plane, key) — fetch a specific credential value
   (e.g., get_secret(plane="{plane}", key="github_token"))
   If missing, raise a blocker — you cannot write secrets, only orchestrator does.
+- get_resource(agent_id, resource_id) — read the resource row you are assigned to
+- mark_resource_done(agent_id, resource_id) — SME-ONLY: call this when
+  materialisation of your assigned resource is complete (after creating all
+  components + attributions).
 - get_component(id), get_attributions(component_id),
   get_edges(component_id), get_unresolved(component_id)
 - vector_search(query_text, table, limit)

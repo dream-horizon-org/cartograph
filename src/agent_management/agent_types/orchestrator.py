@@ -38,6 +38,10 @@ Read:
 - get_component(component_id), get_attributions(component_id),
   get_edges(component_id), get_unresolved(component_id)
 - vector_search(query_text, table, limit)
+- list_all_resources(agent_id, status?) — see all resources across planes
+- list_resources_for_plane(agent_id, plane) — monitor a specific iterator
+- get_resource_counts(agent_id) — dashboard: counts by plane/status
+- get_resource(agent_id, resource_id) — fetch a single resource
 
 Act:
 - create_agent(agent_id, new_agent_type, plane?, resource_id?) — ORCHESTRATOR-ONLY:
