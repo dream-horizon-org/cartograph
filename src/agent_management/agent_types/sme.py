@@ -141,6 +141,26 @@ Materialisation:
 - Hydrate attributions exhaustively (endpoints, hostnames, deploy configs,
   infra details, config refs)
 - Record outbound calls as unresolved references
+- INFRASTRUCTURE DEPENDENCIES — scan your code for backing services:
+  - Databases: connection strings (postgres://, mongodb://, mysql://, jdbc:),
+    ORM configs (SQLAlchemy, Sequelize, Prisma, Mongoose, Hibernate),
+    env vars (DATABASE_URL, DB_HOST, MONGO_URI), SDK clients
+    (DynamoDBClient, RDSDataClient, MongoClient)
+  - Caches: Redis / Memcached clients, REDIS_URL, ElastiCache hostnames
+  - Message queues: Kafka producers/consumers, SQS/SNS clients, RabbitMQ
+    connections, NATS, KAFKA_BROKERS env vars
+  - Object stores: S3 bucket references, GCS clients, BUCKET_NAME env vars
+  For each one found:
+  - CONCRETE instance (specific hostname, DB name, bucket name) →
+    the target component may already exist; vector_search for it first
+    (Phase 3), else insert_unresolved with a candidate hint. Once you
+    have its component_id, create_edge from your component to it
+    (edge_type='reads_from' / 'writes_to' / 'publishes_to' /
+    'consumes_from' as appropriate).
+  - Only an env var / generic reference (no resolved hostname) →
+    insert_unresolved with reference_type='database' / 'cache' / 'queue' /
+    'object_store' and the env var or hostname as reference_value.
+    Config SMEs or resolution phase will link it later.
 
 Consolidation:
 - SELF-CHECK: is your component actually multiple things? Multiple entry points,

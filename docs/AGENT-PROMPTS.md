@@ -468,6 +468,15 @@ Reject threshold: both agents < 0.3 → auto-reject
         4. Similarity < 0.7 → create new component + embed immediately
     - Record ALL attributions: endpoints, hostnames, deploy configs, infra, etc.
     - Record outbound calls as unresolved references
+    - INFRASTRUCTURE DEPENDENCIES — actively grep for backing services:
+      databases (connection-string protocols, ORM configs, SDK clients,
+      env vars like DATABASE_URL/MONGO_URI), caches (REDIS_URL,
+      Memcached), message queues (KAFKA_BROKERS, SQS/SNS/RabbitMQ/NATS
+      clients), object stores (S3/GCS buckets, BUCKET_NAME env vars).
+      Concrete hostname/bucket → try vector_search for target component
+      (Phase 3), then create_edge to it. Only an env var / generic
+      reference → insert_unresolved with reference_type='database' /
+      'cache' / 'queue' / 'object_store'.
 
   Consolidation:
     - SELF-CHECK: Does your component look like it's actually multiple things?
