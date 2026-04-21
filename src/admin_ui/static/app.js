@@ -36,28 +36,28 @@ async function fetchAgents() {
  *  an existing agent_id / agent_type.
  */
 function populateAgentDatalists() {
+  const $agent = document.getElementById('agent-options');
   const $from = document.getElementById('from-options');
   const $to = document.getElementById('to-options');
-  if (!$from || !$to) return;
+  if (!$from || !$to || !$agent) return;
 
   const agentIds = state.agents.map(a => a.agent_id);
   const agentTypes = ['orchestrator', 'iterator', 'sme', 'resolver'];
+  const fill = (el, values) => {
+    el.innerHTML = '';
+    values.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v;
+      el.appendChild(opt);
+    });
+  };
 
-  // From: real agent_ids + 'admin' pseudo-agent.
-  $from.innerHTML = '';
-  ['admin', ...agentIds].forEach(id => {
-    const opt = document.createElement('option');
-    opt.value = id;
-    $from.appendChild(opt);
-  });
-
+  // Participant filter: any real agent_id + 'admin' (direction-agnostic).
+  fill($agent, ['admin', ...agentIds]);
+  // From: same set (directional sender).
+  fill($from, ['admin', ...agentIds]);
   // To: agent_ids + 'admin' + agent_types (broadcast targets).
-  $to.innerHTML = '';
-  [...agentIds, 'admin', ...agentTypes].forEach(v => {
-    const opt = document.createElement('option');
-    opt.value = v;
-    $to.appendChild(opt);
-  });
+  fill($to, [...agentIds, 'admin', ...agentTypes]);
 }
 
 function renderAgents() {
@@ -322,6 +322,7 @@ const commsState = {
   messages: [],
   hasMore: false,
   filters: {
+    agent: '', agent_type: '',
     from_agent: '', to_agent: '',
     from_agent_type: '', to_agent_type: '',
     type: '',
@@ -346,6 +347,8 @@ function switchTab(name) {
 async function fetchCommunications() {
   const params = new URLSearchParams();
   const f = commsState.filters;
+  if (f.agent) params.set('agent', f.agent);
+  if (f.agent_type) params.set('agent_type', f.agent_type);
   if (f.from_agent) params.set('from_agent', f.from_agent);
   if (f.to_agent) params.set('to_agent', f.to_agent);
   if (f.from_agent_type) params.set('from_agent_type', f.from_agent_type);
@@ -481,6 +484,8 @@ function renderSourceEntity(type, data) {
 
 document.getElementById('filter-apply').addEventListener('click', () => {
   commsState.filters = {
+    agent: document.getElementById('filter-agent').value.trim(),
+    agent_type: document.getElementById('filter-agent-type').value,
     from_agent: document.getElementById('filter-from').value.trim(),
     to_agent: document.getElementById('filter-to').value.trim(),
     from_agent_type: document.getElementById('filter-from-type').value,
@@ -491,11 +496,12 @@ document.getElementById('filter-apply').addEventListener('click', () => {
 });
 
 document.getElementById('filter-reset').addEventListener('click', () => {
-  ['filter-from', 'filter-to'].forEach(id =>
+  ['filter-agent', 'filter-from', 'filter-to'].forEach(id =>
     document.getElementById(id).value = '');
-  ['filter-from-type', 'filter-to-type', 'filter-type'].forEach(id =>
+  ['filter-agent-type', 'filter-from-type', 'filter-to-type', 'filter-type'].forEach(id =>
     document.getElementById(id).value = '');
   commsState.filters = {
+    agent: '', agent_type: '',
     from_agent: '', to_agent: '',
     from_agent_type: '', to_agent_type: '',
     type: '',

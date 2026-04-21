@@ -447,6 +447,24 @@ body {
   gap: 6px;
 }
 
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px dashed #21262d;
+}
+
+.filter-group:last-of-type { border-bottom: none; }
+
+.filter-group-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #6e7681;
+  font-weight: 600;
+}
+
 #filter-bar h2 {
   font-size: 14px;
   font-weight: 600;

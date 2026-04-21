@@ -160,6 +160,8 @@ def create_app() -> FastAPI:
         to_agent: Optional[str] = Query(None),
         from_agent_type: Optional[str] = Query(None),
         to_agent_type: Optional[str] = Query(None),
+        agent: Optional[str] = Query(None),
+        agent_type: Optional[str] = Query(None),
         type: Optional[str] = Query(None),
         source_id: Optional[str] = Query(None),
         before: Optional[str] = Query(None),
@@ -179,6 +181,11 @@ def create_app() -> FastAPI:
           to_agent_type          — matches either to_agent_type column
                                    (broadcasts) OR agent_runs.agent_type of
                                    whoever to_agent points at (point-to-point).
+          agent                  — participant filter: from_agent = X
+                                   OR to_agent = X (either direction).
+          agent_type             — participant-type filter: the type-wide
+                                   union of (from_agent_type = T OR
+                                   to_agent_type = T OR to_agent's type = T).
           type                   — communication type (chat/broadcast/...)
         """
         if type is not None and type not in _VALID_COMM_TYPES:
@@ -187,6 +194,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"Invalid from_agent_type (allowed: {sorted(_VALID_AGENT_TYPES)})")
         if to_agent_type and to_agent_type not in _VALID_AGENT_TYPES:
             raise HTTPException(400, f"Invalid to_agent_type (allowed: {sorted(_VALID_AGENT_TYPES)})")
+        if agent_type and agent_type not in _VALID_AGENT_TYPES:
+            raise HTTPException(400, f"Invalid agent_type (allowed: {sorted(_VALID_AGENT_TYPES)})")
 
         where = []
         params: list = []
@@ -220,6 +229,23 @@ def create_app() -> FastAPI:
                     ")"
                 )
                 params.extend([to_agent_type, to_agent_type])
+        if agent:
+            # Participant: sender OR recipient exact agent_id match.
+            where.append("(c.from_agent = %s OR c.to_agent = %s)")
+            params.extend([agent, agent])
+        if agent_type:
+            # Participant by type: from side OR to side OR broadcast column.
+            if agent_type == "admin":
+                where.append("(c.from_agent = 'admin' OR c.to_agent = 'admin')")
+            else:
+                where.append(
+                    "("
+                    "  c.from_agent IN (SELECT agent_id FROM agent_runs WHERE agent_type = %s)"
+                    "  OR c.to_agent IN (SELECT agent_id FROM agent_runs WHERE agent_type = %s)"
+                    "  OR c.to_agent_type = %s"
+                    ")"
+                )
+                params.extend([agent_type, agent_type, agent_type])
         if type:
             where.append("c.type = %s")
             params.append(type)

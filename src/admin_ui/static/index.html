@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cartograph Admin</title>
-  <link rel="stylesheet" href="/style.css?v=7">
+  <link rel="stylesheet" href="/style.css?v=8">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -57,34 +57,57 @@
     <section id="comms-view" class="view">
       <aside id="filter-bar">
         <h2>Filters</h2>
-        <label>From agent
-          <input id="filter-from" list="from-options" placeholder="specific agent_id"
-                 autocomplete="off">
-        </label>
-        <label>From agent type
-          <select id="filter-from-type">
-            <option value="">any</option>
-            <option value="admin">admin</option>
-            <option value="orchestrator">orchestrator</option>
-            <option value="iterator">iterator</option>
-            <option value="sme">sme</option>
-            <option value="resolver">resolver</option>
-          </select>
-        </label>
-        <label>To agent
-          <input id="filter-to" list="to-options" placeholder="specific agent_id"
-                 autocomplete="off">
-        </label>
-        <label>To agent type
-          <select id="filter-to-type">
-            <option value="">any</option>
-            <option value="admin">admin</option>
-            <option value="orchestrator">orchestrator</option>
-            <option value="iterator">iterator</option>
-            <option value="sme">sme</option>
-            <option value="resolver">resolver</option>
-          </select>
-        </label>
+
+        <div class="filter-group">
+          <div class="filter-group-label">Participant (either direction)</div>
+          <label>Agent
+            <input id="filter-agent" list="agent-options" placeholder="agent_id · from OR to"
+                   autocomplete="off">
+          </label>
+          <label>Agent type
+            <select id="filter-agent-type">
+              <option value="">any</option>
+              <option value="admin">admin</option>
+              <option value="orchestrator">orchestrator</option>
+              <option value="iterator">iterator</option>
+              <option value="sme">sme</option>
+              <option value="resolver">resolver</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="filter-group">
+          <div class="filter-group-label">Directional</div>
+          <label>From agent
+            <input id="filter-from" list="from-options" placeholder="specific agent_id"
+                   autocomplete="off">
+          </label>
+          <label>From agent type
+            <select id="filter-from-type">
+              <option value="">any</option>
+              <option value="admin">admin</option>
+              <option value="orchestrator">orchestrator</option>
+              <option value="iterator">iterator</option>
+              <option value="sme">sme</option>
+              <option value="resolver">resolver</option>
+            </select>
+          </label>
+          <label>To agent
+            <input id="filter-to" list="to-options" placeholder="specific agent_id"
+                   autocomplete="off">
+          </label>
+          <label>To agent type
+            <select id="filter-to-type">
+              <option value="">any</option>
+              <option value="admin">admin</option>
+              <option value="orchestrator">orchestrator</option>
+              <option value="iterator">iterator</option>
+              <option value="sme">sme</option>
+              <option value="resolver">resolver</option>
+            </select>
+          </label>
+        </div>
+
         <label>Communication type
           <select id="filter-type">
             <option value="">All</option>
@@ -107,6 +130,7 @@
         </p>
 
         <!-- Typable-dropdown data sources -->
+        <datalist id="agent-options"></datalist>
         <datalist id="from-options"></datalist>
         <datalist id="to-options"></datalist>
       </aside>
@@ -156,6 +180,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=7"></script>
+  <script src="/app.js?v=8"></script>
 </body>
 </html>

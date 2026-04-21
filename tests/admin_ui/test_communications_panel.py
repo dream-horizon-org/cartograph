@@ -128,6 +128,52 @@ def test_list_communications_invalid_to_agent_type(client):
     assert resp.status_code == 400
 
 
+# ------- participant filters (either-direction) -------
+
+
+def test_agent_filter_matches_either_direction(client, agent_factory):
+    agent_factory("orch-1", "orchestrator")
+    agent_factory("sme-1", "sme")
+    _insert_comm("admin", "sme-1", "chat", "to sme")
+    _insert_comm("sme-1", "admin", "chat", "from sme")
+    _insert_comm("orch-1", "admin", "chat", "from orch (unrelated)")
+    resp = client.get("/api/communications?agent=sme-1")
+    texts = sorted(m["text"] for m in resp.json()["messages"])
+    assert texts == ["from sme", "to sme"]
+
+
+def test_agent_type_filter_matches_either_direction_plus_broadcast(client, agent_factory):
+    agent_factory("orch-1", "orchestrator")
+    agent_factory("sme-1", "sme")
+    agent_factory("sme-2", "sme")
+    # sme-1 is sender
+    _insert_comm("sme-1", "admin", "chat", "sme-1 sent")
+    # sme-2 is recipient
+    _insert_comm("admin", "sme-2", "chat", "sme-2 received")
+    # broadcast to sme
+    _insert_comm("orch-1", "sme", "broadcast", "orch broadcast to smes")
+    # unrelated orch→admin
+    _insert_comm("orch-1", "admin", "chat", "unrelated orch msg")
+    resp = client.get("/api/communications?agent_type=sme")
+    texts = sorted(m["text"] for m in resp.json()["messages"])
+    assert texts == ["orch broadcast to smes", "sme-1 sent", "sme-2 received"]
+
+
+def test_agent_type_filter_admin_literal(client, agent_factory):
+    agent_factory("orch-1", "orchestrator")
+    _insert_comm("admin", "orch-1", "chat", "from admin")
+    _insert_comm("orch-1", "admin", "chat", "to admin")
+    _insert_comm("orch-1", "orch-1", "chat", "self-chat noise")  # no admin involvement
+    resp = client.get("/api/communications?agent_type=admin")
+    texts = sorted(m["text"] for m in resp.json()["messages"])
+    assert texts == ["from admin", "to admin"]
+
+
+def test_agent_type_filter_invalid(client):
+    resp = client.get("/api/communications?agent_type=banana")
+    assert resp.status_code == 400
+
+
 def test_list_communications_has_more_flag(client, agent_factory):
     agent_factory("orch-1")
     for i in range(55):
