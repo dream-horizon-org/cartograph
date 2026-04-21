@@ -24,6 +24,7 @@ from cartograph_mcp.tools import action_items, chat, broadcast, secrets
 from cartograph_mcp.tools import tasks as tasks_tool
 from cartograph_mcp.tools import resources as resources_tool
 from cartograph_mcp.tools import agent_lifecycle
+from cartograph_mcp.tools import components as components_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -505,6 +506,120 @@ def decommission_components_bulk(
     )
 
 
+# ============ COMPONENT GRAPH ============
+
+
+@mcp.tool()
+def upsert_component(
+    agent_id: str, component_data: dict[str, Any]
+) -> dict[str, Any]:
+    """Create or update this SME's single active component. SME-ONLY.
+
+    First call creates the component + fills the SME's RCA reservation row
+    (component_id NULL → new). Subsequent calls update in place.
+    Enforces 1-active-component-per-SME (use consolidation splits for more).
+
+    component_data keys:
+      canonical_name (required), display_name (required),
+      component_type (required; application/database/cache/queue/lambda/cron/
+        external-service/library/infrastructure),
+      confidence (default 1.0), metadata (dict).
+    """
+    return components_tool.upsert_component(agent_id, component_data)
+
+
+@mcp.tool()
+def upsert_attribution(
+    agent_id: str, component_id: str, attribution_data: dict[str, Any]
+) -> dict[str, Any]:
+    """Attach evidence to this SME's component. SME-ONLY (own component).
+
+    Idempotent on (plane, resource_type, identifier). Refuses if the same
+    tuple is already attributed to a different component (resolve via
+    consolidation in Phase 3).
+
+    attribution_data keys:
+      plane (github/deploy/cloud/telemetry/config), resource_type, identifier,
+      evidence (text), confidence (default 1.0), metadata (dict).
+    """
+    return components_tool.upsert_attribution(agent_id, component_id, attribution_data)
+
+
+@mcp.tool()
+def create_edge(agent_id: str, edge_data: dict[str, Any]) -> dict[str, Any]:
+    """Record a dependency edge from this SME's component. SME-ONLY (owns source).
+
+    Idempotent on (source_id, target_id, edge_type, identifier). Refuses
+    self-loops (source == target).
+
+    edge_data keys:
+      source_id (your component), target_id, edge_type (calls/reads_from/
+        writes_to/triggers/publishes_to/consumes_from/runs_on),
+      identifier (specific call, e.g. 'GET /scorecard'),
+      source_attr_id? target_attr_id? (ids of the attributions on either side),
+      evidence (array), confidence, metadata.
+    """
+    return components_tool.create_edge(agent_id, edge_data)
+
+
+@mcp.tool()
+def insert_unresolved(
+    agent_id: str, unresolved_data: dict[str, Any]
+) -> dict[str, Any]:
+    """Record a reference found but not resolved yet. SME-ONLY (own component).
+
+    Keys: found_in_component_id (your component), reference_type,
+    reference_value, context (dict).
+    """
+    return components_tool.insert_unresolved(agent_id, unresolved_data)
+
+
+@mcp.tool()
+def resolve_reference(
+    agent_id: str, unresolved_id: str, resolved_to_component_id: str
+) -> dict[str, Any]:
+    """Mark an unresolved reference as resolved to a component.
+
+    Open to any active agent — resolution is often cross-SME work (config
+    SMEs resolve hostname refs, etc.). Refuses if already resolved or if
+    the target component is decommissioned.
+    """
+    return components_tool.resolve_reference(
+        agent_id, unresolved_id, resolved_to_component_id
+    )
+
+
+@mcp.tool()
+def get_component(agent_id: str, component_id: str) -> dict[str, Any]:
+    """Read any component. Open to all active agents."""
+    return components_tool.get_component(agent_id, component_id)
+
+
+@mcp.tool()
+def get_attributions(
+    agent_id: str, component_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """Read all attributions for a component. Open to all active agents."""
+    return {"attributions": components_tool.get_attributions(agent_id, component_id)}
+
+
+@mcp.tool()
+def get_edges(agent_id: str, component_id: str) -> dict[str, list]:
+    """Read all edges for a component (inbound + outbound). Open to all agents.
+
+    Returns: {"outbound": [...], "inbound": [...]}
+    """
+    return components_tool.get_edges(agent_id, component_id)
+
+
+@mcp.tool()
+def get_unresolved(
+    agent_id: str, component_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """Read unresolved references for a component. Open to all active agents."""
+    return {"unresolved": components_tool.get_unresolved(agent_id, component_id)}
+
+
 @mcp.tool()
 def reject_resource(
     agent_id: str,
@@ -715,7 +830,10 @@ def main() -> None:
         "mark_resource_done, reject_resource, reject_resources_bulk, "
         "bulk_spawn_smes, create_agent, list_agents, reset_agent, "
         "decommission_agent, decommission_agents_bulk, "
-        "decommission_component, decommission_components_bulk"
+        "decommission_component, decommission_components_bulk, "
+        "upsert_component, upsert_attribution, create_edge, "
+        "insert_unresolved, resolve_reference, "
+        "get_component, get_attributions, get_edges, get_unresolved"
     )
     try:
         # FastMCP.run() with transport='streamable-http' serves at /mcp
