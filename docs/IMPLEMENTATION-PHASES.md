@@ -142,43 +142,147 @@ Task management — orchestrator assigns work to iterators.
 
 ---
 
-## Phase 2: Materialisation
+## Phase 2: Materialisation + Parallel Runtime
 
-Component discovery — SMEs analyse resources and build the component graph.
+Runtime infrastructure upgrade + the SME component-graph tool set. Four
+sub-deliverables, shipped in order 2.1 → 2.2 → 2.4 → 2.3, each as its own
+commit with TDD (failing tests first, then implementation, then refactor).
 
-### MCP Tools Added
-**Read:**
-- `get_component(component_id)` — read any component. All agents can read all components.
-- `get_attributions(component_id)` — read attributions for any component.
-- `get_edges(component_id)` — read edges for any component (inbound + outbound: WHERE source_id=? OR target_id=?).
-- `get_unresolved(component_id)` — read unresolved references for a component.
-- `vector_search(query_text, table, limit)` — embed query_text via embedding client, search against table's embedding column using cosine similarity, return top N with similarity scores. Tables: components, attributions, unresolved, edges.
+### 2.1 Parallel Invoke Loop (lane-based)
 
-**Act:**
-- `upsert_component(agent_id, component_data)` — INSERT or UPDATE component. Validate: agent owns this component via resource_component_agents (or new component → create RCA row). Auto-embed: `"{type}: {canonical_name} {display_name} {metadata}"`.
-- `upsert_attribution(agent_id, component_id, attribution_data)` — INSERT or UPDATE attribution. Validate: agent owns component. Auto-embed: `"{resource_type}: {identifier}"`. Handle UNIQUE(plane, resource_type, identifier) via ON CONFLICT.
-- `create_edge(agent_id, edge_data)` — INSERT edge. Validate: agent owns source component. CHECK source_id != target_id. Auto-embed: `"{edge_type}: {identifier}"`. Handle UNIQUE(source_id, target_id, edge_type, identifier).
-- `insert_unresolved(agent_id, unresolved_data)` — INSERT unresolved reference. Auto-embed: `"{reference_type}: {reference_value}"`.
-- `resolve_reference(agent_id, unresolved_id, resolved_to_component_id)` — SET resolved=TRUE, resolved_to_component_id=?. Optionally create edge.
+**Problem today:** `InvokeLoop` runs one claude subprocess at a time. With
+iterator/SME timeouts of 1800s, an SME mid-analysis blocks orchestrator
+wake-ups behind it. Also: `_process_locked_agents` takes a snapshot and
+iterates it, so higher-priority items that get `trigger_lock`ed mid-cycle
+are ignored until the next scan.
 
-### Trigger Manager Additions
-- SME auto-spawn: when resource with status='pending' exists AND no agent assigned to it:
-  - Create new SME agent in agent_runs (status='idle')
-  - Create resource_component_agents entry (resource→placeholder component→new agent)
-  - Set resource status='assigned'
-  - Next trigger scan picks up the new idle agent with pending task
-- Include component/attribution counts in action items if relevant
+**Design:**
+- Per-type concurrency caps (env-configurable, sensible defaults):
+  - `INVOKE_LANES_ORCH=1`
+  - `INVOKE_LANES_RES=1`
+  - `INVOKE_LANES_ITER=2`
+  - `INVOKE_LANES_SME=4`
+  - Total: 8 concurrent claude subprocesses by default.
+- Implementation: one `ThreadPoolExecutor(max_workers=8)` + per-type
+  `threading.Semaphore` guarding pickup. Worker acquires the type sem
+  before it calls `pickup_agent`; releases after subprocess completes.
+- Dispatcher re-reads the queue on every iteration (no snapshot) using
+  `SELECT ... FOR UPDATE SKIP LOCKED` so higher-priority agents that
+  land during a cycle are picked up immediately on the next free slot.
+- Priority within bucket: `ORDER BY invocation_count ASC` (unchanged).
+- Per-type priority across types preserved via the existing `PRIORITY_ORDER`
+  — an orch with 0 invocations outranks an SME with 0 invocations only
+  when lanes are contending (i.e. when orch lane is free).
 
-### Embedding Operations
-- Components: embed on upsert_component
-- Attributions: embed on upsert_attribution
-- Edges: embed on create_edge
-- Unresolved: embed on insert_unresolved
-- Model: text-embedding-3-small, 1536 dims
-- Lookup protocol: exact match first → vector fallback (>0.85 match conf=0.8, 0.7-0.85 hint as unresolved, <0.7 create new)
+### 2.2 SME Component-Graph Tool Set
+
+Full Phase-2 SME write set + reads for all agents. Auto-embedding deferred
+(columns stay `NULL`; embedding client + backfill + `vector_search` land
+in Phase 3 prep).
+
+**MCP Tools Added:**
+
+Writes (SME-scoped):
+- `upsert_component(agent_id, component_data)` — CREATE on first call (fills
+  the SME's RCA reservation row: `component_id=NULL` → `component_id=C`);
+  UPDATE on subsequent calls. Enforces the **1-active-component-per-SME
+  invariant**: refuses if SME already owns a non-decommissioned component
+  and this call would create a second.
+- `upsert_attribution(agent_id, component_id, attribution_data)` — scoped
+  to the caller's own component (via RCA). ON CONFLICT on `(plane,
+  resource_type, identifier)` does UPDATE.
+- `create_edge(agent_id, edge_data)` — scoped to SME owning `source_id`.
+  CHECK `source_id != target_id`; UNIQUE on `(source_id, target_id,
+  edge_type, identifier)`.
+- `insert_unresolved(agent_id, unresolved_data)` — scoped to SME owning
+  `found_in_component_id`.
+- `resolve_reference(agent_id, unresolved_id, resolved_to_component_id)` —
+  SET `resolved=TRUE`, `resolved_to_component_id`; optionally create edge.
+
+Reads (all agents):
+- `get_component(component_id)`
+- `get_attributions(component_id)`
+- `get_edges(component_id)` — inbound + outbound
+- `get_unresolved(component_id)`
+
+**Explicitly deferred:**
+- `vector_search` — needs embedding pipeline, Phase 3 prep.
+- Auto-embed on write — same.
+
+### 2.3 PostToolUse Notification Hook (per-agent async channel)
+
+Every agent gets a Claude Code `PostToolUse` hook that queries a new MCP
+endpoint after each tool call. If new high-priority messages landed since
+the agent's last invocation, the hook emits `[NOTIFY] ...` to the
+conversation so the agent can react mid-session.
+
+**Design:**
+- New MCP tool `get_agent_notifications(agent_id, priority_from_agent_types=[...])`
+  returning compact JSON:
+  ```
+  {high_priority: 3,
+   breakdown: [{from_type: 'orchestrator', type: 'task', count: 2},
+               {from_type: 'admin',        type: 'chat', count: 1}]}
+  ```
+- Hook script: small Python CLI in `src/agent_management/hooks/notify.py`
+  that reads `{agent_id}` + priority list from environment, hits MCP via
+  localhost, prints `[NOTIFY] ...` on stdout only if `high_priority > 0`.
+  Empty stdout on quiet cycles = no noise.
+- `create_agent` writes a per-workspace `.claude/settings.json` with a
+  `PostToolUse` matcher `*` calling the notify script with the agent's
+  own `agent_id` + its per-type priority source list:
+  - orchestrator: `['admin']`
+  - iterator:     `['admin', 'orchestrator']`
+  - SME:          `['admin', 'orchestrator']`
+  - resolver:     `['admin', 'orchestrator']`
+- Rate-limiting: notify script short-circuits if called within 10s of its
+  last run (state in `{cwd}/.cartograph-notify-last`) — prevents 50-tool-
+  call sessions from triggering 50 DB hits.
+
+### 2.4 Admin UI — Communications Panel + Broadcast + State Metadata
+
+**Backend additions:**
+- Log state transitions in `communications.metadata` where applicable:
+  - `respond_task` → `metadata.state_transition = {from, to}` on the
+    communication row (Phase 1 tool; backfill now).
+  - `respond_consolidation`, `respond_clarification` → same shape when
+    those tools land (Phase 3).
+- New HTTP endpoints in admin UI:
+  - `GET /api/communications?from_agent=&to_agent=&type=&source_id=&before=&limit=`
+  - `GET /api/task/:id` — task row + current status + thread
+  - `GET /api/consolidation/:id` — (placeholder, Phase 3)
+  - `GET /api/clarification/:id` — (placeholder, Phase 3)
+  - `POST /api/broadcast` — admin broadcasts via the UI directly (inserts
+    communication type='broadcast', from_agent='admin', to_agent=agent_type).
+
+**Frontend:**
+- New `/communications` route with filter bar (agent_id, admin toggle,
+  type) + communications list + right-side detail panel that shows the
+  source task/consolidation/clarification and its current state.
+- Broadcast composer: button → textarea + target-type dropdown → POST.
+
+**Rationale for admin-direct broadcast:** admin is already the most
+privileged actor. Routing broadcast through orchestrator adds a round-trip
++ token cost + human wait for zero architectural gain.
+
+### Testing discipline
+
+- Every new function + tool gets unit tests covering success paths, error
+  paths, and scope/authorization checks. No "we'll test it later." No
+  ordering enforcement (test-first vs test-with is fine), but the suite
+  must go green before commit.
+- Each sub-phase lands in its own commit once its tests pass.
 
 ### Tables Activated
 - components, attributions, edges, unresolved, resource_component_agents
+  (reservation → owned transition)
+
+### Deferred to Phase 3 prep
+- Embedding pipeline (OpenAI client, text-embedding-3-small, auto-embed on
+  write, HNSW index usage).
+- `vector_search` tool.
+- Consolidation + clarification state tooling + `state_transition`
+  metadata backfill for those tools.
 
 ---
 
