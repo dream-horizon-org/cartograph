@@ -95,8 +95,10 @@ function renderAgents() {
     const sleepingCount = agents.filter(a => a.sleep_until).length;
     const groupLi = document.createElement('li');
     groupLi.className = 'agent-group';
-    // Orchestrator is a singleton — bulk sleep/wake are pointless (and the
-    // sleep tool refuses agent_type='orchestrator' anyway). Hide the buttons.
+    // Group-level buttons use the agent_type path. The sleep tool refuses
+    // agent_type='orchestrator' by design (never bulk-pause coordinators),
+    // so we hide group buttons for orchestrator. Per-agent row buttons
+    // still work on the orchestrator (they use agent_ids=[...]).
     const showBulk = type !== 'orchestrator';
     groupLi.innerHTML = `
       <header class="agent-group-header">
@@ -156,17 +158,34 @@ function _renderAgentRow(agent, $ul) {
   const li = document.createElement('li');
   li.dataset.agentId = agent.agent_id;
   if (agent.agent_id === state.selectedAgentId) li.classList.add('selected');
-  const sleepTag = agent.sleep_until
+  const isSleeping = !!agent.sleep_until;
+  const sleepTag = isSleeping
     ? `<span class="status status-sleep">💤 until ${new Date(agent.sleep_until).toLocaleString()}</span>`
     : '';
+  const actionBtn = isSleeping
+    ? `<button class="row-btn row-wake" title="Wake ${escapeHtml(agent.agent_id)}">⏰</button>`
+    : `<button class="row-btn row-sleep" title="Sleep ${escapeHtml(agent.agent_id)}">💤</button>`;
   li.innerHTML = `
-    <div class="agent-id">${escapeHtml(agent.agent_id)}</div>
+    <div class="agent-row-head">
+      <div class="agent-id">${escapeHtml(agent.agent_id)}</div>
+      ${actionBtn}
+    </div>
     <div class="agent-meta">
       <span class="status status-${agent.status}">${agent.status}</span>
       ${sleepTag}
     </div>
   `;
+  // Clicking the row selects the agent for chat; clicking the sleep/wake
+  // button must NOT propagate into the row-level selection handler.
   li.addEventListener('click', () => selectAgent(agent.agent_id));
+  const btn = li.querySelector('.row-btn');
+  if (btn) {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (isSleeping) wakeAgentIds([agent.agent_id]);
+      else openSleepDialogForIds([agent.agent_id]);
+    });
+  }
   $ul.appendChild(li);
 }
 
@@ -649,16 +668,34 @@ document.getElementById('broadcast-form').addEventListener('submit', async (e) =
 // =============================================================
 
 const $sleepDialog = document.getElementById('sleep-dialog');
-let _sleepTargetType = null;
+/** Sleep dialog target state: either {type: 'sme'} for a group-level
+ *  sleep or {ids: [agent_id, ...]} for individual agents. Never both. */
+let _sleepTarget = null;
 
 function openSleepDialog(agentType) {
-  _sleepTargetType = agentType;
+  _sleepTarget = { type: agentType };
   document.getElementById('sleep-title').textContent = `Sleep all ${agentType}s`;
   document.getElementById('sleep-target-note').textContent =
-    `Target: agent_type = ${agentType}. Orchestrator is always excluded.`;
+    `Target: agent_type = ${agentType}. Orchestrator is always excluded from bulk.`;
+  _resetSleepDialogFields();
+  $sleepDialog.showModal();
+}
+
+function openSleepDialogForIds(agentIds) {
+  _sleepTarget = { ids: agentIds };
+  const label = agentIds.length === 1
+    ? agentIds[0]
+    : `${agentIds.length} agents (${agentIds.slice(0, 3).join(', ')}${agentIds.length > 3 ? ', …' : ''})`;
+  document.getElementById('sleep-title').textContent =
+    agentIds.length === 1 ? `Sleep ${agentIds[0]}` : `Sleep ${agentIds.length} agents`;
+  document.getElementById('sleep-target-note').textContent = `Target: ${label}`;
+  _resetSleepDialogFields();
+  $sleepDialog.showModal();
+}
+
+function _resetSleepDialogFields() {
   document.getElementById('sleep-reason').value = '';
   document.getElementById('sleep-hours').value = '1';
-  $sleepDialog.showModal();
 }
 
 document.getElementById('sleep-cancel').addEventListener('click', () => {
@@ -669,15 +706,16 @@ document.getElementById('sleep-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const hours = parseFloat(document.getElementById('sleep-hours').value);
   const reason = document.getElementById('sleep-reason').value.trim();
-  if (!_sleepTargetType || !hours || !reason) return;
+  if (!_sleepTarget || !hours || !reason) return;
   const until = new Date(Date.now() + hours * 3600 * 1000).toISOString();
+  const body = { until, reason };
+  if (_sleepTarget.type) body.agent_type = _sleepTarget.type;
+  if (_sleepTarget.ids) body.agent_ids = _sleepTarget.ids;
   try {
     const res = await fetch('/api/sleep', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        until, reason, agent_type: _sleepTargetType,
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -687,19 +725,26 @@ document.getElementById('sleep-form').addEventListener('submit', async (e) => {
     const data = await res.json();
     $sleepDialog.close();
     fetchAgents();  // refresh counts / 💤 indicator
-    // brief feedback
-    console.log(`Slept ${data.count} ${_sleepTargetType}(s) until ${data.sleep_until}`);
+    console.log(`Slept ${data.count} agent(s) until ${data.sleep_until}`);
   } catch (e) {
     alert(`Sleep failed: ${e.message}`);
   }
 });
 
 async function wakeAgentType(agentType) {
+  return _postWake({ agent_type: agentType });
+}
+
+async function wakeAgentIds(agentIds) {
+  return _postWake({ agent_ids: agentIds });
+}
+
+async function _postWake(body) {
   try {
     const res = await fetch('/api/wake', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_type: agentType }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -708,7 +753,7 @@ async function wakeAgentType(agentType) {
     }
     const data = await res.json();
     fetchAgents();
-    console.log(`Woke ${data.count} ${agentType}(s)`);
+    console.log(`Woke ${data.count} agent(s)`);
   } catch (e) {
     alert(`Wake failed: ${e.message}`);
   }

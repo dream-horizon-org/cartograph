@@ -284,6 +284,28 @@ body {
 }
 .group-actions button:hover { background: #21262d; }
 
+/* Per-agent row header with an inline action button (sleep/wake). */
+.agent-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.row-btn {
+  background: transparent;
+  border: 1px solid #30363d;
+  color: #c9d1d9;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.row-btn:hover { background: #21262d; }
+.row-wake { border-color: #e3b34155; color: #e3b341; }
+
 .checkbox-label {
   flex-direction: row !important;
   align-items: flex-start !important;
