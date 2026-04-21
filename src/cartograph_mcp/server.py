@@ -26,6 +26,7 @@ from cartograph_mcp.tools import resources as resources_tool
 from cartograph_mcp.tools import agent_lifecycle
 from cartograph_mcp.tools import components as components_tool
 from cartograph_mcp.tools import notifications as notifications_tool
+from cartograph_mcp.tools import sleep as sleep_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -146,14 +147,23 @@ def get_chat_history(agent_id: str, page: int = 1, limit: int = 20) -> dict[str,
 # ============ BROADCAST ============
 
 @mcp.tool()
-def send_broadcast(from_agent_id: str, to_agent_type: str, message: str) -> dict[str, Any]:
+def send_broadcast(
+    from_agent_id: str,
+    to_agent_type: str,
+    message: str,
+    persistent: bool = False,
+) -> dict[str, Any]:
     """Send a broadcast to all agents of a type.
 
     Restriction: only orchestrator and admin can broadcast.
 
+    persistent: default False — forward-only, seen only by agents existing
+    at send time. Set True for standing policy that should also apply to
+    agents spawned later (e.g. 'all SMEs use merge threshold 0.9 from now').
+
     Returns the inserted communication row.
     """
-    return broadcast.send_broadcast(from_agent_id, to_agent_type, message)
+    return broadcast.send_broadcast(from_agent_id, to_agent_type, message, persistent)
 
 
 @mcp.tool()
@@ -802,6 +812,53 @@ def list_agents(agent_id: str) -> dict[str, list]:
     return {"agents": rows}
 
 
+# ============ SLEEP / WAKE ============
+
+@mcp.tool()
+def sleep_self(
+    agent_id: str, duration_seconds: int, reason: str
+) -> dict[str, Any]:
+    """Put YOURSELF to sleep so the trigger scanner stops waking you until
+    the wall-clock deadline. Max 7 days. Use when you're legitimately
+    waiting on an external event (admin input, deploy window, another
+    agent's response) so you don't burn invocations re-checking.
+
+    Admin chat to you auto-wakes; broadcasts / tasks / orch chats do NOT.
+    Admin or orchestrator can force-wake you via bulk_wake_agents.
+    """
+    return sleep_tool.sleep_self(agent_id, duration_seconds, reason)
+
+
+@mcp.tool()
+def bulk_sleep_agents(
+    agent_id: str,
+    until: str,
+    reason: str,
+    agent_ids: list[str] | None = None,
+    agent_type: str | None = None,
+) -> dict[str, Any]:
+    """Put a cohort to sleep until an absolute ISO timestamp. ORCH/ADMIN only.
+
+    `until` = ISO-8601 string (e.g. '2026-04-22T03:00:00+00:00').
+    Refuses agent_type='orchestrator'. Never sleeps the caller.
+    """
+    return sleep_tool.bulk_sleep_agents(
+        agent_id, until, reason, agent_ids, agent_type
+    )
+
+
+@mcp.tool()
+def bulk_wake_agents(
+    agent_id: str,
+    agent_ids: list[str] | None = None,
+    agent_type: str | None = None,
+) -> dict[str, Any]:
+    """Wake a cohort of sleeping agents. ORCH/ADMIN only. Clears their
+    sleep_until so the trigger scanner picks them up next cycle.
+    """
+    return sleep_tool.bulk_wake_agents(agent_id, agent_ids, agent_type)
+
+
 @mcp.tool()
 def reset_agent(agent_id: str, target_agent_id: str) -> dict[str, Any]:
     """Force-reset a permanently-errored agent back to idle. ORCHESTRATOR-ONLY.
@@ -860,6 +917,7 @@ def main() -> None:
         "bulk_spawn_smes, create_agent, list_agents, reset_agent, "
         "decommission_agent, decommission_agents_bulk, "
         "decommission_component, decommission_components_bulk, "
+        "sleep_self, bulk_sleep_agents, bulk_wake_agents, "
         "upsert_component, upsert_attribution, create_edge, "
         "insert_unresolved, resolve_reference, "
         "get_component, get_attributions, get_edges, get_unresolved, "

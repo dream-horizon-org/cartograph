@@ -93,32 +93,40 @@ def get_agent_notifications(
             (agent_id, priority_list),
         )
 
-    # Broadcasts: to my agent_type, from a priority source, not acked by me.
+    # Broadcasts: to my agent_type, from a priority source, not acked by
+    # me, and (forward-only scoping) either persistent OR created AFTER
+    # this agent was spawned.
+    spawn_cutoff_clause = (
+        "AND (c.is_persistent OR c.created_at > "
+        "(SELECT created_at FROM agent_runs WHERE agent_id = %s))"
+    )
     if since:
         bcast_rows = execute(
-            """SELECT c.from_agent, COUNT(*) AS cnt, MAX(c.created_at) AS latest
+            f"""SELECT c.from_agent, COUNT(*) AS cnt, MAX(c.created_at) AS latest
                FROM communications c
                WHERE c.type = 'broadcast' AND c.to_agent_type = %s
                  AND c.from_agent = ANY(%s) AND c.created_at > %s
+                 {spawn_cutoff_clause}
                  AND NOT EXISTS (
                    SELECT 1 FROM broadcast_acks ba
                    WHERE ba.communication_id = c.id AND ba.agent_id = %s
                  )
                GROUP BY c.from_agent""",
-            (me["agent_type"], priority_list, since, agent_id),
+            (me["agent_type"], priority_list, since, agent_id, agent_id),
         )
     else:
         bcast_rows = execute(
-            """SELECT c.from_agent, COUNT(*) AS cnt, MAX(c.created_at) AS latest
+            f"""SELECT c.from_agent, COUNT(*) AS cnt, MAX(c.created_at) AS latest
                FROM communications c
                WHERE c.type = 'broadcast' AND c.to_agent_type = %s
                  AND c.from_agent = ANY(%s)
+                 {spawn_cutoff_clause}
                  AND NOT EXISTS (
                    SELECT 1 FROM broadcast_acks ba
                    WHERE ba.communication_id = c.id AND ba.agent_id = %s
                  )
                GROUP BY c.from_agent""",
-            (me["agent_type"], priority_list, agent_id),
+            (me["agent_type"], priority_list, agent_id, agent_id),
         )
 
     breakdown: list[dict] = []

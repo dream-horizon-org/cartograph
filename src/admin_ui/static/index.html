@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cartograph Admin</title>
-  <link rel="stylesheet" href="/style.css?v=9">
+  <link rel="stylesheet" href="/style.css?v=10">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -173,6 +173,10 @@
       <label>Message
         <textarea id="bcast-msg" rows="6" required></textarea>
       </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="bcast-persistent">
+        <span>Persistent — future agents spawned after this broadcast will also see it.</span>
+      </label>
       <div class="dialog-actions">
         <button type="button" id="bcast-cancel" class="secondary">Cancel</button>
         <button type="submit" id="bcast-send">Send broadcast</button>
@@ -180,6 +184,24 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=9"></script>
+  <!-- SLEEP DIALOG -->
+  <dialog id="sleep-dialog">
+    <form id="sleep-form" method="dialog">
+      <h2 id="sleep-title">Sleep agents</h2>
+      <p class="hint" id="sleep-target-note">Target: …</p>
+      <label>Duration (hours)
+        <input type="number" id="sleep-hours" min="0.01" step="0.25" value="1" required>
+      </label>
+      <label>Reason
+        <input type="text" id="sleep-reason" placeholder="e.g. waiting on user credentials" required>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="sleep-cancel" class="secondary">Cancel</button>
+        <button type="submit" id="sleep-confirm">Sleep</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js?v=10"></script>
 </body>
 </html>

@@ -92,14 +92,24 @@ function renderAgents() {
       ? agents.filter(a => a.agent_id.toLowerCase().includes(search))
       : agents;
 
+    const sleepingCount = agents.filter(a => a.sleep_until).length;
     const groupLi = document.createElement('li');
     groupLi.className = 'agent-group';
+    // Orchestrator is a singleton — bulk sleep/wake are pointless (and the
+    // sleep tool refuses agent_type='orchestrator' anyway). Hide the buttons.
+    const showBulk = type !== 'orchestrator';
     groupLi.innerHTML = `
       <header class="agent-group-header">
         <span class="group-title">${type}</span>
         <span class="group-count">${filtered.length}${
           search ? `/${agents.length}` : ''
-        }</span>
+        }${sleepingCount ? ` · 💤${sleepingCount}` : ''}</span>
+        ${showBulk ? `
+          <span class="group-actions">
+            <button class="btn-sleep" data-type="${type}" title="Sleep all ${type}s">💤</button>
+            <button class="btn-wake" data-type="${type}" title="Wake all ${type}s">⏰</button>
+          </span>
+        ` : ''}
       </header>
       <input type="search" class="group-search" data-type="${type}"
              placeholder="filter ${type}s…"
@@ -133,16 +143,27 @@ function renderAgents() {
       }
     });
   });
+  // Wire sleep/wake bulk buttons.
+  $agentList.querySelectorAll('.btn-sleep').forEach(btn => {
+    btn.addEventListener('click', () => openSleepDialog(btn.dataset.type));
+  });
+  $agentList.querySelectorAll('.btn-wake').forEach(btn => {
+    btn.addEventListener('click', () => wakeAgentType(btn.dataset.type));
+  });
 }
 
 function _renderAgentRow(agent, $ul) {
   const li = document.createElement('li');
   li.dataset.agentId = agent.agent_id;
   if (agent.agent_id === state.selectedAgentId) li.classList.add('selected');
+  const sleepTag = agent.sleep_until
+    ? `<span class="status status-sleep">💤 until ${new Date(agent.sleep_until).toLocaleString()}</span>`
+    : '';
   li.innerHTML = `
     <div class="agent-id">${escapeHtml(agent.agent_id)}</div>
     <div class="agent-meta">
       <span class="status status-${agent.status}">${agent.status}</span>
+      ${sleepTag}
     </div>
   `;
   li.addEventListener('click', () => selectAgent(agent.agent_id));
@@ -597,12 +618,13 @@ document.getElementById('broadcast-form').addEventListener('submit', async (e) =
   e.preventDefault();
   const type = document.getElementById('bcast-type').value;
   const msg = document.getElementById('bcast-msg').value.trim();
+  const persistent = document.getElementById('bcast-persistent').checked;
   if (!type || !msg) return;
   try {
     const res = await fetch('/api/broadcast', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to_agent_type: type, message: msg }),
+      body: JSON.stringify({ to_agent_type: type, message: msg, persistent }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -610,6 +632,7 @@ document.getElementById('broadcast-form').addEventListener('submit', async (e) =
       return;
     }
     document.getElementById('bcast-msg').value = '';
+    document.getElementById('bcast-persistent').checked = false;
     $broadcastDialog.close();
     // Refresh comms view if currently active
     if (document.getElementById('comms-view').classList.contains('active')) {
@@ -619,3 +642,74 @@ document.getElementById('broadcast-form').addEventListener('submit', async (e) =
     alert(`Broadcast failed: ${e.message}`);
   }
 });
+
+
+// =============================================================
+// Sleep / wake (Phase 2.5)
+// =============================================================
+
+const $sleepDialog = document.getElementById('sleep-dialog');
+let _sleepTargetType = null;
+
+function openSleepDialog(agentType) {
+  _sleepTargetType = agentType;
+  document.getElementById('sleep-title').textContent = `Sleep all ${agentType}s`;
+  document.getElementById('sleep-target-note').textContent =
+    `Target: agent_type = ${agentType}. Orchestrator is always excluded.`;
+  document.getElementById('sleep-reason').value = '';
+  document.getElementById('sleep-hours').value = '1';
+  $sleepDialog.showModal();
+}
+
+document.getElementById('sleep-cancel').addEventListener('click', () => {
+  $sleepDialog.close();
+});
+
+document.getElementById('sleep-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const hours = parseFloat(document.getElementById('sleep-hours').value);
+  const reason = document.getElementById('sleep-reason').value.trim();
+  if (!_sleepTargetType || !hours || !reason) return;
+  const until = new Date(Date.now() + hours * 3600 * 1000).toISOString();
+  try {
+    const res = await fetch('/api/sleep', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        until, reason, agent_type: _sleepTargetType,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.detail || `Sleep failed: ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    $sleepDialog.close();
+    fetchAgents();  // refresh counts / 💤 indicator
+    // brief feedback
+    console.log(`Slept ${data.count} ${_sleepTargetType}(s) until ${data.sleep_until}`);
+  } catch (e) {
+    alert(`Sleep failed: ${e.message}`);
+  }
+});
+
+async function wakeAgentType(agentType) {
+  try {
+    const res = await fetch('/api/wake', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_type: agentType }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.detail || `Wake failed: ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    fetchAgents();
+    console.log(`Woke ${data.count} ${agentType}(s)`);
+  } catch (e) {
+    alert(`Wake failed: ${e.message}`);
+  }
+}

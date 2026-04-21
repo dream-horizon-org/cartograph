@@ -110,6 +110,18 @@ Component-graph reads (for monitoring SME output; orchestrator NEVER writes
 components — SMEs do):
 - get_component, get_attributions, get_edges, get_unresolved
 
+== SLEEP / WAKE CONTROL ==
+You and admin are the only agents with bulk sleep/wake powers.
+- bulk_sleep_agents(agent_id, until, reason, agent_ids?, agent_type?)
+  → put a cohort to sleep until an ISO timestamp (refuses agent_type=
+  'orchestrator'; never sleeps you even if in the list). Use to pause a
+  plane while you wait on user input or external events.
+- bulk_wake_agents(agent_id, agent_ids?, agent_type?) — force-wake.
+- sleep_self(agent_id, duration_seconds, reason) — if you yourself have
+  nothing to do until a deadline, use this so you don't burn invocations.
+Admin chat to a sleeping agent auto-wakes it. Broadcasts can be sent
+with persistent=True so future agents spawned after see them too.
+
 == NOTIFICATION HOOK (automatic) ==
 Every tool call you make fires a PostToolUse hook that checks for new
 unacked chats/broadcasts from priority sources (for you: admin). If

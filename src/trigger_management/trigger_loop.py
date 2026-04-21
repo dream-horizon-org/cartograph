@@ -20,11 +20,18 @@ PRIORITY_ORDER = {"orchestrator": 0, "resolver": 1, "sme": 2, "iterator": 3}
 
 
 def get_idle_agents() -> list[dict]:
-    """Get all idle agents that don't already have a trigger lock."""
+    """Get idle agents eligible for wake-up.
+
+    Skips agents that are currently sleeping (sleep_until > now()). Any
+    auto-wake path (admin chat interrupt, explicit wake tool) nulls the
+    column so this filter doesn't hide them.
+    """
     return execute(
         """SELECT agent_id, agent_type, invocation_count
            FROM agent_runs
-           WHERE status = 'idle' AND trigger_lock = FALSE"""
+           WHERE status = 'idle'
+             AND trigger_lock = FALSE
+             AND (sleep_until IS NULL OR sleep_until <= now())"""
     )
 
 

@@ -3,16 +3,26 @@
 from shared.db import execute, execute_returning, execute_mutate
 
 
-def send_broadcast(from_agent_id: str, to_agent_type: str, message: str) -> dict:
-    """Send a broadcast to all agents of a type. Only orchestrator/admin can broadcast."""
+def send_broadcast(
+    from_agent_id: str,
+    to_agent_type: str,
+    message: str,
+    persistent: bool = False,
+) -> dict:
+    """Send a broadcast to all agents of a type. Only orchestrator/admin can broadcast.
+
+    persistent: if True, this broadcast also applies to agents spawned
+    AFTER it is sent (standing policy — "all future SMEs should use X").
+    Default False = forward-only, seen by agents that exist at send time.
+    """
     if from_agent_id not in ("admin",) and not _is_orchestrator(from_agent_id):
         raise ValueError("Only orchestrator or admin can send broadcasts.")
 
     row = execute_returning(
-        """INSERT INTO communications (from_agent, to_agent_type, type, text)
-           VALUES (%s, %s, 'broadcast', %s)
+        """INSERT INTO communications (from_agent, to_agent_type, type, text, is_persistent)
+           VALUES (%s, %s, 'broadcast', %s, %s)
            RETURNING *""",
-        (from_agent_id, to_agent_type, message),
+        (from_agent_id, to_agent_type, message, persistent),
     )
     return row
 
@@ -30,15 +40,23 @@ def ack_broadcast(agent_id: str, communication_id: str) -> dict:
 
 
 def get_unacked_broadcasts(agent_id: str, agent_type: str) -> list[dict]:
-    """Get broadcast messages this agent hasn't acked."""
+    """Get broadcast messages this agent hasn't acked.
+
+    Forward-only: skips broadcasts that predate this agent's spawn UNLESS
+    they were sent with is_persistent=TRUE (standing policy).
+    """
     return execute(
         """SELECT c.* FROM communications c
            WHERE c.type = 'broadcast' AND c.to_agent_type = %s
-           AND c.id NOT IN (
+             AND (
+               c.is_persistent
+               OR c.created_at > (SELECT created_at FROM agent_runs WHERE agent_id = %s)
+             )
+             AND c.id NOT IN (
                SELECT communication_id FROM broadcast_acks WHERE agent_id = %s
-           )
+             )
            ORDER BY c.created_at""",
-        (agent_type, agent_id),
+        (agent_type, agent_id, agent_id),
     )
 
 

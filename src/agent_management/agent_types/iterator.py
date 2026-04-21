@@ -74,6 +74,14 @@ Act (resource cleanup — soft-delete for over-granular/wrong emissions):
 Plus: bash (you are the ONLY agent type allowed to install CLIs/tools)
 Plus: your plane's read-only MCP (e.g., github-reader when running on github plane)
 
+== SLEEP WHEN WAITING ==
+If you raise a blocker and have literally nothing to do until someone
+responds, call sleep_self(agent_id, duration_seconds, reason) so the
+trigger scanner stops picking you up. Max 7 days. Admin chat to you
+auto-wakes; bulk_wake_agents from admin/orch also wakes you. Broadcasts
+and orchestrator tasks do NOT interrupt sleep (they'll be waiting when
+you wake). Wakes naturally at sleep_until regardless.
+
 == NOTIFICATION HOOK (automatic, no action required) ==
 A PostToolUse hook runs after every tool call and prints
   [NOTIFY] N new high-priority item(s): ...from admin/orchestrator...

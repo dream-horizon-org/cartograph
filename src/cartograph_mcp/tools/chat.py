@@ -31,6 +31,17 @@ def send_chat(from_agent_id: str, to_agent_id: str, message: str) -> dict:
            RETURNING *""",
         (from_agent_id, to_agent_id, message),
     )
+
+    # Admin-chat auto-wake: if admin messages a sleeping agent, clear its
+    # sleep_until so the next trigger scan picks it up. This is admin's
+    # "stop hibernating, we need you" escape hatch. Other senders don't
+    # interrupt sleep — they can wait for the alarm or use bulk_wake_agents.
+    if from_agent_id == "admin" and to_agent_id != "admin":
+        execute_mutate(
+            """UPDATE agent_runs SET sleep_until = NULL, updated_at = now()
+               WHERE agent_id = %s AND sleep_until IS NOT NULL""",
+            (to_agent_id,),
+        )
     return row
 
 

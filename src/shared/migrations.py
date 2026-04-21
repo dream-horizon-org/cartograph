@@ -114,6 +114,9 @@ def run_migrations() -> None:
                     heartbeat        TIMESTAMPTZ,
                     invocation_count INT NOT NULL DEFAULT 0,
                     error_msg        TEXT,
+                    -- errored_at, recovery_attempts, sleep_until added via
+                    -- post-creation ALTERs below so the single CREATE-then-
+                    -- ALTER path handles both fresh + existing databases.
                     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
@@ -224,6 +227,7 @@ def run_migrations() -> None:
                     text            TEXT NOT NULL,
                     metadata        JSONB NOT NULL DEFAULT '{}',
                     acked_at        TIMESTAMPTZ,
+                    is_persistent   BOOLEAN NOT NULL DEFAULT FALSE, -- broadcasts: apply to future agents too
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                     CONSTRAINT comm_target_exactly_one
                       CHECK ((to_agent IS NOT NULL) <> (to_agent_type IS NOT NULL))
@@ -333,6 +337,20 @@ def run_migrations() -> None:
                 "ALTER TABLE agent_runs DROP COLUMN IF EXISTS resource_id"
             )
 
+            # Sleep support (Phase 2.5). Agents with sleep_until in the future
+            # are skipped by the trigger scanner's idle-lock filter.
+            cur.execute(
+                "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS sleep_until TIMESTAMPTZ"
+            )
+
+            # Persistent broadcasts (Phase 2.5). Normal broadcasts are
+            # forward-only — they apply to agents that exist at broadcast
+            # time. is_persistent=TRUE means "this policy applies to future
+            # agents too" (e.g. standing instructions).
+            cur.execute(
+                "ALTER TABLE communications ADD COLUMN IF NOT EXISTS is_persistent BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+
             # Clean separation of broadcast targets from point-to-point
             # targets on communications. Previously `to_agent` held either
             # an agent_id OR an agent_type (for broadcasts) — overloaded.
@@ -410,6 +428,8 @@ def _create_indexes(cur) -> None:
         "CREATE INDEX IF NOT EXISTS idx_agent_locked ON agent_runs(trigger_lock) WHERE trigger_lock = TRUE",
         # Recovery scanner: scoped to errored rows so scan is cheap.
         "CREATE INDEX IF NOT EXISTS idx_agent_errored ON agent_runs(errored_at) WHERE status = 'errored'",
+        # Sleep filter: partial index on sleeping agents (small set typically).
+        "CREATE INDEX IF NOT EXISTS idx_agent_sleep ON agent_runs(sleep_until) WHERE sleep_until IS NOT NULL",
 
         # Resources
         "CREATE INDEX IF NOT EXISTS idx_res_status ON resources(status) WHERE status = 'pending'",

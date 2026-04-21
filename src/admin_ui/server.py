@@ -33,6 +33,23 @@ class AckBody(BaseModel):
 class BroadcastBody(BaseModel):
     to_agent_type: str = Field(..., pattern="^(orchestrator|iterator|sme|resolver)$")
     message: str = Field(..., min_length=1)
+    persistent: bool = False
+
+
+class SleepBody(BaseModel):
+    until: str = Field(..., min_length=1)           # ISO timestamp
+    reason: str = Field(..., min_length=1)
+    agent_ids: list[str] | None = None
+    agent_type: str | None = Field(
+        None, pattern="^(iterator|sme|resolver)$"   # orchestrator excluded
+    )
+
+
+class WakeBody(BaseModel):
+    agent_ids: list[str] | None = None
+    agent_type: str | None = Field(
+        None, pattern="^(orchestrator|iterator|sme|resolver)$"
+    )
 
 
 def create_app() -> FastAPI:
@@ -44,7 +61,7 @@ def create_app() -> FastAPI:
     def list_agents():
         """List all agents except decommissioned, ordered by type priority."""
         rows = execute(
-            """SELECT agent_id, agent_type, status, created_at
+            """SELECT agent_id, agent_type, status, sleep_until, created_at
                FROM agent_runs
                WHERE status != 'decommissioned'
                ORDER BY
@@ -324,12 +341,35 @@ def create_app() -> FastAPI:
         happen individually via the broadcast_acks table.
         """
         row = execute_returning(
-            """INSERT INTO communications (from_agent, to_agent_type, type, text)
-               VALUES ('admin', %s, 'broadcast', %s)
+            """INSERT INTO communications (from_agent, to_agent_type, type, text, is_persistent)
+               VALUES ('admin', %s, 'broadcast', %s, %s)
                RETURNING *""",
-            (body.to_agent_type, body.message),
+            (body.to_agent_type, body.message, body.persistent),
         )
         return row
+
+    @app.post("/api/sleep")
+    def admin_sleep(body: SleepBody):
+        """Bulk-sleep agents until an ISO timestamp. Delegates to the MCP
+        tool logic (same validation + 7-day cap)."""
+        from cartograph_mcp.tools import sleep as _sleep
+        return _sleep.bulk_sleep_agents(
+            agent_id="admin",
+            until=body.until,
+            reason=body.reason,
+            agent_ids=body.agent_ids,
+            agent_type=body.agent_type,
+        )
+
+    @app.post("/api/wake")
+    def admin_wake(body: WakeBody):
+        """Clear sleep_until on a cohort. Delegates to the MCP tool logic."""
+        from cartograph_mcp.tools import sleep as _sleep
+        return _sleep.bulk_wake_agents(
+            agent_id="admin",
+            agent_ids=body.agent_ids,
+            agent_type=body.agent_type,
+        )
 
     # --- STATIC FILES ---
 
