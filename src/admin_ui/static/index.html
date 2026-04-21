@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cartograph Admin</title>
-  <link rel="stylesheet" href="/style.css?v=11">
+  <link rel="stylesheet" href="/style.css?v=12">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -189,12 +189,25 @@
     <form id="sleep-form" method="dialog">
       <h2 id="sleep-title">Sleep agents</h2>
       <p class="hint" id="sleep-target-note">Target: …</p>
-      <label>Duration (hours)
-        <input type="number" id="sleep-hours" min="0.01" step="0.25" value="1" required>
+
+      <label>Duration
+        <div class="duration-row">
+          <input type="number" id="sleep-value" min="1" step="1" value="1" required>
+          <select id="sleep-unit">
+            <option value="60">minutes</option>
+            <option value="3600" selected>hours</option>
+            <option value="86400">days</option>
+          </select>
+        </div>
       </label>
+
+      <p class="hint" id="sleep-preview">Wakes at: —</p>
+
       <label>Reason
-        <input type="text" id="sleep-reason" placeholder="e.g. waiting on user credentials" required>
+        <input type="text" id="sleep-reason"
+               placeholder="e.g. waiting on user credentials" required>
       </label>
+
       <div class="dialog-actions">
         <button type="button" id="sleep-cancel" class="secondary">Cancel</button>
         <button type="submit" id="sleep-confirm">Sleep</button>
@@ -202,6 +215,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=11"></script>
+  <script src="/app.js?v=12"></script>
 </body>
 </html>

@@ -695,8 +695,31 @@ function openSleepDialogForIds(agentIds) {
 
 function _resetSleepDialogFields() {
   document.getElementById('sleep-reason').value = '';
-  document.getElementById('sleep-hours').value = '1';
+  document.getElementById('sleep-value').value = '1';
+  document.getElementById('sleep-unit').value = '3600';  // hours
+  _updateSleepPreview();
 }
+
+function _sleepDurationSeconds() {
+  const v = parseFloat(document.getElementById('sleep-value').value);
+  const u = parseInt(document.getElementById('sleep-unit').value, 10);
+  if (!v || v <= 0 || !u) return 0;
+  return Math.round(v * u);
+}
+
+function _updateSleepPreview() {
+  const secs = _sleepDurationSeconds();
+  const preview = document.getElementById('sleep-preview');
+  if (!secs) {
+    preview.textContent = 'Wakes at: —';
+    return;
+  }
+  const wake = new Date(Date.now() + secs * 1000);
+  preview.textContent = `Wakes at: ${wake.toLocaleString()}`;
+}
+
+document.getElementById('sleep-value').addEventListener('input', _updateSleepPreview);
+document.getElementById('sleep-unit').addEventListener('change', _updateSleepPreview);
 
 document.getElementById('sleep-cancel').addEventListener('click', () => {
   $sleepDialog.close();
@@ -704,10 +727,10 @@ document.getElementById('sleep-cancel').addEventListener('click', () => {
 
 document.getElementById('sleep-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const hours = parseFloat(document.getElementById('sleep-hours').value);
+  const seconds = _sleepDurationSeconds();
   const reason = document.getElementById('sleep-reason').value.trim();
-  if (!_sleepTarget || !hours || !reason) return;
-  const until = new Date(Date.now() + hours * 3600 * 1000).toISOString();
+  if (!_sleepTarget || !seconds || !reason) return;
+  const until = new Date(Date.now() + seconds * 1000).toISOString();
   const body = { until, reason };
   if (_sleepTarget.type) body.agent_type = _sleepTarget.type;
   if (_sleepTarget.ids) body.agent_ids = _sleepTarget.ids;

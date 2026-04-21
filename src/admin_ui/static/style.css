@@ -817,7 +817,9 @@ body {
   background: rgba(0,0,0,0.6);
 }
 
-#broadcast-form {
+/* Shared styles for both broadcast + sleep dialog forms. */
+#broadcast-form,
+#sleep-form {
   background: #161b22;
   border: 1px solid #30363d;
   border-radius: 8px;
@@ -828,17 +830,28 @@ body {
   gap: 14px;
 }
 
-#broadcast-form h2 { font-size: 16px; font-weight: 600; }
+#broadcast-form h2,
+#sleep-form h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #f0f6fc;
+  margin-bottom: 2px;
+}
 
-#broadcast-form label {
+#broadcast-form label,
+#sleep-form label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
   font-size: 12px;
   color: #8b949e;
 }
 
-#broadcast-form select, #broadcast-form textarea {
+#broadcast-form select,
+#broadcast-form textarea,
+#broadcast-form input,
+#sleep-form select,
+#sleep-form input {
   background: #0d1117;
   border: 1px solid #30363d;
   color: #e6edf3;
@@ -846,6 +859,39 @@ body {
   border-radius: 6px;
   font-size: 13px;
   font-family: inherit;
+}
+
+#sleep-form input:focus,
+#sleep-form select:focus,
+#broadcast-form input:focus,
+#broadcast-form select:focus,
+#broadcast-form textarea:focus {
+  outline: none;
+  border-color: #58a6ff;
+}
+
+.duration-row {
+  display: flex;
+  gap: 8px;
+}
+.duration-row input { flex: 2; }
+.duration-row select { flex: 1; }
+
+#sleep-preview {
+  margin: -6px 0 2px;
+  color: #58a6ff;
+  font-family: "SF Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+#sleep-target-note {
+  padding: 8px 10px;
+  background: #0d1117;
+  border-left: 2px solid #58a6ff;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #c9d1d9;
+  font-style: normal;
 }
 
 .dialog-actions {
