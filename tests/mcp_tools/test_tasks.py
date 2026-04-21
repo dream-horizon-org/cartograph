@@ -85,6 +85,15 @@ def test_worker_raises_blocker_BW_to_BO(agent_factory):
     )
     assert updated["status"] == "BO"
     assert updated["blocker_detail"] == "need access to dream11/private"
+    # state_transition + blocker_detail recorded in the communication's metadata
+    from shared.db import execute_one
+    comm = execute_one(
+        "SELECT metadata FROM communications WHERE source_id = %s ORDER BY created_at DESC LIMIT 1",
+        (task["id"],),
+    )
+    assert comm["metadata"]["state_transition"] == {"from": "BW", "to": "BO"}
+    assert comm["metadata"]["role"] == "worker"
+    assert comm["metadata"]["blocker_detail"] == "need access to dream11/private"
 
 
 def test_worker_completes_BW_to_WD(agent_factory):

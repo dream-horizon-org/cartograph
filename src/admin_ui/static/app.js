@@ -282,3 +282,211 @@ $refreshBtn.addEventListener('click', fetchAgents);
 
 fetchAgents();
 state.agentRefreshInterval = setInterval(fetchAgents, 5000);
+
+
+// ================================================================
+// Tab switching + Communications panel + Broadcast (Phase 2.4)
+// ================================================================
+
+const commsState = {
+  messages: [],
+  hasMore: false,
+  filters: { from_agent: '', to_agent: '', type: '' },
+  selectedCommId: null,
+};
+
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === name));
+  document.getElementById('chat-view').classList.toggle('active', name === 'chat');
+  document.getElementById('comms-view').classList.toggle('active', name === 'comms');
+  if (name === 'comms') fetchCommunications();
+}
+
+// --- Communications list ---
+
+async function fetchCommunications() {
+  const params = new URLSearchParams();
+  if (commsState.filters.from_agent) params.set('from_agent', commsState.filters.from_agent);
+  if (commsState.filters.to_agent) params.set('to_agent', commsState.filters.to_agent);
+  if (commsState.filters.type) params.set('type', commsState.filters.type);
+  params.set('limit', '100');
+  try {
+    const res = await fetch(`/api/communications?${params.toString()}`);
+    const data = await res.json();
+    commsState.messages = data.messages || [];
+    commsState.hasMore = data.has_more;
+    renderCommunications();
+  } catch (e) {
+    console.error('Failed to fetch communications:', e);
+  }
+}
+
+function renderCommunications() {
+  const $list = document.getElementById('comms-items');
+  const $count = document.getElementById('comms-count');
+  $count.textContent = `${commsState.messages.length}${commsState.hasMore ? '+' : ''} rows`;
+  if (commsState.messages.length === 0) {
+    $list.innerHTML = '<li class="empty">No communications match these filters.</li>';
+    return;
+  }
+  $list.innerHTML = '';
+  commsState.messages.forEach(m => {
+    const li = document.createElement('li');
+    li.className = `comm comm-${m.type}`;
+    if (m.id === commsState.selectedCommId) li.classList.add('selected');
+    const excerpt = (m.text || '').substring(0, 120).replace(/\n/g, ' ');
+    const state = (m.metadata && m.metadata.state_transition)
+      ? ` <span class="pill">${m.metadata.state_transition.from} → ${m.metadata.state_transition.to}</span>`
+      : '';
+    li.innerHTML = `
+      <div class="comm-head">
+        <span class="type-pill type-${m.type}">${m.type}</span>
+        <span class="from">${escapeHtml(m.from_agent)}</span>
+        <span class="arrow">→</span>
+        <span class="to">${escapeHtml(m.to_agent)}</span>
+        ${state}
+        <span class="ts">${new Date(m.created_at).toLocaleString()}</span>
+      </div>
+      <div class="comm-body">${escapeHtml(excerpt)}${excerpt.length >= 120 ? '…' : ''}</div>
+    `;
+    li.addEventListener('click', () => selectCommunication(m));
+    $list.appendChild(li);
+  });
+}
+
+async function selectCommunication(comm) {
+  commsState.selectedCommId = comm.id;
+  renderCommunications();
+  const $body = document.getElementById('detail-body');
+  const $title = document.getElementById('detail-title');
+
+  if (comm.type === 'chat' || comm.type === 'broadcast') {
+    $title.textContent = `${comm.type} detail`;
+    $body.innerHTML = `
+      <div class="detail-kv"><b>From</b><span>${escapeHtml(comm.from_agent)}</span></div>
+      <div class="detail-kv"><b>To</b><span>${escapeHtml(comm.to_agent)}</span></div>
+      <div class="detail-kv"><b>Sent</b><span>${new Date(comm.created_at).toLocaleString()}</span></div>
+      <div class="detail-kv"><b>Acked at</b><span>${comm.acked_at || '—'}</span></div>
+      <hr>
+      <div class="message agent-message">${renderMarkdown(comm.text || '')}</div>
+    `;
+    return;
+  }
+
+  if (!comm.source_id) {
+    $title.textContent = `${comm.type} detail`;
+    $body.innerHTML = `<p class="empty">No source entity linked.</p>`;
+    return;
+  }
+
+  const endpoint = { task: 'task', consolidation: 'consolidation', clarification: 'clarification' }[comm.type];
+  try {
+    const res = await fetch(`/api/${endpoint}/${comm.source_id}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    $title.textContent = `${comm.type} ${comm.source_id.substring(0, 8)}`;
+    $body.innerHTML = renderSourceEntity(comm.type, data);
+  } catch (e) {
+    $body.innerHTML = `<p class="empty">Failed to load ${comm.type} detail: ${e.message}</p>`;
+  }
+}
+
+function renderSourceEntity(type, data) {
+  if (type === 'task') {
+    const t = data.task;
+    const threadHtml = (data.thread || []).map(c => `
+      <div class="thread-entry">
+        <div class="thread-head">
+          <b>${escapeHtml(c.from_agent)}</b> → <b>${escapeHtml(c.to_agent)}</b>
+          ${c.metadata && c.metadata.state_transition
+            ? `<span class="pill">${c.metadata.state_transition.from} → ${c.metadata.state_transition.to}</span>`
+            : ''}
+          <span class="ts">${new Date(c.created_at).toLocaleString()}</span>
+        </div>
+        <div class="thread-body">${renderMarkdown(c.text || '')}</div>
+      </div>
+    `).join('');
+    return `
+      <div class="detail-kv"><b>Status</b><span class="status-${t.status}">${t.status}</span></div>
+      <div class="detail-kv"><b>Owner</b><span>${escapeHtml(t.owner_agent_id)}</span></div>
+      <div class="detail-kv"><b>Worker</b><span>${escapeHtml(t.worker_agent_id)}</span></div>
+      <div class="detail-kv"><b>Created</b><span>${new Date(t.created_at).toLocaleString()}</span></div>
+      <div class="detail-kv"><b>Updated</b><span>${new Date(t.updated_at).toLocaleString()}</span></div>
+      ${t.blocker_detail ? `<div class="detail-kv"><b>Blocker</b><span>${escapeHtml(t.blocker_detail)}</span></div>` : ''}
+      <hr>
+      <h3>Description</h3>
+      <div class="message agent-message">${renderMarkdown(t.description || '')}</div>
+      <hr>
+      <h3>Thread (${data.thread.length})</h3>
+      ${threadHtml || '<p class="empty">No thread yet.</p>'}
+    `;
+  }
+  // Generic fallback for consolidation / clarification (Phase 3)
+  return `<pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
+}
+
+document.getElementById('filter-apply').addEventListener('click', () => {
+  commsState.filters = {
+    from_agent: document.getElementById('filter-from').value.trim(),
+    to_agent: document.getElementById('filter-to').value.trim(),
+    type: document.getElementById('filter-type').value,
+  };
+  fetchCommunications();
+});
+
+document.getElementById('filter-reset').addEventListener('click', () => {
+  document.getElementById('filter-from').value = '';
+  document.getElementById('filter-to').value = '';
+  document.getElementById('filter-type').value = '';
+  commsState.filters = { from_agent: '', to_agent: '', type: '' };
+  fetchCommunications();
+});
+
+document.getElementById('detail-close').addEventListener('click', () => {
+  commsState.selectedCommId = null;
+  document.getElementById('detail-title').textContent = 'Detail';
+  document.getElementById('detail-body').innerHTML =
+    '<p class="empty">Click a communication on the left to see its source entity.</p>';
+  renderCommunications();
+});
+
+// --- Broadcast dialog ---
+
+const $broadcastDialog = document.getElementById('broadcast-dialog');
+document.getElementById('broadcast-btn').addEventListener('click', () => {
+  $broadcastDialog.showModal();
+});
+document.getElementById('bcast-cancel').addEventListener('click', () => {
+  $broadcastDialog.close();
+});
+document.getElementById('broadcast-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const type = document.getElementById('bcast-type').value;
+  const msg = document.getElementById('bcast-msg').value.trim();
+  if (!type || !msg) return;
+  try {
+    const res = await fetch('/api/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to_agent_type: type, message: msg }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.detail || `Broadcast failed: ${res.status}`);
+      return;
+    }
+    document.getElementById('bcast-msg').value = '';
+    $broadcastDialog.close();
+    // Refresh comms view if currently active
+    if (document.getElementById('comms-view').classList.contains('active')) {
+      fetchCommunications();
+    }
+  } catch (e) {
+    alert(`Broadcast failed: ${e.message}`);
+  }
+});

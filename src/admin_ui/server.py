@@ -30,6 +30,11 @@ class AckBody(BaseModel):
     communication_ids: list[str]
 
 
+class BroadcastBody(BaseModel):
+    to_agent_type: str = Field(..., pattern="^(orchestrator|iterator|sme|resolver)$")
+    message: str = Field(..., min_length=1)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Cartograph Admin UI")
 
@@ -142,6 +147,120 @@ def create_app() -> FastAPI:
             (body.communication_ids, agent_id),
         )
         return {"acked": acked}
+
+    # --- COMMUNICATIONS PANEL (Phase 2.4) ---
+
+    _VALID_COMM_TYPES = {"chat", "broadcast", "task", "consolidation", "clarification"}
+
+    @app.get("/api/communications")
+    def list_communications(
+        from_agent: Optional[str] = Query(None),
+        to_agent: Optional[str] = Query(None),
+        type: Optional[str] = Query(None),
+        source_id: Optional[str] = Query(None),
+        before: Optional[str] = Query(None),
+        limit: int = Query(50, ge=1, le=200),
+    ):
+        """Filtered communications feed for the admin UI panel.
+
+        All filters AND together. `before` is a created_at cursor for older
+        pages. Returns newest-first with a has_more flag.
+        """
+        if type is not None and type not in _VALID_COMM_TYPES:
+            raise HTTPException(400, f"Invalid type (allowed: {sorted(_VALID_COMM_TYPES)})")
+
+        where = []
+        params: list = []
+        if from_agent:
+            where.append("from_agent = %s")
+            params.append(from_agent)
+        if to_agent:
+            where.append("to_agent = %s")
+            params.append(to_agent)
+        if type:
+            where.append("type = %s")
+            params.append(type)
+        if source_id:
+            where.append("source_id = %s::uuid")
+            params.append(source_id)
+        if before:
+            where.append("created_at < %s")
+            params.append(before)
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+        rows = execute(
+            f"""SELECT * FROM communications{where_sql}
+                ORDER BY created_at DESC
+                LIMIT %s""",
+            params + [limit + 1],
+        )
+        has_more = len(rows) > limit
+        return {"messages": rows[:limit], "has_more": has_more}
+
+    @app.get("/api/task/{task_id}")
+    def get_task_detail(task_id: str):
+        """Task row + paginated thread — for the right-side panel."""
+        task = execute_one("SELECT * FROM tasks WHERE id = %s::uuid", (task_id,))
+        if task is None:
+            raise HTTPException(404, f"Task {task_id} not found")
+        thread = execute(
+            """SELECT * FROM communications
+               WHERE type = 'task' AND source_id = %s::uuid
+               ORDER BY created_at""",
+            (task_id,),
+        )
+        return {"task": task, "thread": thread}
+
+    @app.get("/api/consolidation/{consolidation_id}")
+    def get_consolidation_detail(consolidation_id: str):
+        """Placeholder until Phase 3 consolidation tools land."""
+        row = execute_one(
+            "SELECT * FROM consolidations WHERE id = %s::uuid",
+            (consolidation_id,),
+        )
+        if row is None:
+            raise HTTPException(404, "Consolidation not found")
+        thread = execute(
+            """SELECT * FROM communications
+               WHERE type = 'consolidation' AND source_id = %s::uuid
+               ORDER BY created_at""",
+            (consolidation_id,),
+        )
+        return {"consolidation": row, "thread": thread}
+
+    @app.get("/api/clarification/{clarification_id}")
+    def get_clarification_detail(clarification_id: str):
+        """Placeholder until Phase 3 clarification tools land."""
+        row = execute_one(
+            "SELECT * FROM clarifications WHERE id = %s::uuid",
+            (clarification_id,),
+        )
+        if row is None:
+            raise HTTPException(404, "Clarification not found")
+        thread = execute(
+            """SELECT * FROM communications
+               WHERE type = 'clarification' AND source_id = %s::uuid
+               ORDER BY created_at""",
+            (clarification_id,),
+        )
+        return {"clarification": row, "thread": thread}
+
+    @app.post("/api/broadcast")
+    def send_broadcast_from_admin(body: BroadcastBody):
+        """Admin broadcasts to all agents of a type.
+
+        Short-circuits the need to ask orchestrator first — admin is the
+        most privileged actor. Inserts one communication row
+        (type='broadcast', to_agent=<agent_type>). Per-agent acks happen
+        individually via the broadcast_acks table.
+        """
+        row = execute_returning(
+            """INSERT INTO communications (from_agent, to_agent, type, text)
+               VALUES ('admin', %s, 'broadcast', %s)
+               RETURNING *""",
+            (body.to_agent_type, body.message),
+        )
+        return row
 
     # --- STATIC FILES ---
 

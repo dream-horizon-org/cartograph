@@ -166,13 +166,21 @@ def respond_task(
             (new_status, task_id),
         )
 
-    # Announce in communications
-    # from_agent = caller; to_agent = the other party
+    # Announce in communications with structured state_transition metadata
+    # (admin UI filters + state history). from_agent = caller, to_agent = the
+    # other party on this task.
+    import json as _json
     other = task["worker_agent_id"] if is_owner else task["owner_agent_id"]
+    metadata = {
+        "state_transition": {"from": current, "to": new_status},
+        "role": "worker" if is_worker else "owner",
+    }
+    if new_status == "BO" and blocker_detail:
+        metadata["blocker_detail"] = blocker_detail
     execute_mutate(
         """INSERT INTO communications (from_agent, to_agent, type, source_id, text, metadata)
-           VALUES (%s, %s, 'task', %s, %s, %s)""",
-        (agent_id, other, task_id, message, f'{{"new_status":"{new_status}"}}'),
+           VALUES (%s, %s, 'task', %s, %s, %s::jsonb)""",
+        (agent_id, other, task_id, message, _json.dumps(metadata)),
     )
 
     return updated

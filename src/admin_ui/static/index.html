@@ -3,9 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cartograph Admin Chat</title>
+  <title>Cartograph Admin</title>
   <link rel="stylesheet" href="/style.css">
-  <!-- Markdown rendering for agent messages -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -17,10 +16,20 @@
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/json.min.js"></script>
 </head>
 <body>
-  <div id="app">
+  <nav id="top-nav">
+    <h1>Cartograph</h1>
+    <div class="tabs">
+      <button class="tab active" data-tab="chat">Chat</button>
+      <button class="tab" data-tab="comms">Communications</button>
+    </div>
+    <button id="broadcast-btn" title="Broadcast to all agents of a type">📢 Broadcast</button>
+  </nav>
+
+  <!-- CHAT VIEW -->
+  <div id="chat-view" class="view active">
     <aside id="sidebar">
       <header>
-        <h1>Cartograph</h1>
+        <h2>Agents</h2>
         <button id="refresh-btn" title="Refresh agents">↻</button>
       </header>
       <ul id="agent-list">
@@ -42,6 +51,80 @@
       </form>
     </main>
   </div>
+
+  <!-- COMMUNICATIONS VIEW -->
+  <div id="comms-view" class="view">
+    <aside id="filter-bar">
+      <h2>Filters</h2>
+      <label>From agent
+        <input id="filter-from" placeholder="any">
+      </label>
+      <label>To agent / type
+        <input id="filter-to" placeholder="any">
+      </label>
+      <label>Type
+        <select id="filter-type">
+          <option value="">All</option>
+          <option>chat</option>
+          <option>broadcast</option>
+          <option>task</option>
+          <option>consolidation</option>
+          <option>clarification</option>
+        </select>
+      </label>
+      <button id="filter-apply">Apply</button>
+      <button id="filter-reset" class="secondary">Reset</button>
+      <p class="hint">
+        "To agent" accepts either a specific agent_id (for chats/tasks) or
+        an agent_type (<code>orchestrator</code>, <code>iterator</code>,
+        <code>sme</code>, <code>resolver</code> — for broadcasts).
+      </p>
+    </aside>
+
+    <main id="comms-list">
+      <header>
+        <h2 id="comms-title">Communications</h2>
+        <span id="comms-count"></span>
+      </header>
+      <ul id="comms-items">
+        <li class="empty">Loading...</li>
+      </ul>
+    </main>
+
+    <aside id="detail-panel">
+      <header>
+        <h2 id="detail-title">Detail</h2>
+        <button id="detail-close" title="Close">×</button>
+      </header>
+      <div id="detail-body">
+        <p class="empty">Click a communication on the left to see its source entity.</p>
+      </div>
+    </aside>
+  </div>
+
+  <!-- BROADCAST DIALOG -->
+  <dialog id="broadcast-dialog">
+    <form id="broadcast-form" method="dialog">
+      <h2>Broadcast to all agents of a type</h2>
+      <label>Target agent type
+        <select id="bcast-type" required>
+          <option value="">-- choose --</option>
+          <option value="orchestrator">orchestrator</option>
+          <option value="iterator">iterator</option>
+          <option value="sme">sme</option>
+          <option value="resolver">resolver</option>
+        </select>
+      </label>
+      <label>Message
+        <textarea id="bcast-msg" rows="6" required></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="bcast-cancel" class="secondary">Cancel</button>
+        <button type="submit" id="bcast-send">Send broadcast</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/app.js"></script>
 </body>
 </html>
