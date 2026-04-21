@@ -6,3 +6,4 @@ workspaces/
 .env
 .idea/
 docs/superpowers/
+*.egg-info/

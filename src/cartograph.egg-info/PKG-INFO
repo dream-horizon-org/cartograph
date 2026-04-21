@@ -1,7 +1,0 @@
-Metadata-Version: 2.4
-Name: cartograph
-Version: 0.1.0
-Requires-Python: >=3.10
-Requires-Dist: pyyaml
-Requires-Dist: psycopg[binary]>=3.1
-Requires-Dist: psycopg-pool>=3.1
