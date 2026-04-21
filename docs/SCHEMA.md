@@ -176,6 +176,9 @@ CREATE TABLE agent_runs (
                         'resolver'
                      )),
     session_id       TEXT,                        -- Claude session ID for resume
+    workspace_path   TEXT,                        -- per-agent cwd (contains .mcp.json)
+    plane            TEXT,                        -- iterators only (their assigned plane)
+    resource_id      TEXT,                        -- SMEs only (their assigned resource)
     -- resource_ids and planes removed — derivable via resource_component_agents table
     status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                         'pending',                -- created, waiting for first invoke
@@ -191,8 +194,10 @@ CREATE TABLE agent_runs (
                                                  -- only set when status = 'idle'
     phase            TEXT,                        -- current phase the agent is in
     heartbeat        TIMESTAMPTZ,                -- last sign of life
-    invocation_count INT NOT NULL DEFAULT 0,      -- for trigger priority (higher = more active)
-    error_msg        TEXT,                        -- last error if status = errored
+    invocation_count INT NOT NULL DEFAULT 0,      -- for trigger priority (lower = earlier pickup)
+    error_msg        TEXT,                        -- last error if status = errored (stderr tail / exception repr)
+    errored_at       TIMESTAMPTZ,                 -- stamped when transitioning to errored (recovery backoff anchor)
+    recovery_attempts INT NOT NULL DEFAULT 0,    -- bounded by MAX_RECOVERY_ATTEMPTS=3; reset to 0 on successful idle
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -201,11 +206,12 @@ CREATE INDEX idx_agent_status ON agent_runs(status);
 CREATE INDEX idx_agent_type ON agent_runs(agent_type);
 CREATE INDEX idx_agent_idle ON agent_runs(agent_type, status) WHERE status = 'idle';
 CREATE INDEX idx_agent_locked ON agent_runs(trigger_lock) WHERE trigger_lock = TRUE;
+CREATE INDEX idx_agent_errored ON agent_runs(errored_at) WHERE status = 'errored';
 ```
 
 ### `resources`
 
-Iterator output queue. Each row is a resource discovered by an iterator, to be assigned to an SME.
+Iterator output queue. Each row is a **heuristic component candidate** — the iterator's best guess at one deployable unit. An SME later validates the guess (build / merge / split / reject). Sub-artifacts (branches, workflows, individual ALB/TG/listener records) belong in the parent row's `metadata` JSONB — NOT as separate rows. See iterator granularity rules in `AGENT-PROMPTS.md §0`.
 
 ```sql
 CREATE TABLE resources (
@@ -216,13 +222,17 @@ CREATE TABLE resources (
     resource_type   TEXT NOT NULL,               -- repo, r53_chain, k8s_workload, rds, service, etc.
     identifier      TEXT NOT NULL,               -- "dream11/feeds-aggregator-v2", "feeds-agg-v2.dream11.local"
     access_desc     TEXT,                        -- how to access: "clone via SSH", "describe-asg", "kubectl get"
-    metadata        JSONB NOT NULL DEFAULT '{}', -- pre-resolved chain data, cluster info, etc.
+    metadata        JSONB NOT NULL DEFAULT '{}', -- pre-resolved chain data, sub-artifacts, cluster info, etc.
     -- assigned_to removed — derivable via resource_component_agents table
     status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                         'pending',                -- discovered by iterator, not yet assigned
                         'assigned',               -- SME created and assigned
-                        'done'                    -- SME finished analysing
+                        'done',                   -- SME finished analysing
+                        'rejected'                -- soft-deleted (iterator self-cleanup or orchestrator override)
                     )),
+    rejected_at     TIMESTAMPTZ,                  -- when soft-deleted
+    rejected_by     TEXT,                         -- agent_id that rejected
+    rejected_reason TEXT,                         -- required audit trail for cleanups
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     UNIQUE(plane, resource_type, identifier)

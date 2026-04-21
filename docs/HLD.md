@@ -95,18 +95,18 @@ Every agent is a **persistent, stateful process** with its own tools and workspa
 │                                                                     │
 │  SME                                   RESOLVER                     │
 │  ───                                   ────────                     │
-│  Count: 1 per resource                 Count: 1 (singleton,        │
-│  Created: auto by trigger manager           always exists)          │
-│           when resource appears in     Created: at system start     │
-│           resources table              Lifecycle: long-lived        │
-│  Lifecycle: persistent                 Job: gatekeeper for          │
-│  Job: deeply analyse resource,              merges/splits.          │
-│       build components, negotiate           Grants permission,      │
-│       consolidation, execute                SMEs execute.           │
-│       mutations                        Processes in batches,        │
-│                                        yields, sleeps.             │
-│                                        Potential bottleneck —       │
-│                                        batch processing mitigates.  │
+│  Count: 1 per component                Count: 1 (singleton,        │
+│           (initially one per               always exists)           │
+│           resource candidate;          Created: at system start     │
+│           identity evolves via         Lifecycle: long-lived        │
+│           merge/split)                 Job: gatekeeper for          │
+│  Created: orchestrator via                  merges/splits.          │
+│           create_agent MCP tool             Grants permission,      │
+│  Lifecycle: persistent                      SMEs execute.          │
+│  Job: validate the resource            Processes in batches,        │
+│       candidate, build components,     yields, sleeps.             │
+│       negotiate consolidation,         Potential bottleneck —       │
+│       execute mutations                batch processing mitigates.  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -116,6 +116,8 @@ Every agent is a **persistent, stateful process** with its own tools and workspa
 ORCHESTRATOR
   ├── bash
   ├── cartograph-db: full read/write (agent_runs, resources, tasks, secrets)
+  │     ├── create_agent, list_agents, reset_agent (agent lifecycle)
+  │     └── reject_resource / reject_resources_bulk with force=True (cleanup override)
   ├── read-only plane MCPs (credential validation only)
   └── chat tools (communicate with user + all agents)
 
@@ -123,6 +125,8 @@ ITERATOR
   ├── bash
   ├── one read-only plane MCP (scoped to its assigned plane)
   ├── cartograph-db: write to resources table + read secrets for its plane
+  │     ├── upsert_resource, upsert_resources_bulk (own plane)
+  │     └── reject_resource, reject_resources_bulk (self-cleanup, own plane)
   ├── can install tools/CLIs (sole agent type with install permission)
   └── chat tools
 
@@ -130,19 +134,20 @@ SME
   ├── bash (CANNOT install anything — must raise blocker)
   ├── one read-only plane MCP (scoped to its assigned resource)
   ├── cartograph-db (SCOPED):
-  │     ├── CREATE/UPDATE own component(s)        ✓
-  │     ├── CREATE attributions for own component  ✓
-  │     ├── READ all components + attributions     ✓
+  │     ├── CREATE/UPDATE own component(s)        ✓  (planned, Phase 2)
+  │     ├── CREATE attributions for own component  ✓  (planned, Phase 2)
+  │     ├── READ all components + attributions     ✓  (planned, Phase 2)
   │     ├── UPDATE someone else's component        ✗ BLOCKED
-  │     ├── WRITE to consolidation table           ✓
-  │     └── WRITE to communication table           ✓
-  ├── vector-search (search embeddings across all tables)
+  │     ├── WRITE to consolidation table           ✓  (planned, Phase 3)
+  │     ├── WRITE to communication table           ✓
+  │     └── mark_resource_done on assigned resource ✓
+  ├── vector-search (search embeddings across all tables)  (planned, Phase 2)
   └── chat tools
 
 RESOLVER
   ├── bash
-  ├── cartograph-db: read all + write consolidation status
-  ├── vector-search
+  ├── cartograph-db: read all + write consolidation status  (planned, Phase 3)
+  ├── vector-search  (planned, Phase 2)
   └── chat tools
 
 ALL AGENTS (regardless of type)
@@ -225,8 +230,9 @@ ITERATOR triggers:
   └── User speaks with iterator
 
 SME triggers:
-  ├── Auto-created when new resource appears in resources table
-  │   (trigger manager spawns SME + assigns resource)
+  ├── Created by orchestrator via create_agent MCP tool when a new
+  │   resource candidate passes its gatekeeper sanity check. Trigger
+  │   manager then wakes the new idle SME via trigger_lock.
   ├── Orchestrator assigns a task via tasks table
   ├── Orchestrator communicates back wrt an ongoing task
   ├── Another SME nominates this SME in consolidation table
@@ -356,12 +362,15 @@ Phase complete → resources table populated.
 ```
 Resources table has entries with status = "pending"
 
-TRIGGER MANAGER:
+ORCHESTRATOR (gatekeeper, then delegator):
     │
-    │  For each resource with status = "pending":
-    │    1. Create new SME agent in agent_runs
-    │    2. Assign resource to SME
-    │    3. Invoke SME with materialisation prompt
+    │  1. get_resource_counts — sanity-check iterator granularity against
+    │     plane scale heuristic. If >2× expected, broadcast correction to
+    │     iterator before spawning SMEs (prevents the 10k-SME blast radius).
+    │  2. For each pending resource:
+    │       create_agent(new_agent_type='sme', resource_id=<uuid>)
+    │     which inserts agent_runs row (status='idle') + resource_component_agents link.
+    │  3. Trigger manager then wakes the new idle SME via trigger_lock.
     │
     ▼
 SMEs run in parallel (one per resource):
@@ -871,13 +880,18 @@ consolidations
 ```
 agent_runs
   agent_id (PK), agent_type (orchestrator|iterator|sme|resolver),
-  session_id, status (pending|running|idle|done|errored|decommissioned),
+  session_id, workspace_path, plane (iterators), resource_id (SMEs),
+  status (pending|running|idle|done|errored|decommissioned),
   trigger_lock (BOOLEAN, default FALSE — set by trigger manager, cleared by agent manager),
-  phase, heartbeat, invocation_count, error_msg, created_at, updated_at
+  phase, heartbeat, invocation_count, error_msg,
+  errored_at, recovery_attempts (bounded auto-recovery; MAX=3),
+  created_at, updated_at
 
 resources
   id, plane, resource_type, identifier, access_desc, metadata (JSONB),
-  status (pending|assigned|done), created_at
+  status (pending|assigned|done|rejected),
+  rejected_at, rejected_by, rejected_reason (soft-delete audit trail),
+  created_at
   UNIQUE(plane, resource_type, identifier)
 
 tasks
@@ -943,19 +957,33 @@ READ-ONLY (one per plane, scoped per agent):
 
 WRITE TARGET (single, shared by all agents):
 
-  cartograph-db
-    ├── upsert_component     (scoped: own components only for SMEs)
-    ├── upsert_attribution   (scoped: own components only for SMEs)
-    ├── create_edge
-    ├── insert_unresolved
-    ├── nominate_consolidation
-    ├── send_communication
-    ├── raise_blocker
-    ├── vector_search
-    └── query_*              (read: all agents)
+  cartograph-db  (FastMCP streamable-http on :8100/mcp)
+    LIVE groups (30 tools registered in src/cartograph_mcp/server.py;
+    see TRIGGER-MANAGEMENT.md §3 for per-tool contracts):
+      action_items    (2): summary, detail
+      chat            (4): send, ack, unacked, history
+      broadcast       (3): send, ack, unacked
+      secrets         (4): put, get, list, delete
+      tasks           (5): create, respond, raise_blocker, my, thread
+      resources       (8): upsert, upsert_bulk, get, list_for_plane,
+                           list_all, get_counts, mark_done,
+                           reject, reject_bulk
+      agent_lifecycle (3): create_agent, list_agents, reset_agent
+
+    PLANNED (Phase 2+):
+      upsert_component, upsert_attribution, create_edge, insert_unresolved,
+      resolve_reference, nominate_consolidation, respond_consolidation,
+      review_consolidation, execute_mutation, complete_consolidation,
+      absorb_agent, spawn_child_agent, transfer_attributions,
+      get_proxy_items, get_proxy_chats, create_clarification,
+      respond_clarification, vector_search, and corresponding read tools
+      (get_component, get_attributions, get_edges, get_unresolved,
+      get_my_consolidations, get_consolidation_thread,
+      get_my_clarifications, get_clarification_thread).
 
   Typed operations, NOT raw SQL.
-  Scoping enforced at the MCP level: agent_id checked on every write.
+  Scoping enforced inside each tool: agent_id + agent_type + plane checked
+  against agent_runs before any write.
 ```
 
 ---
@@ -965,8 +993,9 @@ WRITE TARGET (single, shared by all agents):
 Lightweight web UI for humans to chat with any agent. Kicks off agent activity
 (e.g., admin tells orchestrator "start iteration") and surfaces agent responses.
 
-Lives in `src/admin_ui/` — separate from the MCP server. Reads/writes the
-`communications` table directly via `shared/db.py` (no MCP hop).
+Lives in `src/admin_ui/`, served on `:8200` via uvicorn — separate from the
+MCP server (`:8100`). Reads/writes the `communications` table directly via
+`shared/db.py` (no MCP hop).
 
 ```
  ┌─────────────────────────────────────────────────────────────────┐
@@ -1063,11 +1092,15 @@ Cleaner to have admin UI talk to DB directly via shared/db.py.
 
 ## 11. Future Scope
 
-### 10.1 Observability & Cost Controls
+### 11.1 Observability & Cost Controls
 
 ```
-MONITORING (future):
-  ├── Agent status dashboard    — agent_runs table (running/idle/errored counts)
+MONITORING:
+  Today: admin UI (:8200) + list_agents MCP tool + agent_runs SQL give live
+  counts/statuses. Errored agents surface with error_msg after bounded recovery
+  (3 attempts) exhausts.
+  Future additions:
+  ├── Agent status dashboard    — visualisation layer on agent_runs
   ├── Token usage per agent     — logged from SDK yield stream
   ├── Phase progress            — timestamps on status transitions
   ├── Consolidation progress    — B1/B2/R/M/MD/D/F counts
@@ -1088,11 +1121,11 @@ COST CONTROLS (future):
   └── Embedding budget           — embed at write time only, lightweight model
 ```
 
-### 10.2 DM Between Agents
+### 11.2 DM Between Agents
 
 Agents can message each other directly for quick clarification without going through the consolidation flow. Lighter weight than a formal nomination.
 
-### 10.3 Knowledge Pool
+### 11.3 Knowledge Pool
 
 Shared knowledge base that any agent can write to and read from. Facts that are useful beyond a single agent's scope.
 

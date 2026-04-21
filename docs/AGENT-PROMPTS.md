@@ -127,9 +127,15 @@ Reject threshold: both agents < 0.3 → auto-reject
     - create_agent(agent_id, new_agent_type, plane?, resource_id?) →
       ORCHESTRATOR-only. Spawn iterator (plane) or SME (resource_id)
     - list_agents(agent_id) → see all non-decommissioned agents
+    - reset_agent(agent_id, target_agent_id) → ORCHESTRATOR-only override.
+      Force-reset a permanently-errored agent after the bounded auto-recovery
+      (3 attempts) has given up and you've diagnosed the cause from error_msg.
     - list_all_resources(agent_id, status?), list_resources_for_plane,
       get_resource, get_resource_counts → monitor iteration/materialisation
-    - upsert_component, upsert_attribution, create_edge (full DB access)
+    - reject_resource / reject_resources_bulk (with force=True) → override
+      cleanup when an iterator is stuck or absent. Usually the iterator
+      self-cleans; this is the escape hatch.
+    - upsert_component, upsert_attribution, create_edge → planned, Phase 2
 
   Bash: available for system operations
 
@@ -241,6 +247,12 @@ You are active ONLY during the ITERATION phase and when asked to install tools.
     - upsert_resource(agent_id, plane, resource_type, identifier, access_desc,
       metadata?) → register discoveries; idempotent on (plane, type, identifier).
       You can only write for YOUR own plane.
+    - upsert_resources_bulk(agent_id, plane, items[]) → one-transaction bulk
+      variant (limit 5000). Use for large planes (e.g. a GitHub org of
+      hundreds of repos) instead of N serial upsert_resource calls.
+    - reject_resource / reject_resources_bulk → soft-delete your own
+      over-granular emissions (status='rejected', audit trail required).
+      Cascade-safe: skips rows already assigned to an SME.
     - get_resource(agent_id, resource_id), list_resources_for_plane(agent_id,
       plane) → read back your registrations.
     - get_secret(agent_id, plane, key), list_secrets_for_plane(agent_id, plane)
