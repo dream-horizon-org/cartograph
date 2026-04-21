@@ -92,7 +92,10 @@ function renderAgents() {
       ? agents.filter(a => a.agent_id.toLowerCase().includes(search))
       : agents;
 
-    const sleepingCount = agents.filter(a => a.sleep_until).length;
+    const now = new Date();
+    const sleepingCount = agents.filter(
+      a => a.sleep_until && new Date(a.sleep_until) > now
+    ).length;
     const groupLi = document.createElement('li');
     groupLi.className = 'agent-group';
     // Group-level buttons use the agent_type path. The sleep tool refuses
@@ -158,7 +161,9 @@ function _renderAgentRow(agent, $ul) {
   const li = document.createElement('li');
   li.dataset.agentId = agent.agent_id;
   if (agent.agent_id === state.selectedAgentId) li.classList.add('selected');
-  const isSleeping = !!agent.sleep_until;
+  // isSleeping = column is set AND the deadline is still in the future.
+  // Backend treats past sleep_until as already-awake; FE must agree.
+  const isSleeping = !!(agent.sleep_until && new Date(agent.sleep_until) > new Date());
   const sleepTag = isSleeping
     ? `<span class="status status-sleep">💤 until ${new Date(agent.sleep_until).toLocaleString()}</span>`
     : '';
