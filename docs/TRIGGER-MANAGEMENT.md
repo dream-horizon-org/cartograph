@@ -250,14 +250,7 @@ LOOP (continuous):
   │     │   AND r_conf IS NULL → auto-set status = 'R'
   │     └── (Other system-level transitions)
   │
-  ├── 6. Recovery scan (scanners/recovery.py):
-  │     ├── WHERE status='errored' AND recovery_attempts<3
-  │     │     AND now()-errored_at >= backoff(recovery_attempts)
-  │     ├── Flip → idle, clear trigger_lock, increment attempts, keep error_msg
-  │     └── Backoff ladder: [60s, 300s, 1800s]. After 3 → stays errored
-  │         for human triage (visible in admin UI with error_msg).
-  │
-  └── 7. Sleep briefly → loop
+  └── 6. Sleep briefly → loop
 ```
 
 ### 2.2 Agent Manager (separate loop)
@@ -280,17 +273,11 @@ AGENT MANAGER LOOP:
   │     │
   │     ├── Invoke agent with generic prompt:
   │     │   "You've been woken up. Check get_action_items_summary()."
-  │     │   Subprocess timeout: iterator/SME 1800s, orch/resolver 900s.
-  │     │   Background thread heartbeats every 10s.
   │     │
-  │     └── On yield         → SET status='idle' + clear_recovery_state
-  │         On timeout/error → set_agent_errored(error_msg tail), errored_at=now()
+  │     └── When agent yields:
+  │           SET status = 'idle'
   │
   └── 3. Sleep briefly → loop
-
-On startup, orphaned 'running' agents (previous process died mid-subprocess)
-are flipped to 'errored' rather than blanket-idle, so the recovery scanner
-governs retry cadence.
 ```
 
 ### 2.3 Flow Diagram
@@ -329,8 +316,6 @@ TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
 ## 3. Agent Tools
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
-
-> **Implementation status.** §3.1–3.3 describe the full target tool set across Phases 0–4. As of now, the live MCP server registers **30 tools** covering action_items / chat / broadcast / secrets / tasks / resources / agent_lifecycle. Tools for components, attributions, edges, unresolved, consolidations, clarifications, mutations, and vector_search are designed below but **not yet registered** — see `IMPLEMENTATION-PHASES.md` for phase gating. Live inventory: `src/cartograph_mcp/server.py`.
 
 ### 3.1 Trigger Tools (what wakes me — read-only, used by trigger manager)
 
@@ -668,21 +653,6 @@ upsert_resource(agent_id, plane, resource_type, identifier, access_desc, metadat
   Validates: agent_type='iterator' AND agent.plane == plane.
   Status starts 'pending'.
 
-upsert_resources_bulk(agent_id, plane, items[])
-  Iterator-only. Bulk variant — one transaction, same idempotency.
-  items[i] = {resource_type, identifier, access_desc?, metadata?}.
-  Use this instead of N single calls when enumerating large planes
-  (e.g. a GitHub org). Limit 5000 per call.
-
-reject_resource(agent_id, resource_id, reason, force=False)
-reject_resources_bulk(agent_id, plane, resource_ids?, resource_types?, reason, force=False)
-  Soft-delete (status='rejected', rejected_at/by/reason recorded).
-  Iterator on own plane by default; orchestrator with force=True.
-  Bulk plane-scoped, filters AND together, refuses blank-wipe.
-  Cascade: rows already linked to an SME via resource_component_agents
-  are skipped (returned in skipped_cascade). Primary use: iterator
-  self-cleanup after an over-granular emission.
-
 mark_resource_done(agent_id, resource_id)
   SME-only. Validates: agent is linked via resource_component_agents
   to the resource. Sets status='done'.
@@ -693,9 +663,6 @@ mark_resource_done(agent_id, resource_id)
 ```
 put_secret(agent_id, plane, key, value)
   Orchestrator-only. Upserts on (plane, key).
-
-get_secret(agent_id, plane, key) / list_secrets_for_plane(agent_id, plane)
-  Any agent reads. list_ returns keys only (no values).
 
 delete_secret(agent_id, plane, key)
   Orchestrator-only. Removes a credential.
@@ -708,15 +675,6 @@ create_agent(agent_id, new_agent_type, plane?, resource_id?)
   Orchestrator-only. Spawns an iterator (pass plane) or SME (pass resource_id).
   Creates workspace dir, writes .mcp.json pointing at cartograph-db on :8100,
   inserts agent_runs row (status='idle'). Returns new agent_id.
-
-list_agents(agent_id)
-  Any agent. Returns all non-decommissioned agents with type/status/plane/resource_id.
-
-reset_agent(agent_id, target_agent_id)
-  Orchestrator-only override. Force-resets a permanently-errored agent
-  back to idle (clears error state + recovery_attempts). Use after the
-  bounded auto-recovery (3 attempts) has given up and you've diagnosed
-  the root cause from error_msg.
 ```
 
 ---

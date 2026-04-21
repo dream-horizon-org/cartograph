@@ -176,11 +176,14 @@ CREATE TABLE agent_runs (
                         'resolver'
                      )),
     session_id       TEXT,                        -- Claude session ID for resume
-    workspace_path   TEXT,                        -- per-agent cwd containing .mcp.json
-    plane            TEXT,                        -- iterators only
-    resource_id      TEXT,                        -- SMEs only (assigned resource)
+    -- resource_ids and planes removed — derivable via resource_component_agents table
     status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
-                        'pending','running','idle','done','errored','decommissioned'
+                        'pending',                -- created, waiting for first invoke
+                        'running',                -- actively executing
+                        'idle',                   -- done with current work, waiting for next trigger
+                        'done',                   -- finished all work across all phases
+                        'errored',                -- failed, needs recovery
+                        'decommissioned'          -- merged away or no longer needed
                      )),
     trigger_lock     BOOLEAN NOT NULL DEFAULT FALSE,
                                                  -- TRUE = trigger manager wants this agent woken
@@ -188,10 +191,8 @@ CREATE TABLE agent_runs (
                                                  -- only set when status = 'idle'
     phase            TEXT,                        -- current phase the agent is in
     heartbeat        TIMESTAMPTZ,                -- last sign of life
-    invocation_count INT NOT NULL DEFAULT 0,      -- for trigger priority (lower = earlier)
+    invocation_count INT NOT NULL DEFAULT 0,      -- for trigger priority (higher = more active)
     error_msg        TEXT,                        -- last error if status = errored
-    errored_at       TIMESTAMPTZ,                 -- stamped on transition to errored (recovery backoff anchor)
-    recovery_attempts INT NOT NULL DEFAULT 0,    -- bounded by MAX_RECOVERY_ATTEMPTS (=3); reset on successful idle
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -200,12 +201,11 @@ CREATE INDEX idx_agent_status ON agent_runs(status);
 CREATE INDEX idx_agent_type ON agent_runs(agent_type);
 CREATE INDEX idx_agent_idle ON agent_runs(agent_type, status) WHERE status = 'idle';
 CREATE INDEX idx_agent_locked ON agent_runs(trigger_lock) WHERE trigger_lock = TRUE;
-CREATE INDEX idx_agent_errored ON agent_runs(errored_at) WHERE status = 'errored';
 ```
 
 ### `resources`
 
-Iterator output queue. Each row is a HEURISTIC COMPONENT CANDIDATE — the iterator's guess at one deployable unit. An SME later validates the guess (build / merge / split / reject). Sub-artifacts (branches, workflows, listeners) belong in the parent row's `metadata` JSONB, NOT as separate rows.
+Iterator output queue. Each row is a resource discovered by an iterator, to be assigned to an SME.
 
 ```sql
 CREATE TABLE resources (
@@ -216,16 +216,13 @@ CREATE TABLE resources (
     resource_type   TEXT NOT NULL,               -- repo, r53_chain, k8s_workload, rds, service, etc.
     identifier      TEXT NOT NULL,               -- "dream11/feeds-aggregator-v2", "feeds-agg-v2.dream11.local"
     access_desc     TEXT,                        -- how to access: "clone via SSH", "describe-asg", "kubectl get"
-    metadata        JSONB NOT NULL DEFAULT '{}', -- pre-resolved chain data, sub-artifacts, cluster info, etc.
+    metadata        JSONB NOT NULL DEFAULT '{}', -- pre-resolved chain data, cluster info, etc.
+    -- assigned_to removed — derivable via resource_component_agents table
     status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                         'pending',                -- discovered by iterator, not yet assigned
                         'assigned',               -- SME created and assigned
-                        'done',                   -- SME finished analysing
-                        'rejected'                -- soft-deleted (iterator cleanup or orchestrator override)
+                        'done'                    -- SME finished analysing
                     )),
-    rejected_at     TIMESTAMPTZ,
-    rejected_by     TEXT,                        -- agent_id that rejected
-    rejected_reason TEXT,                        -- required audit trail
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     UNIQUE(plane, resource_type, identifier)
@@ -233,6 +230,7 @@ CREATE TABLE resources (
 
 CREATE INDEX idx_res_status ON resources(status) WHERE status = 'pending';
 CREATE INDEX idx_res_plane ON resources(plane);
+-- assigned_to index removed — use resource_component_agents table
 ```
 
 ### `resource_component_agents`
@@ -492,6 +490,22 @@ Model: `text-embedding-3-small` (1536 dims). All in pgvector.
 
 ## Hydration Status
 
-All 14 tables hydrated. Canonical source: `src/shared/migrations.py`.
+
+| Table          | Status |
+| -------------- | ------ |
+| components     | done   |
+| attributions   | done   |
+| edges          | done   |
+| unresolved     | done   |
+| agent_runs     | done   |
+| resources      | done   |
+| tasks          | done   |
+| secrets        | done   |
+| consolidations | done   |
+| communications | done   |
+| clarifications | done   |
+| broadcast_acks | done   |
+| proxy_items    | done   |
+| resource_component_agents | done |
 
 
