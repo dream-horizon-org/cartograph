@@ -775,7 +775,10 @@ bulk_spawn_smes(agent_id, plane, resource_ids?, all_pending=False, task_descript
 
 list_agents(agent_id)
   Any active agent. Returns all non-decommissioned agents with
-  type/status/plane/invocation_count.
+  agent_id / agent_type / status / plane (iterators only) /
+  invocation_count / sleep_until / errored_at / created_at.
+  SME→resource assignment lives in resource_component_agents — join
+  that table if you need it.
 
 reset_agent(agent_id, target_agent_id)
   Orchestrator-only override. Force-resets a permanently-errored agent

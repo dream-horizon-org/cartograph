@@ -230,9 +230,17 @@ conversation so the agent can react mid-session.
                {from_type: 'admin',        type: 'chat', count: 1}]}
   ```
 - Hook script: small Python CLI in `src/agent_management/hooks/notify.py`
-  that reads `{agent_id}` + priority list from environment, hits MCP via
-  localhost, prints `[NOTIFY] ...` on stdout only if `high_priority > 0`.
-  Empty stdout on quiet cycles = no noise.
+  that takes `--agent-id` + `--priority=<csv>`, hits MCP via localhost,
+  and ON notifications emits a JSON envelope that Claude Code injects
+  into the agent's conversation as `additionalContext`:
+  ```json
+  {"hookSpecificOutput": {
+     "hookEventName": "PostToolUse",
+     "additionalContext": "[NOTIFY] N new high-priority item(s): ..."}}
+  ```
+  This JSON-envelope format is mandatory for PostToolUse: plain stdout
+  from a PostToolUse hook only reaches the user's transcript view, NOT
+  the model. Empty stdout on quiet cycles = silent (agent sees nothing).
 - `create_agent` writes a per-workspace `.claude/settings.json` with a
   `PostToolUse` matcher `*` calling the notify script with the agent's
   own `agent_id` + its per-type priority source list:
@@ -362,6 +370,16 @@ code. Remedy: write `.claude/settings.json` into each existing workspace
 DO apply to resumed sessions (each `claude -p` invocation passes the
 latest `--system-prompt` regardless of `--resume`), so no session reset is
 needed for prompt changes — only for hook-config changes.
+
+**Hook-output format gotcha (learned empirically, commit `557ffc4`):** the
+first cut of `notify.py` printed the `[NOTIFY] ...` string as plain stdout.
+Claude Code's PostToolUse hook does NOT inject plain stdout into the
+agent's conversation — it only surfaces to the user's transcript view.
+To feed text back to the model, the hook must emit
+`{"hookSpecificOutput": {"hookEventName": "PostToolUse",
+"additionalContext": "..."}}` on stdout. The current script does this;
+ordinary text would silently fail to reach the agent despite the script
+running correctly.
 
 ---
 

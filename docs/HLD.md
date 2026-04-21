@@ -283,7 +283,7 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `get_agent_notifications(agent_id, priority_from_agent_types?, since?)` | ✓ | ✓ | ✓ | ✓ | Compact count of unacked chats + broadcasts from priority source types. Used by the per-agent PostToolUse hook for async wake-up. Tasks intentionally excluded (they surface via action_items_summary on normal wake-up). |
+| `get_agent_notifications(agent_id, priority_from_agent_types?, since?)` | ✓ | ✓ | ✓ | ✓ | Compact count of unacked chats + broadcasts from priority source types. Used by the per-agent PostToolUse hook for async wake-up. Hook emits `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"[NOTIFY] …"}}` on stdout (plain stdout is swallowed by Claude Code — the JSON envelope is mandatory to reach the model). Tasks intentionally excluded (they surface via action_items_summary on normal wake-up). |
 
 #### Consolidation (planned · Phase 3)
 
