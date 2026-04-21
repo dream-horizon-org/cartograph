@@ -4,19 +4,23 @@ from shared.db import execute_mutate, execute_one
 
 
 def _insert_comm(from_agent, to_agent, type_, text, source_id=None):
-    if source_id:
-        row = execute_mutate(
-            """INSERT INTO communications (from_agent, to_agent, type, text, source_id)
-               VALUES (%s, %s, %s, %s, %s::uuid)""",
-            (from_agent, to_agent, type_, text, source_id),
-        )
+    # For broadcasts the target is an agent_type, stored in to_agent_type.
+    # For everything else, to_agent holds the target agent_id.
+    if type_ == "broadcast":
+        to_col, to_val = "to_agent_type", to_agent
     else:
-        row = execute_mutate(
-            """INSERT INTO communications (from_agent, to_agent, type, text)
-               VALUES (%s, %s, %s, %s)""",
-            (from_agent, to_agent, type_, text),
+        to_col, to_val = "to_agent", to_agent
+    if source_id:
+        return execute_mutate(
+            f"""INSERT INTO communications (from_agent, {to_col}, type, text, source_id)
+                VALUES (%s, %s, %s, %s, %s::uuid)""",
+            (from_agent, to_val, type_, text, source_id),
         )
-    return row
+    return execute_mutate(
+        f"""INSERT INTO communications (from_agent, {to_col}, type, text)
+            VALUES (%s, %s, %s, %s)""",
+        (from_agent, to_val, type_, text),
+    )
 
 
 # ============ /api/communications ============
@@ -110,7 +114,8 @@ def test_admin_broadcast(client, agent_factory):
     assert resp.status_code == 200
     data = resp.json()
     assert data["from_agent"] == "admin"
-    assert data["to_agent"] == "sme"
+    assert data["to_agent"] is None
+    assert data["to_agent_type"] == "sme"
     assert data["type"] == "broadcast"
 
 

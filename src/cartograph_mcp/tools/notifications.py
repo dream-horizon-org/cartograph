@@ -98,7 +98,7 @@ def get_agent_notifications(
         bcast_rows = execute(
             """SELECT c.from_agent, COUNT(*) AS cnt, MAX(c.created_at) AS latest
                FROM communications c
-               WHERE c.type = 'broadcast' AND c.to_agent = %s
+               WHERE c.type = 'broadcast' AND c.to_agent_type = %s
                  AND c.from_agent = ANY(%s) AND c.created_at > %s
                  AND NOT EXISTS (
                    SELECT 1 FROM broadcast_acks ba
@@ -111,7 +111,7 @@ def get_agent_notifications(
         bcast_rows = execute(
             """SELECT c.from_agent, COUNT(*) AS cnt, MAX(c.created_at) AS latest
                FROM communications c
-               WHERE c.type = 'broadcast' AND c.to_agent = %s
+               WHERE c.type = 'broadcast' AND c.to_agent_type = %s
                  AND c.from_agent = ANY(%s)
                  AND NOT EXISTS (
                    SELECT 1 FROM broadcast_acks ba

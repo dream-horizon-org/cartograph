@@ -251,11 +251,11 @@ def create_app() -> FastAPI:
 
         Short-circuits the need to ask orchestrator first — admin is the
         most privileged actor. Inserts one communication row
-        (type='broadcast', to_agent=<agent_type>). Per-agent acks happen
-        individually via the broadcast_acks table.
+        (type='broadcast', to_agent_type=<agent_type>). Per-agent acks
+        happen individually via the broadcast_acks table.
         """
         row = execute_returning(
-            """INSERT INTO communications (from_agent, to_agent, type, text)
+            """INSERT INTO communications (from_agent, to_agent_type, type, text)
                VALUES ('admin', %s, 'broadcast', %s)
                RETURNING *""",
             (body.to_agent_type, body.message),

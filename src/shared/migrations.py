@@ -208,11 +208,15 @@ def run_migrations() -> None:
 
             # --- Category 4: Communication ---
 
+            # Note: communications.to_agent is agent_id; to_agent_type (added
+            # via ALTER below) is the agent_type of the broadcast target.
+            # Exactly one must be non-null — CHECK enforced via additive migration.
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS communications (
                     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    from_agent      TEXT NOT NULL,
-                    to_agent        TEXT NOT NULL,
+                    from_agent      TEXT NOT NULL,                 -- agent_id or 'admin'
+                    to_agent        TEXT,                          -- agent_id ('admin' or specific); NULL for broadcasts
+                    to_agent_type   TEXT,                          -- agent_type for broadcasts; NULL otherwise
                     type            TEXT NOT NULL CHECK (type IN (
                                         'consolidation','task','clarification','broadcast','chat'
                                     )),
@@ -220,7 +224,9 @@ def run_migrations() -> None:
                     text            TEXT NOT NULL,
                     metadata        JSONB NOT NULL DEFAULT '{}',
                     acked_at        TIMESTAMPTZ,
-                    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    CONSTRAINT comm_target_exactly_one
+                      CHECK ((to_agent IS NOT NULL) <> (to_agent_type IS NOT NULL))
                 )
             """)
 
@@ -327,6 +333,39 @@ def run_migrations() -> None:
                 "ALTER TABLE agent_runs DROP COLUMN IF EXISTS resource_id"
             )
 
+            # Clean separation of broadcast targets from point-to-point
+            # targets on communications. Previously `to_agent` held either
+            # an agent_id OR an agent_type (for broadcasts) — overloaded.
+            # Split into `to_agent` (agent_id, nullable) + `to_agent_type`
+            # (agent_type for broadcasts, nullable) with a CHECK that
+            # exactly one is set. Order matters: DROP NOT NULL first so the
+            # backfill UPDATE can set to_agent = NULL.
+            cur.execute(
+                "ALTER TABLE communications ADD COLUMN IF NOT EXISTS to_agent_type TEXT"
+            )
+            cur.execute(
+                "ALTER TABLE communications ALTER COLUMN to_agent DROP NOT NULL"
+            )
+            # Backfill: broadcast rows had their agent_type in to_agent.
+            cur.execute(
+                """UPDATE communications
+                   SET to_agent_type = to_agent, to_agent = NULL
+                   WHERE type = 'broadcast' AND to_agent_type IS NULL AND to_agent IS NOT NULL"""
+            )
+            # Add the exactly-one-of constraint. Idempotent via DO block.
+            cur.execute(
+                """DO $$
+                   BEGIN
+                     IF NOT EXISTS (
+                       SELECT 1 FROM pg_constraint
+                       WHERE conname = 'comm_target_exactly_one'
+                     ) THEN
+                       ALTER TABLE communications ADD CONSTRAINT comm_target_exactly_one
+                         CHECK ((to_agent IS NOT NULL) <> (to_agent_type IS NOT NULL));
+                     END IF;
+                   END$$"""
+            )
+
             # --- Indexes ---
             _create_indexes(cur)
 
@@ -399,7 +438,8 @@ def _create_indexes(cur) -> None:
         "CREATE INDEX IF NOT EXISTS idx_consol_agents ON consolidations(agent_a_id, agent_b_id)",
 
         # Communications
-        "CREATE INDEX IF NOT EXISTS idx_comm_to ON communications(to_agent)",
+        "CREATE INDEX IF NOT EXISTS idx_comm_to ON communications(to_agent) WHERE to_agent IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_comm_to_type ON communications(to_agent_type) WHERE to_agent_type IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS idx_comm_source ON communications(source_id)",
         "CREATE INDEX IF NOT EXISTS idx_comm_type ON communications(type)",
         "CREATE INDEX IF NOT EXISTS idx_comm_created ON communications(created_at)",

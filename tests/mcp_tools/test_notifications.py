@@ -9,11 +9,19 @@ from cartograph_mcp.tools import notifications
 
 
 def _insert_comm(from_agent, to_agent, type_, text, acked=False):
-    sql = """INSERT INTO communications (from_agent, to_agent, type, text"""
+    # Broadcasts target an agent_type (to_agent_type); others target an
+    # agent_id (to_agent).
+    to_col = "to_agent_type" if type_ == "broadcast" else "to_agent"
     if acked:
-        sql += ", acked_at) VALUES (%s, %s, %s, %s, now()) RETURNING *"
+        sql = (
+            f"INSERT INTO communications (from_agent, {to_col}, type, text, acked_at)"
+            f" VALUES (%s, %s, %s, %s, now()) RETURNING *"
+        )
     else:
-        sql += ") VALUES (%s, %s, %s, %s) RETURNING *"
+        sql = (
+            f"INSERT INTO communications (from_agent, {to_col}, type, text)"
+            f" VALUES (%s, %s, %s, %s) RETURNING *"
+        )
     from shared.db import execute_returning
     return execute_returning(sql, (from_agent, to_agent, type_, text))
 

@@ -9,7 +9,7 @@ def send_broadcast(from_agent_id: str, to_agent_type: str, message: str) -> dict
         raise ValueError("Only orchestrator or admin can send broadcasts.")
 
     row = execute_returning(
-        """INSERT INTO communications (from_agent, to_agent, type, text)
+        """INSERT INTO communications (from_agent, to_agent_type, type, text)
            VALUES (%s, %s, 'broadcast', %s)
            RETURNING *""",
         (from_agent_id, to_agent_type, message),
@@ -33,7 +33,7 @@ def get_unacked_broadcasts(agent_id: str, agent_type: str) -> list[dict]:
     """Get broadcast messages this agent hasn't acked."""
     return execute(
         """SELECT c.* FROM communications c
-           WHERE c.type = 'broadcast' AND c.to_agent = %s
+           WHERE c.type = 'broadcast' AND c.to_agent_type = %s
            AND c.id NOT IN (
                SELECT communication_id FROM broadcast_acks WHERE agent_id = %s
            )
