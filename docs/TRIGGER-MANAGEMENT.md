@@ -224,12 +224,14 @@ LOOP (continuous):
   ├── 1. Scan for actionable items across all tables
   │
   ├── 2. Build wake list:
-  │     For each idle agent (status='idle' AND trigger_lock=FALSE), check:
+  │     For each idle agent (status='idle' AND trigger_lock=FALSE
+  │     AND (sleep_until IS NULL OR sleep_until <= now())), check:
   │       ├── consolidations where status triggers this agent?
   │       ├── tasks where status triggers this agent?
   │       ├── clarifications where status triggers this agent?
   │       ├── communications where type='chat' AND to=agent AND acked_at IS NULL?
-  │       ├── broadcasts where type='broadcast' AND to=agent_type AND no ack?
+  │       ├── broadcasts where type='broadcast' AND to_agent_type=agent_type AND no ack
+  │       │   AND (is_persistent OR created_at > agent.created_at)?  -- forward-only
   │       └── system auto-transitions (confidence breach → R)?
   │
   ├── 3. Prioritise:
@@ -610,9 +612,12 @@ ack_chats(agent_id, communication_ids[])
 **Broadcast acts:**
 
 ```
-send_broadcast(from_agent_id, to_agent_type, message)
-  Inserts communication with type='broadcast', to_agent=agent_type.
-  Only orchestrator/admin can broadcast.
+send_broadcast(from_agent_id, to_agent_type, message, persistent=False)
+  Inserts communication (type='broadcast', to_agent_type=<type>,
+  is_persistent=<flag>). Only orchestrator/admin can broadcast.
+  persistent=False (default) → forward-only, only agents existing at
+  send time see it. persistent=True → also applies to agents spawned
+  later (standing policy).
 
 ack_broadcast(agent_id, communication_id)
   Inserts row into broadcast_acks.
@@ -776,6 +781,23 @@ reset_agent(agent_id, target_agent_id)
   Orchestrator-only override. Force-resets a permanently-errored agent
   back to idle (clears error_msg, recovery_attempts=0, trigger_lock=FALSE).
   Use after the bounded auto-recovery (3 attempts) has given up.
+
+sleep_self(agent_id, duration_seconds, reason)
+  Any active agent. Self-sleep up to 7 days (duration_seconds ≤ 604800).
+  Sets agent_runs.sleep_until = now() + duration_seconds. Trigger scanner
+  skips sleeping agents in its idle-lock filter (see §2.1 step 2).
+  Admin chat to a sleeping agent auto-wakes it. Broadcasts, tasks, and
+  orchestrator-to-agent chats do NOT interrupt sleep.
+
+bulk_sleep_agents(agent_id, until, reason, agent_ids?, agent_type?)
+  Orchestrator/admin only. Puts a cohort to sleep until an ISO-8601
+  timestamp. At least one of agent_ids / agent_type required.
+  Refuses agent_type='orchestrator' (never bulk-pause coordinators).
+  Caller is never slept (excluded even if in agent_ids[]).
+
+bulk_wake_agents(agent_id, agent_ids?, agent_type?)
+  Orchestrator/admin only. Clears sleep_until on the cohort so trigger
+  scanner picks them up on the next cycle.
 
 decommission_agent(agent_id, target_agent_id, reason, resource_action='leave')
   Orchestrator-only. Flips target to status='decommissioned'. resource_action:

@@ -198,6 +198,9 @@ CREATE TABLE agent_runs (
     error_msg        TEXT,                        -- last error if status = errored (stderr tail / exception repr)
     errored_at       TIMESTAMPTZ,                 -- stamped when transitioning to errored (recovery backoff anchor)
     recovery_attempts INT NOT NULL DEFAULT 0,    -- bounded by MAX_RECOVERY_ATTEMPTS=3; reset to 0 on successful idle
+    sleep_until      TIMESTAMPTZ,                 -- if set AND in future, trigger scanner skips this agent.
+                                                 -- Admin chat auto-wakes (clears it); bulk_wake_agents also clears.
+                                                 -- Expired sleep_until is effectively awake (scanner filter treats it as NULL).
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -207,6 +210,7 @@ CREATE INDEX idx_agent_type ON agent_runs(agent_type);
 CREATE INDEX idx_agent_idle ON agent_runs(agent_type, status) WHERE status = 'idle';
 CREATE INDEX idx_agent_locked ON agent_runs(trigger_lock) WHERE trigger_lock = TRUE;
 CREATE INDEX idx_agent_errored ON agent_runs(errored_at) WHERE status = 'errored';
+CREATE INDEX idx_agent_sleep ON agent_runs(sleep_until) WHERE sleep_until IS NOT NULL;
 ```
 
 ### `resources`
@@ -409,6 +413,9 @@ CREATE TABLE communications (
     text            TEXT NOT NULL,               -- the message content
     metadata        JSONB NOT NULL DEFAULT '{}', -- confidence scores, state_transition {from,to}, evidence refs
     acked_at        TIMESTAMPTZ,                 -- when recipient acknowledged (chat only, NULL = unacked)
+    is_persistent   BOOLEAN NOT NULL DEFAULT FALSE, -- broadcasts: TRUE = also applies to agents spawned later
+                                                    -- (standing policy). Default FALSE = forward-only,
+                                                    -- only agents existing at send time see it.
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT comm_target_exactly_one
       CHECK ((to_agent IS NOT NULL) <> (to_agent_type IS NOT NULL))

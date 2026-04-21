@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-21):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · **Phase 2 ✅** (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 3 (Consolidation) + embedding pipeline pending.
-- **45 MCP tools** registered · **170 tests** passing.
+**Status (2026-04-21):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · **Phase 2.5 ✅** (sleep + forward-only broadcasts) · Phase 3 (Consolidation) + embedding pipeline pending.
+- **48 MCP tools** registered · **196 tests** passing.
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 
 ---
@@ -301,6 +301,67 @@ agent-type filters clean (no discriminator dance in SQL).
 - `vector_search` tool.
 - Consolidation + clarification state tooling + `state_transition`
   metadata backfill for those tools.
+
+---
+
+## Phase 2.5: Sleep + forward-only broadcasts ✅
+
+Both fixes target the same problem — the trigger scanner pestering agents
+pointlessly. Shipped in commit `70b89b0` with small UI follow-ups
+(`48a4b38` per-agent buttons, `e4b3371` dialog UX, `b058ae2` expired-sleep FE fix).
+
+### Sleep
+- `agent_runs.sleep_until TIMESTAMPTZ` (nullable). Trigger scanner
+  idle-lock filter adds `AND (sleep_until IS NULL OR sleep_until <= now())`.
+- `idx_agent_sleep` partial index (cheap scans on the small sleeping set).
+- Three new MCP tools (46 → 48 live):
+  - `sleep_self(agent_id, duration_seconds, reason)` — any agent;
+    ≤ 7 days.
+  - `bulk_sleep_agents(agent_id, until, reason, agent_ids?, agent_type?)`
+    — orch/admin. Refuses `agent_type='orchestrator'` and never sleeps caller.
+  - `bulk_wake_agents(agent_id, agent_ids?, agent_type?)` — orch/admin.
+- Interrupt semantic: admin chat to a sleeping agent auto-wakes
+  (`send_chat` clears `sleep_until` when `from_agent='admin'`).
+  Broadcasts, tasks, orchestrator-to-agent chats do NOT interrupt sleep.
+- Admin UI: per-agent 💤/⏰ row buttons + per-group 💤/⏰ headers + sleep
+  chip on agent rows when asleep. New `POST /api/sleep` + `POST /api/wake`.
+
+### Forward-only broadcasts
+- `communications.is_persistent BOOLEAN NOT NULL DEFAULT FALSE`.
+- `send_broadcast(..., persistent=False)` and admin `POST /api/broadcast`
+  both accept the flag; UI broadcast dialog gets a "Persistent" checkbox.
+- Query scoping updated in three places (scanner, `get_unacked_broadcasts`,
+  `get_agent_notifications`):
+  `AND (c.is_persistent OR c.created_at > (SELECT created_at FROM agent_runs WHERE agent_id = me))`
+- Fixes "new agent bombarded by all historical broadcasts of its type."
+
+### Agent prompts
+- All four types gained a `== SLEEP WHEN WAITING ==` block referencing
+  `sleep_self` + interrupt rules (admin-chat override, bulk wake).
+- Orchestrator additionally learned `bulk_sleep_agents` / `bulk_wake_agents`.
+
+### Tests
+- `tests/mcp_tools/test_sleep.py` (19): sleep_self validation, bulk sleep
+  by ids/type, orch-type refusal, caller-skip, past-timestamp refusal,
+  blank-wipe refusal, non-orch refusal, admin path, wake clears,
+  scanner idle-filter skip, expired-sleep re-pickup, admin-chat auto-wake,
+  non-admin chat doesn't interrupt.
+- `tests/mcp_tools/test_broadcast_scoping.py` (7): new agent doesn't see
+  historical non-persistent broadcast; persistent historical broadcast
+  visible; post-spawn non-persistent broadcast visible to existing agents;
+  notifications respect scoping; default False; stored TRUE.
+
+Total: 170 → 196 tests.
+
+### Prompt-session caveat (operational note)
+Existing agents spawned before Phase 2.3 do not get the PostToolUse hook
+automatically — their workspaces predate the `_write_claude_settings`
+code. Remedy: write `.claude/settings.json` into each existing workspace
+(one-shot manual backfill, or let agents respawn). NEW agents created via
+`create_agent` / `bulk_spawn_smes` get it correctly. System prompt updates
+DO apply to resumed sessions (each `claude -p` invocation passes the
+latest `--system-prompt` regardless of `--resume`), so no session reset is
+needed for prompt changes — only for hook-config changes.
 
 ---
 

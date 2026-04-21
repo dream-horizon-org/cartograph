@@ -203,17 +203,17 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `get_action_items_summary(agent_id)` | ✓ | ✓ | ✓ | ✓ | Returns counts for the caller only |
 | `get_action_items_detail(agent_id)`  | ✓ | ✓ | ✓ | ✓ | Same |
 
-#### Chat & Broadcast (live · Phase 0)
+#### Chat & Broadcast (live · Phase 0 + 2.5)
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `send_chat(from, to, message)` | ✓ | ✓ *→ admin only* | ✓ *→ admin only* | ✓ *→ admin only* | Non-admin agents may only message `admin`; admin may message anyone |
+| `send_chat(from, to, message)` | ✓ | ✓ *→ admin only* | ✓ *→ admin only* | ✓ *→ admin only* | Non-admin agents may only message `admin`; admin may message anyone. Admin chat to a sleeping agent auto-wakes it. |
 | `ack_chats(agent_id, ids[])` | ✓ | ✓ | ✓ | ✓ | Only acks rows where `to_agent = agent_id` |
 | `get_unacked_chats(agent_id)` | ✓ | ✓ | ✓ | ✓ | Own inbox |
 | `get_chat_history(agent_id, page, limit)` | ✓ | ✓ | ✓ | ✓ | Own history |
-| `send_broadcast(from, to_type, message)` | ✓ | — | — | — | Also admin |
+| `send_broadcast(from, to_type, message, persistent=False)` | ✓ | — | — | — | Also admin. `persistent=True` makes it apply to agents spawned later too (standing policy). Default forward-only. |
 | `ack_broadcast(agent_id, id)` | ✓ | ✓ | ✓ | ✓ | Per-agent ack record |
-| `get_unacked_broadcasts(agent_id, agent_type)` | ✓ | ✓ | ✓ | ✓ | Own inbox by type |
+| `get_unacked_broadcasts(agent_id, agent_type)` | ✓ | ✓ | ✓ | ✓ | Own inbox by type. Skips pre-spawn non-persistent broadcasts. |
 
 #### Tasks (live · Phase 1)
 
@@ -248,7 +248,7 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `list_all_resources(agent_id, status?)` | ✓ | ✓ | ✓ | ✓ | Excludes `rejected` unless requested |
 | `get_resource_counts(agent_id)` | ✓ | ✓ | ✓ | ✓ | Orchestrator's gatekeeper query |
 
-#### Agent Lifecycle (live · Phase 1 + 2-kickoff)
+#### Agent Lifecycle (live · Phase 1 + 2-kickoff + 2.5)
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
@@ -260,6 +260,9 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `decommission_agents_bulk(agent_id, reason, agent_ids?, agent_type?, resource_action?)` | ✓ | — | — | — | Cohort teardown; refuses `agent_type='orchestrator'` and blank-wipe; skips caller |
 | `decommission_component(agent_id, component_id, reason)` | ✓ | — | — | — | Soft-delete (status='decommissioned') |
 | `decommission_components_bulk(agent_id, component_ids[], reason)` | ✓ | — | — | — | Requires explicit id list; refuses blank-wipe |
+| `sleep_self(agent_id, duration_seconds, reason)` | ✓ | ✓ | ✓ | ✓ | Self-sleep up to 7 days. Admin chat / bulk_wake_agents wakes. Broadcasts/tasks queue but don't interrupt. |
+| `bulk_sleep_agents(agent_id, until, reason, agent_ids?, agent_type?)` | ✓ | — | — | — | Also admin. Refuses `agent_type='orchestrator'`, never sleeps caller, ISO timestamp |
+| `bulk_wake_agents(agent_id, agent_ids?, agent_type?)` | ✓ | — | — | — | Also admin. Clears `sleep_until` on cohort |
 
 #### Component Graph (live · Phase 2.2 · embeddings deferred)
 

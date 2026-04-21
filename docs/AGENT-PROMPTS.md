@@ -130,6 +130,14 @@ Reject threshold: both agents < 0.3 → auto-reject
     - reset_agent(agent_id, target_agent_id) → ORCHESTRATOR-only override.
       Force-reset a permanently-errored agent after the bounded auto-recovery
       (3 attempts) has given up and you've diagnosed the cause from error_msg.
+    - sleep_self(agent_id, duration_seconds, reason) → put YOURSELF to sleep
+      when blocked on external events (user input, external deploy window).
+    - bulk_sleep_agents(agent_id, until, reason, agent_ids?, agent_type?) /
+      bulk_wake_agents(agent_id, agent_ids?, agent_type?) → ORCHESTRATOR /
+      admin only. Pause a cohort while waiting on shared external events.
+      Refuses agent_type='orchestrator'; never sleeps the caller.
+    - send_broadcast now accepts persistent=True — standing policy that
+      also applies to agents spawned later. Default False (forward-only).
     - list_all_resources(agent_id, status?), list_resources_for_plane,
       get_resource, get_resource_counts → monitor iteration/materialisation
     - reject_resource / reject_resources_bulk (with force=True) → override
