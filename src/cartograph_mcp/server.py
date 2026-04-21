@@ -23,6 +23,7 @@ from shared.migrations import run_migrations
 from cartograph_mcp.tools import action_items, chat, broadcast, secrets
 from cartograph_mcp.tools import tasks as tasks_tool
 from cartograph_mcp.tools import resources as resources_tool
+from cartograph_mcp.tools import components as components_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -463,6 +464,161 @@ def reject_resources_bulk(
     )
 
 
+# ============ COMPONENTS ============
+
+@mcp.tool()
+def upsert_component(
+    agent_id: str,
+    canonical_name: str,
+    display_name: str,
+    component_type: str,
+    confidence: float = 1.0,
+    metadata: dict | None = None,
+) -> dict[str, Any]:
+    """Create or update a component. SME-ONLY.
+
+    On first create, links the SME's resource to this component and flips
+    the resource to 'assigned'. Upserts on canonical_name — if the component
+    already exists and this SME owns it, fields are updated.
+
+    Args:
+        canonical_name: stable unique name (e.g. 'feeds-aggregator-v2-api')
+        display_name: human-friendly name
+        component_type: one of application, database, cache, queue, lambda,
+                        cron, external-service, library, infrastructure
+        confidence: 0.0–1.0
+        metadata: arbitrary JSONB
+
+    Returns: the component row.
+    """
+    return components_tool.upsert_component(
+        agent_id, canonical_name, display_name, component_type, confidence, metadata
+    )
+
+
+@mcp.tool()
+def get_component(agent_id: str, component_id: str) -> dict[str, Any]:
+    """Read a single component by id. Any active agent can read."""
+    return components_tool.get_component(agent_id, component_id)
+
+
+# ============ ATTRIBUTIONS ============
+
+@mcp.tool()
+def upsert_attribution(
+    agent_id: str,
+    component_id: str,
+    plane: str,
+    resource_type: str,
+    identifier: str,
+    evidence: str = "",
+    confidence: float = 1.0,
+    metadata: dict | None = None,
+) -> dict[str, Any]:
+    """Add or update an attribution on a component. SME-ONLY, own component.
+
+    Attributions are evidence linking a component to a concrete resource
+    (endpoint, hostname, deploy config, ASG, Datadog service name, etc.).
+
+    Upserts on (plane, resource_type, identifier).
+
+    Returns: the attribution row.
+    """
+    return components_tool.upsert_attribution(
+        agent_id, component_id, plane, resource_type, identifier,
+        evidence, confidence, metadata
+    )
+
+
+@mcp.tool()
+def get_attributions(agent_id: str, component_id: str) -> dict[str, list]:
+    """Read all attributions for a component. Any active agent can read."""
+    return {"attributions": components_tool.get_attributions(agent_id, component_id)}
+
+
+# ============ EDGES ============
+
+@mcp.tool()
+def create_edge(
+    agent_id: str,
+    source_id: str,
+    target_id: str,
+    edge_type: str,
+    identifier: str,
+    source_attr_id: str | None = None,
+    target_attr_id: str | None = None,
+    evidence: list | None = None,
+    confidence: float = 1.0,
+    metadata: dict | None = None,
+) -> dict[str, Any]:
+    """Create a dependency edge between two components. SME-ONLY.
+
+    SME must own either the source or target component.
+    Upserts on (source_id, target_id, edge_type, identifier).
+
+    edge_type: calls, reads_from, writes_to, triggers, publishes_to,
+               consumes_from, runs_on.
+
+    Returns: the edge row.
+    """
+    return components_tool.create_edge(
+        agent_id, source_id, target_id, edge_type, identifier,
+        source_attr_id, target_attr_id, evidence, confidence, metadata
+    )
+
+
+@mcp.tool()
+def get_edges(agent_id: str, component_id: str) -> dict[str, list]:
+    """Read all edges where component is source or target. Any active agent."""
+    return {"edges": components_tool.get_edges(agent_id, component_id)}
+
+
+# ============ UNRESOLVED REFERENCES ============
+
+@mcp.tool()
+def insert_unresolved(
+    agent_id: str,
+    component_id: str,
+    reference_type: str,
+    reference_value: str,
+    context: dict | None = None,
+) -> dict[str, Any]:
+    """Insert an unresolved outbound reference found in a component. SME-ONLY.
+
+    Use this when your component calls/reads/triggers something that you
+    can't yet resolve to a specific component (hostname, URL, config key).
+
+    Returns: the unresolved row.
+    """
+    return components_tool.insert_unresolved(
+        agent_id, component_id, reference_type, reference_value, context
+    )
+
+
+@mcp.tool()
+def get_unresolved(agent_id: str, component_id: str) -> dict[str, list]:
+    """Read unresolved references for a component. Any active agent."""
+    return {"unresolved": components_tool.get_unresolved(agent_id, component_id)}
+
+
+@mcp.tool()
+def resolve_reference(
+    agent_id: str,
+    unresolved_id: str,
+    resolved_to_component_id: str,
+) -> dict[str, Any]:
+    """Resolve an unresolved reference to a target component. SME-ONLY.
+
+    Call this when you've identified which component an outbound reference
+    points to.
+
+    Returns: the updated unresolved row.
+    """
+    return components_tool.resolve_reference(
+        agent_id, unresolved_id, resolved_to_component_id
+    )
+
+
 # ============ AGENT LIFECYCLE ============
 
 @mcp.tool()
@@ -613,6 +769,10 @@ def main() -> None:
         "upsert_resource, upsert_resources_bulk, get_resource, "
         "list_resources_for_plane, list_all_resources, get_resource_counts, "
         "mark_resource_done, reject_resource, reject_resources_bulk, "
+        "upsert_component, get_component, "
+        "upsert_attribution, get_attributions, "
+        "create_edge, get_edges, "
+        "insert_unresolved, get_unresolved, resolve_reference, "
         "create_agent, list_agents, reset_agent"
     )
     try:

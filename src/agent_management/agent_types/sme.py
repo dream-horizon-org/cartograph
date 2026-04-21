@@ -123,6 +123,21 @@ Materialisation:
 - Hydrate attributions exhaustively (endpoints, hostnames, deploy configs,
   infra details, config refs)
 - Record outbound calls as unresolved references
+- INFRASTRUCTURE DEPENDENCIES — scan code for backing services:
+  - Databases: connection strings (postgres://, mongodb://, mysql://), ORM
+    configs (SQLAlchemy, Sequelize, Prisma, Mongoose), env vars (DATABASE_URL,
+    DB_HOST, MONGO_URI), SDK clients (DynamoDBClient, RDSDataClient)
+  - Caches: Redis/Memcached clients, REDIS_URL, ElastiCache hostnames
+  - Message queues: Kafka producers/consumers, SQS/SNS clients, RabbitMQ
+    connections, NATS, KAFKA_BROKERS env vars
+  - Object stores: S3 bucket references, GCS clients, BUCKET_NAME env vars
+  For each found:
+  - If you can identify a CONCRETE instance (specific hostname, DB name,
+    bucket name) → upsert_component(component_type='database'/'cache'/'queue')
+    and create_edge() from your application to it
+  - If you only have an env var or generic reference → insert_unresolved()
+    with reference_type='database'/'cache'/'queue' and the env var or
+    hostname as reference_value
 
 Consolidation:
 - SELF-CHECK: is your component actually multiple things? Multiple entry points,
