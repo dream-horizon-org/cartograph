@@ -138,14 +138,82 @@ body {
   flex: 1;
 }
 
-#agent-list li {
+/* New grouped layout: one <li class="agent-group"> per type, containing
+   a header, a search input, and a nested <ul class="group-list">. */
+.agent-group {
+  padding: 0 !important;  /* override default #agent-list li padding */
+  cursor: default !important;
+  border-bottom: 1px solid #30363d !important;
+  background: transparent !important;
+}
+
+.agent-group:hover { background: transparent !important; }
+
+.agent-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #6e7681;
+}
+
+.group-title { color: #58a6ff; }
+.group-count {
+  color: #6e7681;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.group-search {
+  margin: 0 12px 6px;
+  padding: 5px 9px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  border-radius: 4px;
+  font-size: 12px;
+  display: block;
+  width: calc(100% - 24px);
+}
+
+.group-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.group-list li {
+  padding: 10px 16px;
+  cursor: pointer;
+  border-top: 1px solid #21262d;
+  transition: background 0.1s;
+}
+
+.group-list li:hover { background: #1f2428; }
+
+.group-list li.empty {
+  color: #6e7681;
+  font-size: 11px;
+  cursor: default;
+  font-style: italic;
+  padding: 6px 16px 10px;
+}
+.group-list li.empty:hover { background: transparent; }
+
+/* Legacy flat-list rule kept for the empty-state top-level <li> shown
+   when agents list is completely empty. */
+#agent-list > li:not(.agent-group) {
   padding: 12px 16px;
   cursor: pointer;
   border-bottom: 1px solid #21262d;
   transition: background 0.1s;
 }
 
-#agent-list li:hover {
+#agent-list > li:not(.agent-group):hover {
   background: #1f2428;
 }
 

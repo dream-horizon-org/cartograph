@@ -60,26 +60,93 @@ function populateAgentDatalists() {
   fill($to, [...agentIds, 'admin', ...agentTypes]);
 }
 
+// Fixed type order so the sidebar is predictable even when agent counts
+// fluctuate. Types not in this list are appended at the end.
+const _AGENT_TYPE_ORDER = ['orchestrator', 'resolver', 'iterator', 'sme'];
+
+/** Per-group search strings (persist across renders so typing doesn't
+ *  clobber when fetchAgents re-runs on the 5s poll). */
+const agentGroupSearch = Object.create(null);
+
 function renderAgents() {
   if (state.agents.length === 0) {
     $agentList.innerHTML = '<li class="empty">No agents yet. Create one.</li>';
     return;
   }
-  $agentList.innerHTML = '';
-  state.agents.forEach(agent => {
-    const li = document.createElement('li');
-    li.dataset.agentId = agent.agent_id;
-    if (agent.agent_id === state.selectedAgentId) li.classList.add('selected');
-    li.innerHTML = `
-      <div class="agent-id">${escapeHtml(agent.agent_id)}</div>
-      <div class="agent-meta">
-        <span class="agent-type">${agent.agent_type}</span>
-        <span class="status status-${agent.status}">${agent.status}</span>
-      </div>
-    `;
-    li.addEventListener('click', () => selectAgent(agent.agent_id));
-    $agentList.appendChild(li);
+  // Group agents by type.
+  const groups = new Map();
+  state.agents.forEach(a => {
+    if (!groups.has(a.agent_type)) groups.set(a.agent_type, []);
+    groups.get(a.agent_type).push(a);
   });
+  const orderedTypes = [
+    ..._AGENT_TYPE_ORDER.filter(t => groups.has(t)),
+    ...[...groups.keys()].filter(t => !_AGENT_TYPE_ORDER.includes(t)),
+  ];
+
+  $agentList.innerHTML = '';
+  orderedTypes.forEach(type => {
+    const agents = groups.get(type);
+    const search = (agentGroupSearch[type] || '').toLowerCase();
+    const filtered = search
+      ? agents.filter(a => a.agent_id.toLowerCase().includes(search))
+      : agents;
+
+    const groupLi = document.createElement('li');
+    groupLi.className = 'agent-group';
+    groupLi.innerHTML = `
+      <header class="agent-group-header">
+        <span class="group-title">${type}</span>
+        <span class="group-count">${filtered.length}${
+          search ? `/${agents.length}` : ''
+        }</span>
+      </header>
+      <input type="search" class="group-search" data-type="${type}"
+             placeholder="filter ${type}s…"
+             value="${escapeHtml(agentGroupSearch[type] || '')}"
+             autocomplete="off">
+      <ul class="group-list"></ul>
+    `;
+    const $ul = groupLi.querySelector('.group-list');
+    if (filtered.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'empty';
+      empty.textContent = search ? `No ${type} matches "${search}"` : `No ${type}s yet.`;
+      $ul.appendChild(empty);
+    } else {
+      filtered.forEach(agent => _renderAgentRow(agent, $ul));
+    }
+    $agentList.appendChild(groupLi);
+  });
+  // Wire search inputs — each re-renders on input (debounced minimal).
+  $agentList.querySelectorAll('.group-search').forEach(inp => {
+    inp.addEventListener('input', () => {
+      agentGroupSearch[inp.dataset.type] = inp.value;
+      renderAgents();
+      // Restore focus + caret after re-render (renderAgents recreates DOM).
+      const next = $agentList.querySelector(
+        `.group-search[data-type="${inp.dataset.type}"]`
+      );
+      if (next) {
+        next.focus();
+        next.setSelectionRange(next.value.length, next.value.length);
+      }
+    });
+  });
+}
+
+function _renderAgentRow(agent, $ul) {
+  const li = document.createElement('li');
+  li.dataset.agentId = agent.agent_id;
+  if (agent.agent_id === state.selectedAgentId) li.classList.add('selected');
+  li.innerHTML = `
+    <div class="agent-id">${escapeHtml(agent.agent_id)}</div>
+    <div class="agent-meta">
+      <span class="status status-${agent.status}">${agent.status}</span>
+    </div>
+  `;
+  li.addEventListener('click', () => selectAgent(agent.agent_id));
+  $ul.appendChild(li);
 }
 
 async function selectAgent(agentId) {
