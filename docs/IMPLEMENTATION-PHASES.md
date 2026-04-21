@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-20):** Phase 0 ✅ complete · Phase 1 ✅ complete · Phase 2–4 pending.
-- 26 MCP tools registered · 61 tests passing (27 tasks, 17 resources, 17 admin_ui).
+**Status (2026-04-21):** Phase 0 ✅ complete · Phase 1 ✅ complete (incl. runtime-robustness hardening) · Phase 2–4 pending.
+- 30 MCP tools registered · 86 tests passing (27 tasks, 34 resources, 17 admin_ui, 8 recovery).
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with orchestrator + resolver singletons.
 
 ---
@@ -58,9 +58,19 @@ Everything that all subsequent phases depend on.
 - Polls agents with `trigger_lock=TRUE`; atomic pickup: `SET status='running', trigger_lock=FALSE, invocation_count++, heartbeat=now()`.
 - Spawns `claude -p` subprocess per-agent in workspace dir with `.mcp.json` pointing at `http://localhost:8100/mcp` (streamable-http FastMCP).
 - Flags used: `--setting-sources project --dangerously-skip-permissions --allowedTools Bash,Read,Write,Edit,Glob,Grep,mcp__cartograph-db__*`.
-- Background heartbeat thread updates every 10s; stale `running` agents (heartbeat > HEARTBEAT_TIMEOUT) reset to `idle`.
-- Survives parent shell death via `SIGHUP = SIG_IGN`; on startup resets any `running`/`errored` back to `idle`.
+- Per-type subprocess timeouts: iterator/SME = 1800s (long enumerations, deep analysis), orchestrator/resolver = 900s.
+- Background heartbeat thread updates every 10s during subprocess; stale `running` agents (heartbeat > 120s beyond last update) flipped to `errored` as a safety net.
+- On every errored path (non-zero exit, `TimeoutExpired`, uncaught exception, stale detection): `set_agent_errored(error_msg)` persists stderr tail / exception repr + stamps `errored_at`. No more silent failures.
+- Survives parent shell death via `SIGHUP = SIG_IGN`; on startup flips any orphaned `running` → `errored` (leaves existing `errored` alone — recovery scanner governs retries).
 - Agent type configs in `agent_types/{orchestrator,iterator,sme,resolver}.py` supply system prompt, allowed tools, MCP servers.
+- Shared `MISSION_AND_VOCABULARY` block in `agent_types/base.py` injected into every prompt — defines component / resource / attribution / edge, per-plane iterator granularity rules, and the scale sanity check.
+
+### Bounded Auto-Recovery (`src/trigger_management/scanners/recovery.py`)
+- New columns on `agent_runs`: `errored_at TIMESTAMPTZ`, `recovery_attempts INT NOT NULL DEFAULT 0`.
+- Recovery scanner runs each trigger-manager cycle: `WHERE status='errored' AND recovery_attempts<3 AND now()-errored_at >= backoff(recovery_attempts)` → flip to `idle`, clear `trigger_lock`, increment `recovery_attempts`, keep `error_msg` for history.
+- Backoff ladder: **[60s, 300s, 1800s]**. After 3 attempts the agent stays `errored` for human triage (visible in admin UI with its `error_msg`).
+- Successful invocation (`status=running → idle`) calls `clear_recovery_state` → resets `recovery_attempts=0` and clears `error_msg`, so past transient errors don't count against a now-healthy agent.
+- Orchestrator escape hatch: `reset_agent(agent_id, target_agent_id)` MCP tool force-resets a permanently-errored agent regardless of the cap.
 
 ### Admin Chat UI (`src/admin_ui/`)
 - FastAPI server on :8200 · 5 endpoints: list agents, get chat (paginated), poll-new, send, ack.
@@ -106,14 +116,18 @@ Task management — orchestrator assigns work to iterators.
 **Agent lifecycle (`cartograph_mcp/server.py` via colocated AgentManager):**
 - `create_agent(agent_id, new_agent_type, plane?, resource_id?)` — ORCHESTRATOR-only. Spawns iterator (plane) or SME (resource_id). Creates workspace, writes `.mcp.json`, inserts `agent_runs` row.
 - `list_agents(agent_id)` — any agent can see all non-decommissioned agents.
+- `reset_agent(agent_id, target_agent_id)` — ORCHESTRATOR-only override for permanently-errored agents (bypasses recovery attempt cap).
 
 **Resources (`tools/resources.py`):**
 - `upsert_resource(agent_id, plane, resource_type, identifier, access_desc, metadata?)` — ITERATOR-only, own plane only. Idempotent on `(plane, resource_type, identifier)`.
+- `upsert_resources_bulk(agent_id, plane, items[])` — ITERATOR-only bulk variant (limit 5000, one transaction, `executemany(RETURNING)`). Used for large planes to avoid N MCP round-trips per iterator invocation.
 - `get_resource(agent_id, resource_id)`, `list_resources_for_plane(agent_id, plane)`, `list_all_resources(agent_id, status?)`, `get_resource_counts(agent_id)`.
 - `mark_resource_done(agent_id, resource_id)` — SME-only; validated via `resource_component_agents`.
+- `reject_resource(agent_id, resource_id, reason, force=False)`, `reject_resources_bulk(agent_id, plane, resource_ids?, resource_types?, reason, force=False)` — soft-delete (`status='rejected'` + `rejected_at/by/reason` audit trail). Iterator on own plane by default; orchestrator with `force=True` as override. Plane-scoped, refuses blank-wipe. Cascade-safe: rows already linked to an SME via `resource_component_agents` are skipped and returned in `skipped_cascade`.
+- Schema additions: `resources.status` gained `'rejected'`; new columns `rejected_at`, `rejected_by`, `rejected_reason`. `list_all_resources` excludes rejected rows by default.
 
 ### Tables Active
-- agent_runs, resources, tasks, communications, secrets, (resource_component_agents written on mark_resource_done check path)
+- agent_runs (+ `errored_at`, `recovery_attempts`), resources (+ `rejected_at/by/reason`), tasks, communications, secrets, (resource_component_agents written on mark_resource_done check path + read by reject cascade check)
 
 ---
 
