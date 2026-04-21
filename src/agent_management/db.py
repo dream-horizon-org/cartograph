@@ -200,6 +200,10 @@ def get_locked_agents() -> list[dict]:
 
     Priority: orchestrator > resolver > sme > iterator.
     Within same type: lower invocation_count first (spread work evenly).
+
+    DEPRECATED for dispatch — use pickup_next_locked_agent_of_type instead
+    (atomic per-worker pickup, no snapshot staleness). This function is kept
+    for diagnostic / admin-UI views.
     """
     return execute(
         """SELECT * FROM agent_runs
@@ -213,6 +217,40 @@ def get_locked_agents() -> list[dict]:
                ELSE 99
              END,
              invocation_count ASC"""
+    )
+
+
+def pickup_next_locked_agent_of_type(agent_type: str) -> dict | None:
+    """Atomically claim the next highest-priority locked agent of one type.
+
+    One SQL statement: SELECT ... FOR UPDATE SKIP LOCKED inside an UPDATE,
+    so concurrent workers never fight over the same row and the priority
+    ordering is re-evaluated on every call (no stale snapshot).
+
+    Priority within type: lower invocation_count first (fair spread).
+
+    Transitions the claimed row:
+      trigger_lock=TRUE → status='running', trigger_lock=FALSE,
+      invocation_count += 1, heartbeat=now().
+
+    Returns the claimed row, or None if no lockable agent of this type exists.
+    """
+    return execute_returning(
+        """UPDATE agent_runs
+           SET status = 'running',
+               trigger_lock = FALSE,
+               invocation_count = invocation_count + 1,
+               heartbeat = now(),
+               updated_at = now()
+           WHERE agent_id = (
+             SELECT agent_id FROM agent_runs
+             WHERE agent_type = %s AND trigger_lock = TRUE
+             ORDER BY invocation_count ASC
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED
+           )
+           RETURNING *""",
+        (agent_type,),
     )
 
 

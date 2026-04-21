@@ -113,11 +113,20 @@ class AgentManager:
 
         return agent_id
 
-    def invoke_agent(self, agent_id: str, prompt: str | None = None) -> str:
+    def invoke_agent(
+        self,
+        agent_id: str,
+        prompt: str | None = None,
+        already_picked_up: bool = False,
+    ) -> str:
         """Pick up a locked agent and invoke it.
 
         Atomically transitions trigger_lock=TRUE → status='running',
         trigger_lock=FALSE, invocation_count+=1, heartbeat=now().
+
+        If already_picked_up is True, the caller (lane worker) has already
+        performed the transition via pickup_next_locked_agent_of_type and
+        we skip the pickup_agent call.
 
         If prompt is None, uses the generic invocation prompt.
         """
@@ -133,10 +142,11 @@ class AgentManager:
             agent.get("workspace_path"),
         )
 
-        # Atomic pickup: lock → running
-        if not db.pickup_agent(agent_id):
-            logger.warning("Agent %s was not locked; skipping invocation", agent_id)
-            return ""
+        # Atomic pickup: lock → running (skip if lane worker already did it)
+        if not already_picked_up:
+            if not db.pickup_agent(agent_id):
+                logger.warning("Agent %s was not locked; skipping invocation", agent_id)
+                return ""
 
         if prompt is None:
             prompt = _GENERIC_INVOCATION_PROMPT_TEMPLATE.format(
