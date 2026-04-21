@@ -184,6 +184,125 @@ Blocker resolved → SME re-triggered
 
 Why only iterators install: they understand the plane's tooling, they run one-at-a-time per plane, and it prevents 50 SMEs racing to `apt install` simultaneously.
 
+### 2.5 Tool × Agent Matrix
+
+Exhaustive per-tool scoping, grouped by functional category. Live = currently registered in `src/cartograph_mcp/server.py`. Planned = designed but gated behind a later phase (see `IMPLEMENTATION-PHASES.md`).
+
+**Legend:**
+- ✓ = allowed with no extra gating
+- ✓ *scope* = allowed but scoped (e.g., *own plane*, *own component*, *assigned*, *participant*, *force-only*)
+- — = not allowed
+- *admin* = also callable by the admin agent_id via the admin UI
+
+---
+
+#### Action Items (live · Phase 0)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `get_action_items_summary(agent_id)` | ✓ | ✓ | ✓ | ✓ | Returns counts for the caller only |
+| `get_action_items_detail(agent_id)`  | ✓ | ✓ | ✓ | ✓ | Same |
+
+#### Chat & Broadcast (live · Phase 0)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `send_chat(from, to, message)` | ✓ | ✓ *→ admin only* | ✓ *→ admin only* | ✓ *→ admin only* | Non-admin agents may only message `admin`; admin may message anyone |
+| `ack_chats(agent_id, ids[])` | ✓ | ✓ | ✓ | ✓ | Only acks rows where `to_agent = agent_id` |
+| `get_unacked_chats(agent_id)` | ✓ | ✓ | ✓ | ✓ | Own inbox |
+| `get_chat_history(agent_id, page, limit)` | ✓ | ✓ | ✓ | ✓ | Own history |
+| `send_broadcast(from, to_type, message)` | ✓ | — | — | — | Also admin |
+| `ack_broadcast(agent_id, id)` | ✓ | ✓ | ✓ | ✓ | Per-agent ack record |
+| `get_unacked_broadcasts(agent_id, agent_type)` | ✓ | ✓ | ✓ | ✓ | Own inbox by type |
+
+#### Tasks (live · Phase 1)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `create_task(owner, worker, description)` | ✓ | — | — | — | Also admin |
+| `respond_task(agent_id, task_id, msg, new_status, blocker?)` | ✓ | ✓ | ✓ | ✓ | Only participants (owner or worker) |
+| `raise_blocker(agent_id, task_id, detail)` | — | ✓ | ✓ | ✓ | Worker-only shortcut BW→BO |
+| `get_my_tasks(agent_id)` | ✓ | ✓ | ✓ | ✓ | Owner- or worker-scoped |
+| `get_task_thread(task_id)` | ✓ | ✓ | ✓ | ✓ | Participants only |
+
+#### Secrets (live · Phase 1)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `put_secret(agent_id, plane, key, value)` | ✓ | — | — | — | Orchestrator-only |
+| `delete_secret(agent_id, plane, key)` | ✓ | — | — | — | Orchestrator-only |
+| `get_secret(agent_id, plane, key)` | ✓ | ✓ | ✓ | ✓ | Iterators typically read their own plane; no hard scope |
+| `list_secrets_for_plane(agent_id, plane)` | ✓ | ✓ | ✓ | ✓ | Returns keys only (no values) |
+
+#### Resources (live · Phase 1)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `upsert_resource(agent_id, plane, type, identifier, ...)` | — | ✓ *own plane* | — | — | Iterator plane must match |
+| `upsert_resources_bulk(agent_id, plane, items[])` | — | ✓ *own plane* | — | — | Limit 5000; one transaction |
+| `reject_resource(agent_id, resource_id, reason, force=False)` | ✓ *force only* | ✓ *own plane* | — | — | Soft-delete with audit trail |
+| `reject_resources_bulk(agent_id, plane, ids?/types?, reason, force=False)` | ✓ *force only* | ✓ *own plane* | — | — | Refuses blank-wipe; cascade-safe |
+| `mark_resource_done(agent_id, resource_id)` | — | — | ✓ *assigned* | — | SME must be linked via RCA |
+| `get_resource(agent_id, resource_id)` | ✓ | ✓ | ✓ | ✓ | |
+| `list_resources_for_plane(agent_id, plane)` | ✓ | ✓ | ✓ | ✓ | |
+| `list_all_resources(agent_id, status?)` | ✓ | ✓ | ✓ | ✓ | Excludes `rejected` unless requested |
+| `get_resource_counts(agent_id)` | ✓ | ✓ | ✓ | ✓ | Orchestrator's gatekeeper query |
+
+#### Agent Lifecycle (live · Phase 1)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `create_agent(agent_id, new_type, plane?, resource_id?)` | ✓ | — | — | — | Single-agent spawn |
+| `bulk_spawn_smes(agent_id, plane, resource_ids?, all_pending?)` | ✓ | — | — | — | *(planned, Phase 2)* Bulk SME spawn on plane; writes RCA rows with `component_id=NULL` |
+| `list_agents(agent_id)` | ✓ | ✓ | ✓ | ✓ | All non-decommissioned |
+| `reset_agent(agent_id, target_agent_id)` | ✓ | — | — | — | Force-reset permanently-errored agent |
+
+#### Component Graph (planned · Phase 2)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `upsert_component(agent_id, component_data)` | — | — | ✓ *one per SME* | — | Fills the SME's `component_id=NULL` RCA slot on first call; enforces 1 active component per SME |
+| `upsert_attribution(agent_id, component_id, data)` | — | — | ✓ *own component* | — | |
+| `create_edge(agent_id, edge_data)` | — | — | ✓ *own source* | — | |
+| `insert_unresolved(agent_id, data)` | — | — | ✓ *own component* | — | |
+| `resolve_reference(agent_id, unresolved_id, target_component_id)` | — | — | ✓ | — | |
+| `get_component(component_id)` | ✓ | ✓ | ✓ | ✓ | All readable |
+| `get_attributions(component_id)` | ✓ | ✓ | ✓ | ✓ | |
+| `get_edges(component_id)` | ✓ | ✓ | ✓ | ✓ | |
+| `get_unresolved(component_id)` | ✓ | ✓ | ✓ | ✓ | |
+| `vector_search(query, table, limit)` | ✓ | ✓ | ✓ | ✓ | |
+
+#### Consolidation (planned · Phase 3)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `nominate_consolidation(agent_id, comp_a, comp_b, type, confidence, message)` | — | — | ✓ *owns comp_a* | — | merge/split |
+| `respond_consolidation(agent_id, cons_id, confidence, message, new_status)` | — | — | ✓ *participant* | — | Must be agent_a or agent_b |
+| `review_consolidation(agent_id, cons_id, r_conf, message, new_status, mutation_assigned_to?)` | — | — | — | ✓ | Resolver-only |
+| `get_my_consolidations(agent_id)` | ✓ | — | ✓ | ✓ | Scoped: involving this agent |
+| `get_consolidation_thread(cons_id)` | ✓ | — | ✓ *participant* | ✓ | Empty for non-participants |
+
+#### Clarifications (planned · Phase 3)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `create_clarification(asker, responder, question)` | ✓ | ✓ | ✓ | ✓ | Any agent |
+| `respond_clarification(agent_id, clar_id, message, new_status)` | ✓ | ✓ | ✓ | ✓ | Asker or responder only |
+| `get_my_clarifications(agent_id)` | ✓ | ✓ | ✓ | ✓ | |
+| `get_clarification_thread(clar_id)` | ✓ | ✓ | ✓ | ✓ | Asker or responder only |
+
+#### Mutation (planned · Phase 4)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `execute_mutation(agent_id, cons_id, new_status)` | — | — | ✓ *mutation POC* | — | Gated on `mutation_assigned_to == agent_id` AND `status='M'` |
+| `complete_consolidation(agent_id, cons_id)` | — | — | — | ✓ | MD→D |
+| `absorb_agent(agent_id, target_agent_id)` | — | — | ✓ *mutation POC* | — | Merge |
+| `spawn_child_agent(parent_id, cons_id, comp_data, briefing)` | — | — | ✓ *mutation POC* | — | Split |
+| `transfer_attributions(from_comp, to_comp, attr_ids[])` | — | — | ✓ *owns from_comp* | — | |
+| `get_proxy_items(agent_id)` | — | — | ✓ | — | Inherited items from absorbed agents |
+| `get_proxy_chats(agent_id, proxy_agent_id, page, limit)` | — | — | ✓ | — | Chat history of absorbed agent |
+
 ---
 
 ## 3. Trigger Management
