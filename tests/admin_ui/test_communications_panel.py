@@ -64,6 +64,70 @@ def test_list_communications_invalid_type(client):
     assert resp.status_code == 400
 
 
+def test_list_communications_filter_by_from_agent_type(client, agent_factory):
+    agent_factory("orch-1", "orchestrator")
+    agent_factory("sme-1", "sme")
+    agent_factory("sme-2", "sme")
+    _insert_comm("orch-1", "admin", "chat", "from orch")
+    _insert_comm("sme-1", "admin", "chat", "from sme-1")
+    _insert_comm("sme-2", "admin", "chat", "from sme-2")
+    resp = client.get("/api/communications?from_agent_type=sme")
+    texts = sorted(m["text"] for m in resp.json()["messages"])
+    assert texts == ["from sme-1", "from sme-2"]
+
+
+def test_list_communications_filter_by_from_agent_type_admin(client, agent_factory):
+    agent_factory("orch-1", "orchestrator")
+    _insert_comm("admin", "orch-1", "chat", "admin msg")
+    _insert_comm("orch-1", "admin", "chat", "orch msg")
+    resp = client.get("/api/communications?from_agent_type=admin")
+    msgs = resp.json()["messages"]
+    assert [m["text"] for m in msgs] == ["admin msg"]
+
+
+def test_list_communications_filter_by_to_agent_type_matches_broadcast(client, agent_factory):
+    agent_factory("orch-1")
+    _insert_comm("admin", "sme", "broadcast", "to all smes")
+    _insert_comm("admin", "iterator", "broadcast", "to all iters")
+    resp = client.get("/api/communications?to_agent_type=sme")
+    texts = [m["text"] for m in resp.json()["messages"]]
+    assert texts == ["to all smes"]
+
+
+def test_list_communications_filter_by_to_agent_type_matches_p2p(client, agent_factory):
+    """to_agent_type should match point-to-point chats addressed to any
+    agent of that type (via join)."""
+    agent_factory("orch-1", "orchestrator")
+    agent_factory("sme-1", "sme")
+    _insert_comm("admin", "sme-1", "chat", "hi sme")
+    _insert_comm("admin", "orch-1", "chat", "hi orch")
+    resp = client.get("/api/communications?to_agent_type=sme")
+    msgs = resp.json()["messages"]
+    assert [m["text"] for m in msgs] == ["hi sme"]
+
+
+def test_list_communications_filter_by_to_agent_type_combined(client, agent_factory):
+    """to_agent_type=sme should match BOTH a p2p chat to sme-1 AND a broadcast
+    to agent_type='sme'."""
+    agent_factory("orch-1", "orchestrator")
+    agent_factory("sme-1", "sme")
+    _insert_comm("admin", "sme-1", "chat", "hi sme")
+    _insert_comm("admin", "sme", "broadcast", "all smes")
+    resp = client.get("/api/communications?to_agent_type=sme")
+    texts = sorted(m["text"] for m in resp.json()["messages"])
+    assert texts == ["all smes", "hi sme"]
+
+
+def test_list_communications_invalid_from_agent_type(client):
+    resp = client.get("/api/communications?from_agent_type=foo")
+    assert resp.status_code == 400
+
+
+def test_list_communications_invalid_to_agent_type(client):
+    resp = client.get("/api/communications?to_agent_type=foo")
+    assert resp.status_code == 400
+
+
 def test_list_communications_has_more_flag(client, agent_factory):
     agent_factory("orch-1")
     for i in range(55):

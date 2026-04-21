@@ -152,10 +152,14 @@ def create_app() -> FastAPI:
 
     _VALID_COMM_TYPES = {"chat", "broadcast", "task", "consolidation", "clarification"}
 
+    _VALID_AGENT_TYPES = {"orchestrator", "iterator", "sme", "resolver", "admin"}
+
     @app.get("/api/communications")
     def list_communications(
         from_agent: Optional[str] = Query(None),
         to_agent: Optional[str] = Query(None),
+        from_agent_type: Optional[str] = Query(None),
+        to_agent_type: Optional[str] = Query(None),
         type: Optional[str] = Query(None),
         source_id: Optional[str] = Query(None),
         before: Optional[str] = Query(None),
@@ -165,32 +169,71 @@ def create_app() -> FastAPI:
 
         All filters AND together. `before` is a created_at cursor for older
         pages. Returns newest-first with a has_more flag.
+
+        Filter semantics:
+          from_agent / to_agent  — exact agent_id match
+                                   (to_agent only matches point-to-point rows;
+                                   broadcasts have to_agent IS NULL)
+          from_agent_type        — joins agent_runs to resolve from_agent's
+                                   type. 'admin' matches from_agent='admin'.
+          to_agent_type          — matches either to_agent_type column
+                                   (broadcasts) OR agent_runs.agent_type of
+                                   whoever to_agent points at (point-to-point).
+          type                   — communication type (chat/broadcast/...)
         """
         if type is not None and type not in _VALID_COMM_TYPES:
             raise HTTPException(400, f"Invalid type (allowed: {sorted(_VALID_COMM_TYPES)})")
+        if from_agent_type and from_agent_type not in _VALID_AGENT_TYPES:
+            raise HTTPException(400, f"Invalid from_agent_type (allowed: {sorted(_VALID_AGENT_TYPES)})")
+        if to_agent_type and to_agent_type not in _VALID_AGENT_TYPES:
+            raise HTTPException(400, f"Invalid to_agent_type (allowed: {sorted(_VALID_AGENT_TYPES)})")
 
         where = []
         params: list = []
         if from_agent:
-            where.append("from_agent = %s")
+            where.append("c.from_agent = %s")
             params.append(from_agent)
         if to_agent:
-            where.append("to_agent = %s")
+            where.append("c.to_agent = %s")
             params.append(to_agent)
+        if from_agent_type:
+            # 'admin' matches the pseudo-agent literally; others join agent_runs.
+            if from_agent_type == "admin":
+                where.append("c.from_agent = 'admin'")
+            else:
+                where.append(
+                    "c.from_agent IN (SELECT agent_id FROM agent_runs "
+                    "WHERE agent_type = %s)"
+                )
+                params.append(from_agent_type)
+        if to_agent_type:
+            # Match either the direct broadcast column OR the resolved type
+            # of the agent_id in to_agent. 'admin' → literal match.
+            if to_agent_type == "admin":
+                where.append("c.to_agent = 'admin'")
+            else:
+                where.append(
+                    "("
+                    "  c.to_agent_type = %s"
+                    "  OR c.to_agent IN (SELECT agent_id FROM agent_runs "
+                    "                    WHERE agent_type = %s)"
+                    ")"
+                )
+                params.extend([to_agent_type, to_agent_type])
         if type:
-            where.append("type = %s")
+            where.append("c.type = %s")
             params.append(type)
         if source_id:
-            where.append("source_id = %s::uuid")
+            where.append("c.source_id = %s::uuid")
             params.append(source_id)
         if before:
-            where.append("created_at < %s")
+            where.append("c.created_at < %s")
             params.append(before)
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
         rows = execute(
-            f"""SELECT * FROM communications{where_sql}
-                ORDER BY created_at DESC
+            f"""SELECT c.* FROM communications c{where_sql}
+                ORDER BY c.created_at DESC
                 LIMIT %s""",
             params + [limit + 1],
         )

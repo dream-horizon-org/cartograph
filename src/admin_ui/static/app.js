@@ -321,7 +321,11 @@ state.agentRefreshInterval = setInterval(fetchAgents, 5000);
 const commsState = {
   messages: [],
   hasMore: false,
-  filters: { from_agent: '', to_agent: '', type: '' },
+  filters: {
+    from_agent: '', to_agent: '',
+    from_agent_type: '', to_agent_type: '',
+    type: '',
+  },
   selectedCommId: null,
 };
 
@@ -341,9 +345,12 @@ function switchTab(name) {
 
 async function fetchCommunications() {
   const params = new URLSearchParams();
-  if (commsState.filters.from_agent) params.set('from_agent', commsState.filters.from_agent);
-  if (commsState.filters.to_agent) params.set('to_agent', commsState.filters.to_agent);
-  if (commsState.filters.type) params.set('type', commsState.filters.type);
+  const f = commsState.filters;
+  if (f.from_agent) params.set('from_agent', f.from_agent);
+  if (f.to_agent) params.set('to_agent', f.to_agent);
+  if (f.from_agent_type) params.set('from_agent_type', f.from_agent_type);
+  if (f.to_agent_type) params.set('to_agent_type', f.to_agent_type);
+  if (f.type) params.set('type', f.type);
   params.set('limit', '100');
   try {
     const res = await fetch(`/api/communications?${params.toString()}`);
@@ -464,16 +471,23 @@ document.getElementById('filter-apply').addEventListener('click', () => {
   commsState.filters = {
     from_agent: document.getElementById('filter-from').value.trim(),
     to_agent: document.getElementById('filter-to').value.trim(),
+    from_agent_type: document.getElementById('filter-from-type').value,
+    to_agent_type: document.getElementById('filter-to-type').value,
     type: document.getElementById('filter-type').value,
   };
   fetchCommunications();
 });
 
 document.getElementById('filter-reset').addEventListener('click', () => {
-  document.getElementById('filter-from').value = '';
-  document.getElementById('filter-to').value = '';
-  document.getElementById('filter-type').value = '';
-  commsState.filters = { from_agent: '', to_agent: '', type: '' };
+  ['filter-from', 'filter-to'].forEach(id =>
+    document.getElementById(id).value = '');
+  ['filter-from-type', 'filter-to-type', 'filter-type'].forEach(id =>
+    document.getElementById(id).value = '');
+  commsState.filters = {
+    from_agent: '', to_agent: '',
+    from_agent_type: '', to_agent_type: '',
+    type: '',
+  };
   fetchCommunications();
 });
 

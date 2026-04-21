@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cartograph Admin</title>
-  <link rel="stylesheet" href="/style.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=6">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -58,14 +58,34 @@
       <aside id="filter-bar">
         <h2>Filters</h2>
         <label>From agent
-          <input id="filter-from" list="from-options" placeholder="any · type or pick"
+          <input id="filter-from" list="from-options" placeholder="specific agent_id"
                  autocomplete="off">
         </label>
-        <label>To agent / type
-          <input id="filter-to" list="to-options" placeholder="any · type or pick"
+        <label>From agent type
+          <select id="filter-from-type">
+            <option value="">any</option>
+            <option value="admin">admin</option>
+            <option value="orchestrator">orchestrator</option>
+            <option value="iterator">iterator</option>
+            <option value="sme">sme</option>
+            <option value="resolver">resolver</option>
+          </select>
+        </label>
+        <label>To agent
+          <input id="filter-to" list="to-options" placeholder="specific agent_id"
                  autocomplete="off">
         </label>
-        <label>Type
+        <label>To agent type
+          <select id="filter-to-type">
+            <option value="">any</option>
+            <option value="admin">admin</option>
+            <option value="orchestrator">orchestrator</option>
+            <option value="iterator">iterator</option>
+            <option value="sme">sme</option>
+            <option value="resolver">resolver</option>
+          </select>
+        </label>
+        <label>Communication type
           <select id="filter-type">
             <option value="">All</option>
             <option>chat</option>
@@ -80,9 +100,10 @@
           <button id="filter-reset" class="secondary">Reset</button>
         </div>
         <p class="hint">
-          "To agent" takes a specific agent_id (chats/tasks) or an agent_type
-          (<code>orchestrator</code>, <code>iterator</code>, <code>sme</code>,
-          <code>resolver</code>) for broadcasts.
+          <b>Agent</b> filters match a specific <code>agent_id</code>.
+          <b>Agent-type</b> filters join on <code>agent_runs</code> to
+          match all agents of that type — and for <b>To agent type</b>,
+          also match broadcasts targeting that type.
         </p>
 
         <!-- Typable-dropdown data sources -->
@@ -135,6 +156,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=5"></script>
+  <script src="/app.js?v=6"></script>
 </body>
 </html>
