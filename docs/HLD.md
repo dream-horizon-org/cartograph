@@ -261,20 +261,26 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `decommission_component(agent_id, component_id, reason)` | ✓ | — | — | — | Soft-delete (status='decommissioned') |
 | `decommission_components_bulk(agent_id, component_ids[], reason)` | ✓ | — | — | — | Requires explicit id list; refuses blank-wipe |
 
-#### Component Graph (planned · Phase 2)
+#### Component Graph (live · Phase 2.2 · embeddings deferred)
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `upsert_component(agent_id, component_data)` | — | — | ✓ *one per SME* | — | Fills the SME's `component_id=NULL` RCA slot on first call; enforces 1 active component per SME |
-| `upsert_attribution(agent_id, component_id, data)` | — | — | ✓ *own component* | — | |
-| `create_edge(agent_id, edge_data)` | — | — | ✓ *own source* | — | |
+| `upsert_component(agent_id, component_data)` | — | — | ✓ *one per SME* | — | First call fills the SME's `component_id=NULL` RCA slot. Subsequent calls UPDATE in place. 1-active-component-per-SME invariant structurally enforced (splits go through consolidation). canonical_name cross-owner conflict → refuse. |
+| `upsert_attribution(agent_id, component_id, data)` | — | — | ✓ *own component* | — | Idempotent on `(plane, resource_type, identifier)`; cross-component conflict → refuse. |
+| `create_edge(agent_id, edge_data)` | — | — | ✓ *own source* | — | Refuses self-loops. Idempotent on `(source_id, target_id, edge_type, identifier)`. |
 | `insert_unresolved(agent_id, data)` | — | — | ✓ *own component* | — | |
-| `resolve_reference(agent_id, unresolved_id, target_component_id)` | — | — | ✓ | — | |
+| `resolve_reference(agent_id, unresolved_id, target_component_id)` | ✓ | ✓ | ✓ | ✓ | Any active agent (cross-SME resolution). Refuses decommissioned target. |
 | `get_component(component_id)` | ✓ | ✓ | ✓ | ✓ | All readable |
 | `get_attributions(component_id)` | ✓ | ✓ | ✓ | ✓ | |
-| `get_edges(component_id)` | ✓ | ✓ | ✓ | ✓ | |
+| `get_edges(component_id)` | ✓ | ✓ | ✓ | ✓ | Returns `{outbound, inbound}` |
 | `get_unresolved(component_id)` | ✓ | ✓ | ✓ | ✓ | |
-| `vector_search(query, table, limit)` | ✓ | ✓ | ✓ | ✓ | |
+| `vector_search(query, table, limit)` | ✓ | ✓ | ✓ | ✓ | *(planned, Phase 3 prep — needs embedding pipeline)* |
+
+#### Notifications (live · Phase 2.3)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `get_agent_notifications(agent_id, priority_from_agent_types?, since?)` | ✓ | ✓ | ✓ | ✓ | Compact count of unacked chats + broadcasts from priority source types. Used by the per-agent PostToolUse hook for async wake-up. Tasks intentionally excluded (they surface via action_items_summary on normal wake-up). |
 
 #### Consolidation (planned · Phase 3)
 
@@ -318,23 +324,42 @@ via `agent_runs.trigger_lock` + `agent_runs.status`.
 
 ```
 ┌──────────────────────────────┐    ┌──────────────────────────────┐
-│       TRIGGER MANAGER        │    │        AGENT MANAGER         │
+│       TRIGGER MANAGER        │    │  AGENT MANAGER (LANE-BASED)  │
 │                              │    │                              │
-│  LOOP:                       │    │  LOOP:                       │
-│  1. Scan tables for          │    │  1. Poll agent_runs WHERE    │
-│     actionable events        │    │     trigger_lock = TRUE      │
-│  2. Identify agents that     │    │  2. For each locked agent:   │
-│     need waking              │    │     SET status = 'running',  │
-│  3. Filter: status='idle'    │    │         trigger_lock = FALSE │
-│     AND trigger_lock=FALSE   │    │     Invoke with generic      │
-│  4. SET trigger_lock = TRUE  │    │     prompt                   │
-│     (atomic, skip if 0 rows) │    │  3. When agent yields:       │
-│  5. Does NOT invoke agents   │    │     SET status = 'idle'      │
-│  6. Sleep briefly → loop     │    │  4. Sleep briefly → loop     │
+│  LOOP:                       │    │  ON BOOT:                    │
+│  1. Scan tables for          │    │   Spawn one worker thread    │
+│     actionable events        │    │   per lane, per type:        │
+│  2. Identify agents that     │    │     orch   = 1               │
+│     need waking              │    │     iter   = 2               │
+│  3. Filter: status='idle'    │    │     res    = 1               │
+│     AND trigger_lock=FALSE   │    │     sme    = 4               │
+│  4. SET trigger_lock = TRUE  │    │   (env-configurable;         │
+│     (atomic, skip if 0 rows) │    │   default total = 8)         │
+│  5. Recovery scan: errored   │    │                              │
+│     + backoff elapsed →      │    │  PER-WORKER LOOP:            │
+│     flip to idle (§2.1 of    │    │  1. Atomically claim next    │
+│     TRIGGER-MANAGEMENT.md)   │    │     locked agent of my type  │
+│  6. Does NOT invoke agents   │    │     via SELECT ... FOR       │
+│  7. Sleep briefly → loop     │    │     UPDATE SKIP LOCKED       │
+│                              │    │     (no snapshot → no stale  │
+│  PRIORITY:                   │    │     priority)                │
+│  orchestrator > resolver     │    │  2. invoke_agent(...) —      │
+│  > sme > iterator            │    │     spawns claude -p         │
+│  Within type: lower          │    │     subprocess with          │
+│  invocation_count first      │    │     per-type timeout         │
+│                              │    │     (iter/sme 1800s,         │
+│                              │    │     orch/res 900s)           │
+│                              │    │  3. On yield → idle +        │
+│                              │    │     clear_recovery_state.    │
+│                              │    │     On timeout/error →       │
+│                              │    │     set_agent_errored        │
+│                              │    │     (error_msg persisted,    │
+│                              │    │     errored_at stamped).     │
 │                              │    │                              │
-│  PRIORITY:                   │    │  PRIORITY:                   │
-│  orchestrator > resolver     │    │  Same as trigger manager     │
-│  > sme > iterator            │    │                              │
+│                              │    │  STALE WATCHDOG (separate    │
+│                              │    │  thread, 120s threshold):    │
+│                              │    │   running agents with stale  │
+│                              │    │   heartbeat → errored        │
 └──────────────────────────────┘    └──────────────────────────────┘
 ```
 
@@ -1168,6 +1193,7 @@ MCP server (`:8100`). Reads/writes the `communications` table directly via
 
 ### 10.1 API Contract
 
+Chat view (the original 1:1 admin↔agent view):
 ```
 GET /api/agents
   Returns: [{agent_id, agent_type, status, created_at}]
@@ -1184,7 +1210,7 @@ GET /api/chat/:agent_id/new?after=<iso_timestamp>
 
 POST /api/chat/:agent_id
   Body: {message: "..."}
-  Inserts communication (from='admin', to=agent_id, type='chat')
+  Inserts communication (from='admin', to_agent=agent_id, type='chat')
   Returns: the inserted row
 
 POST /api/chat/:agent_id/ack
@@ -1193,15 +1219,66 @@ POST /api/chat/:agent_id/ack
   Admin-side ack — optional (for read receipts in UI)
 ```
 
+Communications panel (Phase 2.4 — cross-agent feed with filters):
+```
+GET /api/communications
+  Query params (all AND together, all optional):
+    from_agent       — exact agent_id sender
+    to_agent         — exact agent_id recipient (point-to-point only;
+                        broadcasts have to_agent NULL)
+    from_agent_type  — joins agent_runs.agent_type of from_agent.
+                        'admin' matches from_agent='admin' literally.
+    to_agent_type    — matches to_agent_type column (broadcasts)
+                        OR agent_runs.agent_type of to_agent (p2p).
+    agent            — PARTICIPANT: from_agent=X OR to_agent=X.
+    agent_type       — PARTICIPANT-BY-TYPE: sender side OR recipient
+                        side OR broadcast column matches T.
+    type             — chat / broadcast / task / consolidation / clarification
+    source_id        — UUID of the source entity (task/consolidation/...)
+    before           — created_at cursor for pagination
+    limit            — 1..200, default 50
+  Returns: {messages: [...], has_more: bool}
+
+GET /api/task/:id                     → {task, thread}
+GET /api/consolidation/:id            → {consolidation, thread}   (Phase 3)
+GET /api/clarification/:id            → {clarification, thread}   (Phase 3)
+
+POST /api/broadcast
+  Body: {to_agent_type: "sme"|"iterator"|"orchestrator"|"resolver",
+         message: "..."}
+  Inserts communication (from_agent='admin', to_agent=NULL,
+                         to_agent_type=<type>, type='broadcast').
+  Admin short-circuits the need to ask orchestrator.
+```
+
 ### 10.2 Frontend Behaviour
 
-- **Agent list panel:** fetched on load, refreshed every 5s
+Two tabs in the top nav: **Chat** (original) and **Communications** (new).
+
+Chat tab:
+- **Agent list panel:** fetched on load, refreshed every 5s. Now **grouped
+  by agent_type** (orchestrator, resolver, iterator, sme) with a per-group
+  typable search input. Group count pill shows filtered/total.
 - **Chat panel:** shows messages from `communications` where
   `(from_agent = selected_agent AND to_agent = 'admin')` OR
   `(from_agent = 'admin' AND to_agent = selected_agent)` AND `type = 'chat'`
 - **Infinite scroll up:** when scroll reaches top, fetch with `before` cursor
 - **New message polling:** every 2s, fetch with `after` = latest message timestamp
 - **Message alignment:** admin messages right-aligned, agent messages left-aligned
+
+Communications tab:
+- Three-panel grid: [filter bar | message list | detail panel].
+- **Filter bar** is sectioned into _Participant (either direction)_ and
+  _Directional_ — same columns as the API. Typable `<datalist>` combo-
+  boxes for agent inputs (suggestions from `/api/agents`).
+- **Message list** shows newest-first with per-row type pill, from→to
+  arrow (broadcasts render "all `<type>`s"), and a `state_transition`
+  pill when the row was a response that changed state.
+- **Detail panel** renders the source entity when clicked: chat/broadcast
+  shows the message body + metadata; task shows status + owner/worker/
+  blocker + the full thread with per-message state_transition pills.
+- **Broadcast button** in the top-right opens a dialog: pick target type
+  + write message → admin broadcasts directly.
 
 ### 10.3 Why Direct DB Access (not MCP)
 

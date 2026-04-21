@@ -135,7 +135,19 @@ Reject threshold: both agents < 0.3 → auto-reject
     - reject_resource / reject_resources_bulk (with force=True) → override
       cleanup when an iterator is stuck or absent. Usually the iterator
       self-cleans; this is the escape hatch.
-    - upsert_component, upsert_attribution, create_edge → planned, Phase 2
+    - bulk_spawn_smes(agent_id, plane, resource_ids?|all_pending?, task_description?)
+      → spawn N SMEs + RCA reservations + (optional) N tasks as the wake
+      signal, in one transaction. Use this (not N create_agent calls)
+      after the gatekeeper sanity check passes.
+    - decommission_agent / decommission_agents_bulk
+      with resource_action='leave'|'reset'|'reject' for the RCA cascade.
+    - decommission_component / decommission_components_bulk
+      → soft-delete (status='decommissioned').
+    - Component-graph reads: get_component, get_attributions, get_edges,
+      get_unresolved (open to all agents; useful for monitoring SME output).
+    - get_agent_notifications(agent_id, priority_from_agent_types?, since?)
+      → automatically wired into your PostToolUse hook; you rarely call
+      it directly.
 
   Bash: available for system operations
 

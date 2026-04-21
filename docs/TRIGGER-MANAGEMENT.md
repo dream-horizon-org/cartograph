@@ -262,34 +262,52 @@ LOOP (continuous):
   └── 7. Sleep briefly → loop
 ```
 
-### 2.2 Agent Manager (separate loop)
+### 2.2 Agent Manager (lane-based parallel dispatcher)
 
-Agent manager is a separate process that reads trigger locks and invokes agents.
+Agent manager is a separate process. One dedicated worker thread per lane
+per agent type. Lane caps are env-configurable
+(`CARTOGRAPH_INVOKE_LANES_{ORCH,ITER,RES,SME}`), defaulting to
+1 / 2 / 1 / 4 (eight concurrent claude subprocesses total). Plus one
+stale-watchdog thread.
 
 ```
-AGENT MANAGER LOOP:
+ON BOOT:
+  Spawn N worker threads — one per lane, per agent_type.
+  Spawn 1 stale-watchdog thread.
+
+PER-WORKER LOOP (for agent_type T):
   │
-  ├── 1. Poll: SELECT * FROM agent_runs
-  │           WHERE trigger_lock = TRUE
-  │           ORDER BY priority (orchestrator > resolver > sme > iterator)
+  ├── 1. Atomically claim the next locked agent of type T:
+  │     UPDATE agent_runs SET status='running', trigger_lock=FALSE,
+  │            invocation_count=invocation_count+1, heartbeat=now()
+  │     WHERE agent_id = (
+  │       SELECT agent_id FROM agent_runs
+  │       WHERE agent_type = T AND trigger_lock = TRUE
+  │       ORDER BY invocation_count ASC
+  │       LIMIT 1 FOR UPDATE SKIP LOCKED
+  │     )
+  │     RETURNING *;
+  │     (SKIP LOCKED = no worker-vs-worker races; priority re-read every
+  │      pickup = no stale-snapshot bug.)
   │
-  ├── 2. For each locked agent:
-  │     ├── UPDATE agent_runs
-  │     │   SET status = 'running', trigger_lock = FALSE,
-  │     │       invocation_count = invocation_count + 1,
-  │     │       heartbeat = now()
-  │     │   WHERE agent_id = ? AND trigger_lock = TRUE
-  │     │
-  │     ├── Invoke agent with generic prompt:
-  │     │   "You've been woken up. Check get_action_items_summary()."
-  │     │   Subprocess timeout: iterator/SME = 1800s, orch/resolver = 900s.
-  │     │   Background heartbeat thread updates every 10s while running.
-  │     │
-  │     └── On yield           → SET status='idle' + clear_recovery_state
-  │         On timeout/error   → set_agent_errored(error_msg tail) + errored_at=now()
-  │                              (recovery scanner in §2.1 step 6 handles retries)
+  ├── 2. invoke_agent(row, already_picked_up=True):
+  │     ├── Spawn claude -p subprocess in workspace cwd.
+  │     │   Per-type timeout: iterator/SME = 1800s, orch/resolver = 900s.
+  │     ├── Background heartbeat thread updates agent_runs.heartbeat
+  │     │   every 10s while subprocess runs.
+  │     ├── On yield           → status='idle' + clear_recovery_state
+  │     ├── On non-zero exit   → set_agent_errored(stderr tail)
+  │     ├── On TimeoutExpired  → set_agent_errored('TimeoutExpired...')
+  │     └── On any exception   → set_agent_errored(repr(exc))
   │
-  └── 3. Sleep briefly → loop
+  └── 3. Loop immediately (another agent of same type may be waiting);
+         if pickup returned None, sleep poll_interval and retry.
+
+STALE WATCHDOG (separate thread, runs every poll_interval × 5):
+  WHERE status='running' AND heartbeat < now() - 120s → set_agent_errored(
+    'Heartbeat stale… heartbeat keeper stopped or process died').
+  Safety net for crashes between heartbeat updates; the normal timeout/
+  exception paths above write error_msg themselves.
 
 On startup, orphaned `running` agents (previous agent-manager process died
 mid-subprocess) are flipped to `errored` rather than blanket-idle, so the
@@ -601,32 +619,62 @@ ack_broadcast(agent_id, communication_id)
   Stops trigger manager from re-invoking this agent for this broadcast.
 ```
 
-**Component graph acts (scoped to own component):**
+**Component graph acts (live as of Phase 2.2 — SME-scoped to own component. Embedding pipeline deferred to Phase 3 prep; embedding columns stay NULL for now):**
 
 ```
 upsert_component(agent_id, component_data)
-  Create or update a component.
-  Validates: agent_id owns this component via resource_component_agents (or new component).
-  Auto-embeds at write time.
+  SME-only. First call fills the SME's RCA reservation row
+  (component_id=NULL → new component), subsequent calls UPDATE the
+  existing component in place. 1-active-component-per-SME invariant is
+  structurally enforced via the same RCA lookup. Cross-owner canonical_name
+  conflicts refuse — merges go through consolidation (Phase 3), not
+  name-collision upsert.
+  component_data keys: canonical_name (required), display_name (required),
+  component_type (required — application/database/cache/queue/lambda/cron/
+  external-service/library/infrastructure), confidence (default 1.0), metadata.
 
 upsert_attribution(agent_id, component_id, attribution_data)
-  Add attribution to a component.
-  Validates: agent owns this component.
-  Auto-embeds at write time.
+  SME-only. Validates: agent owns component_id via RCA.
+  Idempotent on (plane, resource_type, identifier); cross-component
+  conflict refuses.
+  attribution_data keys: plane, resource_type, identifier, evidence,
+  confidence, metadata.
 
 create_edge(agent_id, edge_data)
-  Create a dependency edge.
-  Validates: agent owns the source component.
-  Auto-embeds at write time.
+  SME-only. Validates: agent owns source_id. CHECK source ≠ target.
+  Idempotent on (source_id, target_id, edge_type, identifier).
+  edge_data keys: source_id, target_id, edge_type (calls/reads_from/
+  writes_to/triggers/publishes_to/consumes_from/runs_on), identifier,
+  source_attr_id?, target_attr_id?, evidence (array), confidence, metadata.
 
 insert_unresolved(agent_id, unresolved_data)
-  Record an unresolved reference.
+  SME-only. Validates: agent owns found_in_component_id via RCA.
+  Keys: found_in_component_id, reference_type, reference_value, context.
 
 resolve_reference(agent_id, unresolved_id, resolved_to_component_id)
-  Mark an unresolved reference as resolved, create edge.
+  Open to any active agent (cross-SME resolution is the norm — config
+  SMEs resolve hostname refs on behalf of application SMEs, etc.).
+  Refuses decommissioned target or already-resolved unresolved.
 
 raise_blocker(agent_id, task_id, blocker_detail)
   Shortcut: sets task status to BO + sends communication to owner.
+```
+
+**Notifications (live as of Phase 2.3):**
+
+```
+get_agent_notifications(agent_id, priority_from_agent_types=None, since=None)
+  Compact unread-count query for the PostToolUse notification hook.
+  Counts unacked chats + broadcasts from the priority source types
+  (default: ['admin']; typically ['admin', 'orchestrator'] for
+  iterator/SME/resolver).
+  Tasks intentionally excluded — they're persistent action items that
+  surface via get_action_items_summary on natural wake-up; this tool
+  is for async mid-session interruptibility.
+  Returns: {high_priority_count, breakdown: [{from, type, count}],
+  max_seen_at: ISO timestamp | null}.
+  Round-trip max_seen_at back as `since` on next call to filter to
+  strictly-newer items only.
 ```
 
 **Mutation acts (only available when agent is mutation_assigned_to on consolidation in state M):**

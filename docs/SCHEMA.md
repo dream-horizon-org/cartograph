@@ -390,11 +390,14 @@ Universal message bus.
 
 ALL messages between agents, admin, and system. The single conversation table. Trigger manager watches this for routing.
 
+Target columns are **cleanly split**: `to_agent` holds an agent_id (point-to-point — chat/task/consolidation/clarification); `to_agent_type` holds an agent_type (broadcasts only). A CHECK enforces that exactly one is non-null. `metadata` carries structured extras like `state_transition: {from, to}` on state-changing responses (see `respond_task`).
+
 ```sql
 CREATE TABLE communications (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    from_agent      TEXT NOT NULL,               -- agent_id or "admin"
-    to_agent        TEXT NOT NULL,               -- agent_id, agent_type (for broadcast), or "admin"
+    from_agent      TEXT NOT NULL,               -- agent_id or 'admin'
+    to_agent        TEXT,                        -- agent_id target (chat/task/...). NULL for broadcasts.
+    to_agent_type   TEXT,                        -- agent_type target (broadcasts only). NULL otherwise.
     type            TEXT NOT NULL CHECK (type IN (
                         'consolidation',          -- SME ↔ SME negotiation
                         'task',                   -- orchestrator ↔ agent work assignment
@@ -404,14 +407,18 @@ CREATE TABLE communications (
                     )),
     source_id       UUID,                        -- FK to consolidations.id, tasks.id, or clarifications.id
     text            TEXT NOT NULL,               -- the message content
-    metadata        JSONB NOT NULL DEFAULT '{}', -- confidence scores, evidence refs, structured data
+    metadata        JSONB NOT NULL DEFAULT '{}', -- confidence scores, state_transition {from,to}, evidence refs
     acked_at        TIMESTAMPTZ,                 -- when recipient acknowledged (chat only, NULL = unacked)
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT comm_target_exactly_one
+      CHECK ((to_agent IS NOT NULL) <> (to_agent_type IS NOT NULL))
 );
 
-CREATE INDEX idx_comm_to ON communications(to_agent);
-CREATE INDEX idx_comm_source ON communications(source_id);
-CREATE INDEX idx_comm_type ON communications(type);
+-- Partial indexes: each query path hits only the relevant half.
+CREATE INDEX idx_comm_to      ON communications(to_agent)      WHERE to_agent IS NOT NULL;
+CREATE INDEX idx_comm_to_type ON communications(to_agent_type) WHERE to_agent_type IS NOT NULL;
+CREATE INDEX idx_comm_source  ON communications(source_id);
+CREATE INDEX idx_comm_type    ON communications(type);
 CREATE INDEX idx_comm_created ON communications(created_at);
 CREATE INDEX idx_comm_unacked_chat ON communications(to_agent)
     WHERE type = 'chat' AND acked_at IS NULL;

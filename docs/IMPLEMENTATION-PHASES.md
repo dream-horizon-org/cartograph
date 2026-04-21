@@ -1,8 +1,8 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-21):** Phase 0 ✅ complete · Phase 1 ✅ complete (incl. runtime-robustness + Phase-2 kickoff scaffolding) · Phase 2 in progress (component graph tools next).
-- 35 MCP tools registered · 106 tests passing (27 tasks, 34 resources, 17 admin_ui, 8 recovery, 20 spawn+decommission).
-- Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with orchestrator + resolver singletons.
+**Status (2026-04-21):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · **Phase 2 ✅** (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 3 (Consolidation) + embedding pipeline pending.
+- **45 MCP tools** registered · **170 tests** passing.
+- Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 
 ---
 
@@ -142,13 +142,18 @@ Task management — orchestrator assigns work to iterators.
 
 ---
 
-## Phase 2: Materialisation + Parallel Runtime
+## Phase 2: Materialisation + Parallel Runtime ✅
 
-Runtime infrastructure upgrade + the SME component-graph tool set. Four
-sub-deliverables, shipped in order 2.1 → 2.2 → 2.4 → 2.3, each as its own
-commit with TDD (failing tests first, then implementation, then refactor).
+Shipped in four commits, order 2.1 → 2.2 → 2.4 → 2.3:
+- `9532927` Phase 2.1 — lane-based parallel invoke loop
+- `aa8dcf3` Phase 2.2 — SME component-graph tool set (9 new tools)
+- `b1dcd59` Phase 2.4 — admin UI communications panel + broadcast + state metadata
+  (then `32eaefc` cleaned up the overloaded `to_agent`; `f9a2d25` added
+  `from_agent_type`/`to_agent_type` filters; `5f7b1b0` added participant
+  filters; `2fa4205` grouped the chat sidebar by type with per-group search)
+- `c99b83d` Phase 2.3 — PostToolUse notification hook
 
-### 2.1 Parallel Invoke Loop (lane-based)
+### 2.1 Parallel Invoke Loop (lane-based) ✅
 
 **Problem today:** `InvokeLoop` runs one claude subprocess at a time. With
 iterator/SME timeouts of 1800s, an SME mid-analysis blocks orchestrator
@@ -174,7 +179,7 @@ are ignored until the next scan.
   — an orch with 0 invocations outranks an SME with 0 invocations only
   when lanes are contending (i.e. when orch lane is free).
 
-### 2.2 SME Component-Graph Tool Set
+### 2.2 SME Component-Graph Tool Set ✅
 
 Full Phase-2 SME write set + reads for all agents. Auto-embedding deferred
 (columns stay `NULL`; embedding client + backfill + `vector_search` land
@@ -209,7 +214,7 @@ Reads (all agents):
 - `vector_search` — needs embedding pipeline, Phase 3 prep.
 - Auto-embed on write — same.
 
-### 2.3 PostToolUse Notification Hook (per-agent async channel)
+### 2.3 PostToolUse Notification Hook (per-agent async channel) ✅
 
 Every agent gets a Claude Code `PostToolUse` hook that queries a new MCP
 endpoint after each tool call. If new high-priority messages landed since
@@ -239,7 +244,7 @@ conversation so the agent can react mid-session.
   last run (state in `{cwd}/.cartograph-notify-last`) — prevents 50-tool-
   call sessions from triggering 50 DB hits.
 
-### 2.4 Admin UI — Communications Panel + Broadcast + State Metadata
+### 2.4 Admin UI — Communications Panel + Broadcast + State Metadata ✅
 
 **Backend additions:**
 - Log state transitions in `communications.metadata` where applicable:
@@ -256,14 +261,27 @@ conversation so the agent can react mid-session.
     communication type='broadcast', from_agent='admin', to_agent=agent_type).
 
 **Frontend:**
-- New `/communications` route with filter bar (agent_id, admin toggle,
-  type) + communications list + right-side detail panel that shows the
-  source task/consolidation/clarification and its current state.
-- Broadcast composer: button → textarea + target-type dropdown → POST.
+- Top nav with two tabs: **Chat** (original) and **Communications** (new).
+- Chat tab: agent list now grouped by agent_type with per-group typable
+  search (orchestrator, resolver, iterator, sme sections).
+- Communications tab: 3-panel grid [filter bar | list | detail]. Filters
+  split into _Participant_ (`agent`, `agent_type` — either direction) and
+  _Directional_ (`from_agent`, `from_agent_type`, `to_agent`, `to_agent_type`)
+  plus communication type. Typable-combobox inputs for agent ids.
+- Detail panel: for task rows, renders status/owner/worker/blocker/thread
+  with per-message state-transition pills.
+- 📢 Broadcast button in top nav opens a dialog → POST `/api/broadcast`.
 
 **Rationale for admin-direct broadcast:** admin is already the most
 privileged actor. Routing broadcast through orchestrator adds a round-trip
 + token cost + human wait for zero architectural gain.
+
+**Bonus cleanup that fell out of 2.4:** `communications.to_agent` was
+overloaded (either an agent_id or an agent_type depending on `type`).
+Split into `to_agent` (agent_id, nullable) + new `to_agent_type`
+(agent_type, nullable) with a CHECK-exactly-one constraint; broadcast
+rows backfilled; every read/write site updated. This is what makes the
+agent-type filters clean (no discriminator dance in SQL).
 
 ### Testing discipline
 
