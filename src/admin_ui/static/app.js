@@ -25,9 +25,39 @@ async function fetchAgents() {
     const data = await res.json();
     state.agents = data.agents || [];
     renderAgents();
+    populateAgentDatalists();
   } catch (e) {
     console.error('Failed to fetch agents:', e);
   }
+}
+
+/** Refresh the from/to typable-dropdown suggestion lists from /api/agents.
+ *  <datalist> gives the native combobox behaviour: type freely OR pick
+ *  an existing agent_id / agent_type.
+ */
+function populateAgentDatalists() {
+  const $from = document.getElementById('from-options');
+  const $to = document.getElementById('to-options');
+  if (!$from || !$to) return;
+
+  const agentIds = state.agents.map(a => a.agent_id);
+  const agentTypes = ['orchestrator', 'iterator', 'sme', 'resolver'];
+
+  // From: real agent_ids + 'admin' pseudo-agent.
+  $from.innerHTML = '';
+  ['admin', ...agentIds].forEach(id => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    $from.appendChild(opt);
+  });
+
+  // To: agent_ids + 'admin' + agent_types (broadcast targets).
+  $to.innerHTML = '';
+  [...agentIds, 'admin', ...agentTypes].forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = v;
+    $to.appendChild(opt);
+  });
 }
 
 function renderAgents() {
