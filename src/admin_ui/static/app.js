@@ -363,6 +363,15 @@ async function fetchCommunications() {
   }
 }
 
+/** Target label: for broadcasts, "all <type>" on the agent_type column;
+ *  otherwise the specific agent_id. Falls back to "—" if both columns
+ *  are somehow null. */
+function commTargetLabel(m) {
+  if (m.to_agent_type) return `all ${m.to_agent_type}s`;
+  if (m.to_agent) return m.to_agent;
+  return '—';
+}
+
 function renderCommunications() {
   const $list = document.getElementById('comms-items');
   const $count = document.getElementById('comms-count');
@@ -385,7 +394,7 @@ function renderCommunications() {
         <span class="type-pill type-${m.type}">${m.type}</span>
         <span class="from">${escapeHtml(m.from_agent)}</span>
         <span class="arrow">→</span>
-        <span class="to">${escapeHtml(m.to_agent)}</span>
+        <span class="to">${escapeHtml(commTargetLabel(m))}</span>
         ${state}
         <span class="ts">${new Date(m.created_at).toLocaleString()}</span>
       </div>
@@ -404,9 +413,12 @@ async function selectCommunication(comm) {
 
   if (comm.type === 'chat' || comm.type === 'broadcast') {
     $title.textContent = `${comm.type} detail`;
+    const toLabel = comm.type === 'broadcast' && comm.to_agent_type
+      ? `all ${escapeHtml(comm.to_agent_type)}s  (broadcast target)`
+      : escapeHtml(comm.to_agent || '—');
     $body.innerHTML = `
       <div class="detail-kv"><b>From</b><span>${escapeHtml(comm.from_agent)}</span></div>
-      <div class="detail-kv"><b>To</b><span>${escapeHtml(comm.to_agent)}</span></div>
+      <div class="detail-kv"><b>To</b><span>${toLabel}</span></div>
       <div class="detail-kv"><b>Sent</b><span>${new Date(comm.created_at).toLocaleString()}</span></div>
       <div class="detail-kv"><b>Acked at</b><span>${comm.acked_at || '—'}</span></div>
       <hr>
