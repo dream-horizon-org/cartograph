@@ -13,14 +13,28 @@ def create_agent_run(
     agent_type: str,
     workspace_path: str,
     plane: str | None = None,
-    resource_id: str | None = None,
 ) -> None:
+    """Insert a new agent_runs row. SME-to-resource assignment is NOT stored
+    here — it lives in resource_component_agents (see bulk_spawn_smes)."""
     execute_mutate(
         """INSERT INTO agent_runs
-           (agent_id, agent_type, workspace_path, plane, resource_id)
-           VALUES (%s, %s, %s, %s, %s)""",
-        (agent_id, agent_type, workspace_path, plane, resource_id),
+           (agent_id, agent_type, workspace_path, plane)
+           VALUES (%s, %s, %s, %s)""",
+        (agent_id, agent_type, workspace_path, plane),
     )
+
+
+def get_sme_resource_id(agent_id: str) -> str | None:
+    """Look up the SME's assigned resource from RCA (single source of truth).
+
+    Returns None if no assignment exists (shouldn't happen for a spawned SME
+    but we handle it gracefully for edge cases during recovery).
+    """
+    row = execute_one(
+        "SELECT resource_id FROM resource_component_agents WHERE agent_id = %s LIMIT 1",
+        (agent_id,),
+    )
+    return str(row["resource_id"]) if row else None
 
 
 def get_agent(agent_id: str) -> dict | None:

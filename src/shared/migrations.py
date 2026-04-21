@@ -104,8 +104,8 @@ def run_migrations() -> None:
                                      )),
                     session_id       TEXT,
                     workspace_path   TEXT,
-                    plane            TEXT,
-                    resource_id      TEXT,
+                    plane            TEXT,                         -- iterators only
+                                                                   -- SME→resource assignment lives in RCA
                     status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                                         'pending','running','idle','done','errored','decommissioned'
                                      )),
@@ -143,10 +143,13 @@ def run_migrations() -> None:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS resource_component_agents (
                     resource_id     UUID NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
-                    component_id    UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+                    component_id    UUID REFERENCES components(id) ON DELETE CASCADE,
+                                    -- nullable: at spawn time the SME has an RCA row
+                                    -- with component_id=NULL (reserved assignment slot);
+                                    -- filled in when the SME calls upsert_component.
                     agent_id        TEXT NOT NULL REFERENCES agent_runs(agent_id) ON DELETE CASCADE,
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    PRIMARY KEY(resource_id, component_id)
+                    PRIMARY KEY(resource_id, agent_id)
                 )
             """)
 
@@ -289,6 +292,39 @@ def run_migrations() -> None:
             cur.execute(
                 """ALTER TABLE resources ADD CONSTRAINT resources_status_check
                    CHECK (status IN ('pending','assigned','done','rejected'))"""
+            )
+
+            # Phase-2 SME spawn: RCA becomes single source of truth for
+            # assignment+ownership. component_id becomes nullable (reserved
+            # at spawn, filled at materialisation). PK moves from
+            # (resource_id, component_id) to (resource_id, agent_id) so a
+            # row can exist BEFORE the component does. Order matters: drop
+            # the old PK first (can't relax NOT NULL on a PK column), then
+            # drop NOT NULL, then add the new PK.
+            cur.execute(
+                "ALTER TABLE resource_component_agents DROP CONSTRAINT IF EXISTS resource_component_agents_pkey"
+            )
+            cur.execute(
+                "ALTER TABLE resource_component_agents ALTER COLUMN component_id DROP NOT NULL"
+            )
+            cur.execute(
+                """DO $$
+                   BEGIN
+                     IF NOT EXISTS (
+                       SELECT 1 FROM pg_constraint
+                       WHERE conname = 'resource_component_agents_pkey'
+                     ) THEN
+                       ALTER TABLE resource_component_agents
+                         ADD PRIMARY KEY (resource_id, agent_id);
+                     END IF;
+                   END$$"""
+            )
+
+            # Drop agent_runs.resource_id — superseded by RCA. No SMEs have
+            # been spawned yet in any environment (Phase 1 never reached SME
+            # spawn) so there is no data to migrate.
+            cur.execute(
+                "ALTER TABLE agent_runs DROP COLUMN IF EXISTS resource_id"
             )
 
             # --- Indexes ---

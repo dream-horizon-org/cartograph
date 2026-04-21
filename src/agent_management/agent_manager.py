@@ -57,6 +57,13 @@ class AgentManager:
         plane: str | None = None,
         resource_id: str | None = None,
     ) -> str:
+        """Create a single agent. Returns agent_id.
+
+        For SMEs, the resource_id is used to (a) size the system prompt and
+        (b) write an RCA row with component_id=NULL (reserved assignment slot).
+        The RCA row is the single source of truth; agent_runs no longer stores
+        resource_id. Bulk SME spawning uses bulk_spawn_smes instead.
+        """
         short_id = uuid.uuid4().hex[:8]
         prefix = _TYPE_PREFIXES[agent_type]
         if agent_type == "iterator" and plane:
@@ -81,8 +88,23 @@ class AgentManager:
             agent_type=agent_type,
             workspace_path=workspace_path,
             plane=plane,
-            resource_id=resource_id,
         )
+
+        # For SMEs, write the RCA reservation row (component_id=NULL) and
+        # flip the resource to 'assigned'. This is the single source of
+        # truth for SME→resource assignment.
+        if agent_type == "sme" and resource_id:
+            from shared.db import execute_mutate
+            execute_mutate(
+                """INSERT INTO resource_component_agents
+                   (resource_id, component_id, agent_id)
+                   VALUES (%s, NULL, %s)""",
+                (resource_id, agent_id),
+            )
+            execute_mutate(
+                "UPDATE resources SET status = 'assigned' WHERE id = %s AND status = 'pending'",
+                (resource_id,),
+            )
 
         # Transition new agent to 'idle' so trigger manager can lock it when
         # it has pending items. Initial wake-up comes from a task, chat, or
@@ -122,10 +144,17 @@ class AgentManager:
                 agent_type=agent["agent_type"],
             )
 
+        # For SMEs, look up the assigned resource from RCA (single source of
+        # truth). Iterators use agent_runs.plane; orchestrator/resolver
+        # ignore both fields in their prompts.
+        resource_id = ""
+        if agent["agent_type"] == "sme":
+            resource_id = db.get_sme_resource_id(agent_id) or ""
+
         config = get_config(
             agent["agent_type"],
             plane=agent.get("plane") or "",
-            resource_id=agent.get("resource_id") or "",
+            resource_id=resource_id,
             mcp_registry_keys=",".join(self.mcp_registry.keys()),
         )
 

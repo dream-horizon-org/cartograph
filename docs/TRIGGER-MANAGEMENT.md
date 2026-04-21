@@ -710,19 +710,43 @@ delete_secret(agent_id, plane, key)
 ```
 create_agent(agent_id, new_agent_type, plane?, resource_id?)
   Orchestrator-only. Spawns an iterator (pass plane) or SME (pass resource_id).
-  Creates workspace dir, writes .mcp.json pointing at cartograph-db on :8100,
-  inserts agent_runs row (status='idle'). Returns new agent_id.
+  Creates workspace dir + .mcp.json (port :8100). For SMEs, also writes the
+  RCA reservation row (component_id=NULL) and flips the resource to 'assigned'.
+
+bulk_spawn_smes(agent_id, plane, resource_ids?, all_pending=False, task_description=None)
+  Orchestrator-only. One call spawns N SMEs for a plane. Writes N agent_runs
+  rows + N RCA reservation rows + flips resources to 'assigned'. If
+  task_description is set, creates one task per SME (BW, owner=caller,
+  worker=new SME) as the wake signal. Refuses blank-wipe: at least one of
+  resource_ids[] or all_pending=True. Skips resources already assigned.
 
 list_agents(agent_id)
   Any active agent. Returns all non-decommissioned agents with
-  type/status/plane/resource_id/invocation_count.
+  type/status/plane/invocation_count.
 
 reset_agent(agent_id, target_agent_id)
   Orchestrator-only override. Force-resets a permanently-errored agent
   back to idle (clears error_msg, recovery_attempts=0, trigger_lock=FALSE).
-  Use after the bounded auto-recovery (3 attempts) has given up and
-  you've diagnosed the root cause from error_msg. Pending items
-  (tasks, chats) remain; trigger manager will re-pick up the agent.
+  Use after the bounded auto-recovery (3 attempts) has given up.
+
+decommission_agent(agent_id, target_agent_id, reason, resource_action='leave')
+  Orchestrator-only. Flips target to status='decommissioned'. resource_action:
+    'leave'  → keep RCA row (orphan; debugging only)
+    'reset'  → delete RCA row + flip resource back to 'pending'
+    'reject' → delete RCA row + mark resource 'rejected' with audit trail
+  Refuses self-decom. Reason required.
+
+decommission_agents_bulk(agent_id, reason, agent_ids?, agent_type?, resource_action='leave')
+  Orchestrator-only bulk variant. At least one of agent_ids[] or agent_type
+  required. Refuses agent_type='orchestrator'. Caller is never decommissioned
+  even if in agent_ids[].
+
+decommission_component(agent_id, component_id, reason)
+  Orchestrator-only. Soft-delete (status='decommissioned'). Attributions
+  and edges stay as-is (mirrors merge deprecation semantics).
+
+decommission_components_bulk(agent_id, component_ids[], reason)
+  Bulk variant; requires explicit id list (no "all components" filter).
 ```
 
 ---

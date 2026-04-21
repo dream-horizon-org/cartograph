@@ -178,8 +178,8 @@ CREATE TABLE agent_runs (
     session_id       TEXT,                        -- Claude session ID for resume
     workspace_path   TEXT,                        -- per-agent cwd (contains .mcp.json)
     plane            TEXT,                        -- iterators only (their assigned plane)
-    resource_id      TEXT,                        -- SMEs only (their assigned resource)
-    -- resource_ids and planes removed — derivable via resource_component_agents table
+    -- SME→resource assignment lives in resource_component_agents (single source of truth)
+    -- Previous fields removed as superseded by RCA: resource_ids[], planes[], resource_id
     status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
                         'pending',                -- created, waiting for first invoke
                         'running',                -- actively executing
@@ -245,29 +245,37 @@ CREATE INDEX idx_res_plane ON resources(plane);
 
 ### `resource_component_agents`
 
-Single source of truth for the resource → component → agent relationship. Re-pointed during merges and splits. Replaces `owned_by_agent`, `resource_ids[]`, `planes[]`, and `assigned_to` which were scattered across three tables.
+Single source of truth for the resource → component → agent relationship — both **assignment** (`component_id` NULL = SME reserved to analyse this resource) and **ownership** (`component_id` NOT NULL = SME currently owns this component derived from this resource). Re-pointed during merges and splits. Replaces the removed columns `owned_by_agent`, `resource_ids[]`, `planes[]`, `assigned_to`, and `agent_runs.resource_id`.
 
 ```sql
 CREATE TABLE resource_component_agents (
     resource_id     UUID NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
-    component_id    UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+    component_id    UUID REFERENCES components(id) ON DELETE CASCADE,
+                    -- nullable: at spawn time the SME has an RCA row with
+                    -- component_id=NULL (reserved assignment slot). Filled
+                    -- by upsert_component on first materialisation.
     agent_id        TEXT NOT NULL REFERENCES agent_runs(agent_id) ON DELETE CASCADE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    PRIMARY KEY(resource_id, component_id)
+    PRIMARY KEY(resource_id, agent_id)
 );
 
--- "What does this agent own?" (components + resources)
+-- "What does this agent own or is assigned to?"
 CREATE INDEX idx_rca_agent ON resource_component_agents(agent_id);
--- "Who manages this component?"
+-- "Who manages this component?" (NULLs excluded naturally from equality joins)
 CREATE INDEX idx_rca_component ON resource_component_agents(component_id);
 -- "Who is assigned to this resource?"
 CREATE INDEX idx_rca_resource ON resource_component_agents(resource_id);
 ```
 
+**Lifecycle states:**
+- **Reserved**: `(resource_id=X, component_id=NULL, agent_id=Y)` — written by `bulk_spawn_smes` / `create_agent` when an SME is spawned. Signals "Y is the SME assigned to analyse X, hasn't materialised yet."
+- **Owned**: `(resource_id=X, component_id=C, agent_id=Y)` — written by `upsert_component` on first materialisation (UPDATE-in-place on the reserved row). Signals "Y owns component C derived from X."
+
 **Mutation behaviour:**
 - **Merge:** re-point `agent_id` on absorbed agent's rows to surviving agent. Re-point `component_id` to surviving component.
-- **Split:** add new row for child component + child agent. Parent row stays with trimmed component.
+- **Split:** add new row for child agent (new `(resource_id, child_agent_id)`). Parent row stays.
+- **Decommission:** depending on `resource_action`, RCA row is kept (`leave`), deleted + resource reset (`reset`), or deleted + resource rejected (`reject`).
 - **Plane derivation:** `SELECT DISTINCT r.plane FROM resource_component_agents rca JOIN resources r ON r.id = rca.resource_id WHERE rca.agent_id = ?`
 
 ---

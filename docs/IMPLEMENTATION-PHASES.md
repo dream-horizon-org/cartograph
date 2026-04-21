@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-21):** Phase 0 ✅ complete · Phase 1 ✅ complete (incl. runtime-robustness hardening) · Phase 2–4 pending.
-- 30 MCP tools registered · 86 tests passing (27 tasks, 34 resources, 17 admin_ui, 8 recovery).
+**Status (2026-04-21):** Phase 0 ✅ complete · Phase 1 ✅ complete (incl. runtime-robustness + Phase-2 kickoff scaffolding) · Phase 2 in progress (component graph tools next).
+- 35 MCP tools registered · 106 tests passing (27 tasks, 34 resources, 17 admin_ui, 8 recovery, 20 spawn+decommission).
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with orchestrator + resolver singletons.
 
 ---
@@ -113,10 +113,21 @@ Task management — orchestrator assigns work to iterators.
 - `list_secrets_for_plane(agent_id, plane)` — returns keys only (no values).
 - `delete_secret(agent_id, plane, key)` — ORCHESTRATOR-only.
 
-**Agent lifecycle (`cartograph_mcp/server.py` via colocated AgentManager):**
-- `create_agent(agent_id, new_agent_type, plane?, resource_id?)` — ORCHESTRATOR-only. Spawns iterator (plane) or SME (resource_id). Creates workspace, writes `.mcp.json`, inserts `agent_runs` row.
+**Agent lifecycle (`cartograph_mcp/server.py` + `tools/agent_lifecycle.py`):**
+- `create_agent(agent_id, new_agent_type, plane?, resource_id?)` — ORCHESTRATOR-only. Spawns iterator (plane) or SME (resource_id). For SMEs also writes RCA reservation row (`component_id=NULL`) and flips resource to 'assigned'.
+- `bulk_spawn_smes(agent_id, plane, resource_ids?, all_pending?, task_description?)` — ORCHESTRATOR-only. One-transaction bulk spawn: N agent_runs + N RCA reservation rows + optional N tasks. Refuses blank-wipe; skips resources already assigned.
 - `list_agents(agent_id)` — any agent can see all non-decommissioned agents.
 - `reset_agent(agent_id, target_agent_id)` — ORCHESTRATOR-only override for permanently-errored agents (bypasses recovery attempt cap).
+- `decommission_agent(agent_id, target_agent_id, reason, resource_action='leave'|'reset'|'reject')` — ORCHESTRATOR-only. Flips target to 'decommissioned' with explicit resource cascade. Refuses self-decom.
+- `decommission_agents_bulk(agent_id, reason, agent_ids?, agent_type?, resource_action?)` — bulk teardown (cohort / plane-wide). Refuses agent_type='orchestrator'; never decommissions caller.
+- `decommission_component(agent_id, component_id, reason)` — ORCHESTRATOR-only soft-delete (status='decommissioned').
+- `decommission_components_bulk(agent_id, component_ids[], reason)` — bulk variant with explicit id list (refuses blank-wipe).
+
+**Schema: RCA becomes single source of truth for SME assignment.**
+- `resource_component_agents.component_id` made nullable; PK moved from `(resource_id, component_id)` to `(resource_id, agent_id)` so a reservation row can exist before the component does.
+- Reserved row: `(resource_id=X, component_id=NULL, agent_id=Y)` = "Y assigned to X, not materialised yet".
+- Owned row: `(resource_id=X, component_id=C, agent_id=Y)` = "Y owns C derived from X" (written by `upsert_component` on first materialisation — Phase 2).
+- `agent_runs.resource_id` dropped — superseded by RCA. Agent manager looks up the SME's resource from RCA at invoke time for prompt templating.
 
 **Resources (`tools/resources.py`):**
 - `upsert_resource(agent_id, plane, resource_type, identifier, access_desc, metadata?)` — ITERATOR-only, own plane only. Idempotent on `(plane, resource_type, identifier)`.

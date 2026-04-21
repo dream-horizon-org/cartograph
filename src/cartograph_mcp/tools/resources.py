@@ -399,6 +399,103 @@ def reject_resources_bulk(
     )
 
 
+def bulk_spawn_smes(
+    agent_id: str,
+    plane: str,
+    agent_manager,
+    resource_ids: list[str] | None = None,
+    all_pending: bool = False,
+    task_description: str | None = None,
+) -> dict:
+    """Spawn one SME per resource for a plane in one transaction.
+
+    Creates agent_runs rows, RCA rows (component_id=NULL reservation slots),
+    flips matching resources.status to 'assigned', and optionally creates
+    one task per SME (owner=caller orchestrator, worker=new SME, status=BW).
+
+    Only the orchestrator can call. Requires at least one of resource_ids or
+    all_pending=True (refuses blank-wipe). Skips resources that already have
+    an SME assigned via RCA.
+
+    Returns:
+      {spawned: N, skipped_already_assigned: [...],
+       items: [{agent_id, resource_id, task_id}, ...]}
+    """
+    if plane not in _VALID_PLANES:
+        raise ValueError(f"Invalid plane '{plane}'. Valid: {sorted(_VALID_PLANES)}")
+    if not resource_ids and not all_pending:
+        raise ValueError(
+            "refuse blank-wipe — provide at least one of "
+            "resource_ids=[] or all_pending=True"
+        )
+
+    caller = execute_one(
+        "SELECT agent_type FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
+        (agent_id,),
+    )
+    if caller is None:
+        raise ValueError(f"Agent {agent_id} not found")
+    if caller["agent_type"] != "orchestrator":
+        raise ValueError(
+            f"Only orchestrator can bulk-spawn SMEs. "
+            f"{agent_id} is of type '{caller['agent_type']}'."
+        )
+
+    # Resolve target resource set
+    if resource_ids:
+        candidates = execute(
+            """SELECT id FROM resources
+               WHERE plane = %s AND id = ANY(%s::uuid[]) AND status = 'pending'""",
+            (plane, resource_ids),
+        )
+    else:
+        candidates = execute(
+            "SELECT id FROM resources WHERE plane = %s AND status = 'pending'",
+            (plane,),
+        )
+
+    # Filter out already-assigned (have an RCA row)
+    already_assigned: list[str] = []
+    to_spawn: list[str] = []
+    for c in candidates:
+        rid = str(c["id"])
+        existing = execute_one(
+            "SELECT 1 FROM resource_component_agents WHERE resource_id = %s LIMIT 1",
+            (rid,),
+        )
+        if existing:
+            already_assigned.append(rid)
+        else:
+            to_spawn.append(rid)
+
+    # Spawn each SME via AgentManager (creates workspace + .mcp.json +
+    # agent_runs + RCA row + flips resource status). Tasks created after.
+    spawned: list[dict] = []
+    for rid in to_spawn:
+        new_agent_id = agent_manager.create_agent(
+            agent_type="sme",
+            resource_id=rid,
+        )
+        task_id = None
+        if task_description:
+            from cartograph_mcp.tools import tasks as _tasks
+            task_row = _tasks.create_task(
+                owner_agent_id=agent_id,
+                worker_agent_id=new_agent_id,
+                description=task_description,
+            )
+            task_id = str(task_row["id"])
+        spawned.append(
+            {"agent_id": new_agent_id, "resource_id": rid, "task_id": task_id}
+        )
+
+    return {
+        "spawned": len(spawned),
+        "skipped_already_assigned": already_assigned,
+        "items": spawned,
+    }
+
+
 def mark_resource_done(agent_id: str, resource_id: str) -> dict:
     """Mark a resource as fully processed. Called by SME when materialisation completes.
 

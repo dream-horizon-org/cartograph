@@ -248,14 +248,18 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `list_all_resources(agent_id, status?)` | ✓ | ✓ | ✓ | ✓ | Excludes `rejected` unless requested |
 | `get_resource_counts(agent_id)` | ✓ | ✓ | ✓ | ✓ | Orchestrator's gatekeeper query |
 
-#### Agent Lifecycle (live · Phase 1)
+#### Agent Lifecycle (live · Phase 1 + 2-kickoff)
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `create_agent(agent_id, new_type, plane?, resource_id?)` | ✓ | — | — | — | Single-agent spawn |
-| `bulk_spawn_smes(agent_id, plane, resource_ids?, all_pending?)` | ✓ | — | — | — | *(planned, Phase 2)* Bulk SME spawn on plane; writes RCA rows with `component_id=NULL` |
+| `create_agent(agent_id, new_type, plane?, resource_id?)` | ✓ | — | — | — | Single-agent spawn; for SMEs, also writes RCA row with `component_id=NULL` |
+| `bulk_spawn_smes(agent_id, plane, resource_ids?, all_pending?, task_description?)` | ✓ | — | — | — | Bulk SME spawn + optional one-task-per-SME; writes RCA reservation rows |
 | `list_agents(agent_id)` | ✓ | ✓ | ✓ | ✓ | All non-decommissioned |
 | `reset_agent(agent_id, target_agent_id)` | ✓ | — | — | — | Force-reset permanently-errored agent |
+| `decommission_agent(agent_id, target, reason, resource_action='leave'/'reset'/'reject')` | ✓ | — | — | — | Self-decom refused. Resource cascade per action |
+| `decommission_agents_bulk(agent_id, reason, agent_ids?, agent_type?, resource_action?)` | ✓ | — | — | — | Cohort teardown; refuses `agent_type='orchestrator'` and blank-wipe; skips caller |
+| `decommission_component(agent_id, component_id, reason)` | ✓ | — | — | — | Soft-delete (status='decommissioned') |
+| `decommission_components_bulk(agent_id, component_ids[], reason)` | ✓ | — | — | — | Requires explicit id list; refuses blank-wipe |
 
 #### Component Graph (planned · Phase 2)
 
@@ -486,10 +490,12 @@ ORCHESTRATOR (gatekeeper, then delegator):
     │  1. get_resource_counts — sanity-check iterator granularity against
     │     plane scale heuristic. If >2× expected, broadcast correction to
     │     iterator before spawning SMEs (prevents the 10k-SME blast radius).
-    │  2. For each pending resource:
-    │       create_agent(new_agent_type='sme', resource_id=<uuid>)
-    │     which inserts agent_runs row (status='idle') + resource_component_agents link.
-    │  3. Trigger manager then wakes the new idle SME via trigger_lock.
+    │  2. bulk_spawn_smes(plane=X, all_pending=True, task_description="Analyse your assigned resource")
+    │     → writes N agent_runs rows (status='idle'), N RCA rows with
+    │       component_id=NULL (reservation slots), flips matching resources
+    │       to status='assigned', creates N tasks (BW, orchestrator→SME).
+    │  3. Tasks are the wake signal — trigger manager picks up each new SME
+    │     because it has a BW task.
     │
     ▼
 SMEs run in parallel (one per resource):

@@ -23,6 +23,7 @@ from shared.migrations import run_migrations
 from cartograph_mcp.tools import action_items, chat, broadcast, secrets
 from cartograph_mcp.tools import tasks as tasks_tool
 from cartograph_mcp.tools import resources as resources_tool
+from cartograph_mcp.tools import agent_lifecycle
 
 logging.basicConfig(
     level=logging.INFO,
@@ -406,6 +407,105 @@ def mark_resource_done(agent_id: str, resource_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def bulk_spawn_smes(
+    agent_id: str,
+    plane: str,
+    resource_ids: list[str] | None = None,
+    all_pending: bool = False,
+    task_description: str | None = None,
+) -> dict[str, Any]:
+    """Spawn N SMEs for a plane in one call. ORCHESTRATOR-ONLY.
+
+    Writes agent_runs rows + RCA reservation rows (component_id=NULL) +
+    flips matching resources.status to 'assigned'. Optionally creates one
+    task per SME (owner=caller, worker=new SME, status=BW) as the initial
+    wake signal.
+
+    Filters: exactly one of resource_ids or all_pending=True required
+    (refuses blank-wipe). Skips resources already having an RCA row.
+
+    Returns: {spawned: N, skipped_already_assigned: [...], items: [...]}
+    """
+    return resources_tool.bulk_spawn_smes(
+        agent_id=agent_id,
+        plane=plane,
+        agent_manager=_agent_manager_for_spawn,
+        resource_ids=resource_ids,
+        all_pending=all_pending,
+        task_description=task_description,
+    )
+
+
+@mcp.tool()
+def decommission_agent(
+    agent_id: str,
+    target_agent_id: str,
+    reason: str,
+    resource_action: str = "leave",
+) -> dict[str, Any]:
+    """Flip an agent to 'decommissioned'. ORCHESTRATOR-ONLY.
+
+    resource_action controls what happens to the agent's assigned resources
+    (via RCA):
+      - 'leave'  → keep the RCA row as an orphan (debugging only)
+      - 'reset'  → delete RCA row + flip resource back to 'pending' for re-spawn
+      - 'reject' → delete RCA row + mark resource 'rejected' with audit trail
+
+    Refuses self-decommission. Reason is required.
+    """
+    return agent_lifecycle.decommission_agent(
+        agent_id, target_agent_id, reason, resource_action
+    )
+
+
+@mcp.tool()
+def decommission_agents_bulk(
+    agent_id: str,
+    reason: str,
+    agent_ids: list[str] | None = None,
+    agent_type: str | None = None,
+    resource_action: str = "leave",
+) -> dict[str, Any]:
+    """Bulk variant — one transaction, cohort-wide teardown. ORCHESTRATOR-ONLY.
+
+    At least one of agent_ids (explicit list) or agent_type ('sme'/'iterator'/
+    'resolver') required. Refuses 'orchestrator' as a target type. Same
+    resource_action semantics as decommission_agent.
+    """
+    return agent_lifecycle.decommission_agents_bulk(
+        agent_id=agent_id,
+        reason=reason,
+        agent_ids=agent_ids,
+        agent_type=agent_type,
+        resource_action=resource_action,
+    )
+
+
+@mcp.tool()
+def decommission_component(
+    agent_id: str, component_id: str, reason: str
+) -> dict[str, Any]:
+    """Soft-delete a component (status='decommissioned'). ORCHESTRATOR-ONLY.
+
+    Attributions and edges are left as-is (mirrors merge semantics).
+    Refuses if component is already decommissioned.
+    """
+    return agent_lifecycle.decommission_component(agent_id, component_id, reason)
+
+
+@mcp.tool()
+def decommission_components_bulk(
+    agent_id: str, component_ids: list[str], reason: str
+) -> dict[str, Any]:
+    """Bulk variant — one transaction. Requires explicit component_ids list.
+    Refuses blank-wipe (no "all components" filter).
+    """
+    return agent_lifecycle.decommission_components_bulk(
+        agent_id, component_ids, reason
+    )
+
+
+@mcp.tool()
 def reject_resource(
     agent_id: str,
     resource_id: str,
@@ -613,7 +713,9 @@ def main() -> None:
         "upsert_resource, upsert_resources_bulk, get_resource, "
         "list_resources_for_plane, list_all_resources, get_resource_counts, "
         "mark_resource_done, reject_resource, reject_resources_bulk, "
-        "create_agent, list_agents, reset_agent"
+        "bulk_spawn_smes, create_agent, list_agents, reset_agent, "
+        "decommission_agent, decommission_agents_bulk, "
+        "decommission_component, decommission_components_bulk"
     )
     try:
         # FastMCP.run() with transport='streamable-http' serves at /mcp
