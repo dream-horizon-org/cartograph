@@ -12,7 +12,15 @@ text so the agent sees it mid-session and can choose to read the detail.
 Rate-limited: no-op if called within 10s of the last run (state in
 `{cwd}/.cartograph-notify-last` — a few bytes per agent workspace).
 
-Quiet output (empty stdout) on no news keeps tool-chatter clean.
+Claude Code hook output contract (important!):
+  A PostToolUse hook's plain stdout is NOT injected into the agent's
+  conversation — it only shows up in the user's transcript view. To
+  actually feed a notification back to the model, we must emit JSON
+  in the shape:
+    {"hookSpecificOutput": {
+       "hookEventName": "PostToolUse",
+       "additionalContext": "..." }}
+  Quiet-cycle still uses empty stdout + exit 0.
 """
 
 from __future__ import annotations
@@ -134,10 +142,19 @@ def main() -> int:
         f"{b['count']} {b['type']}{'s' if b['count'] > 1 else ''} from {b['from']}"
         for b in breakdown
     ]
-    print(
+    message = (
         f"[NOTIFY] {count} new high-priority item(s): " + ", ".join(pieces) +
         ". Call get_action_items_detail for specifics, or keep going if not urgent."
     )
+    # Emit JSON so Claude Code injects the text as additional context into
+    # the agent's conversation. Plain stdout would only show in the user's
+    # transcript view, not reach the model.
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": message,
+        }
+    }))
     return 0
 
 
