@@ -104,6 +104,15 @@ Act (communication):
 
 Plus: bash (no installs), your plane's read-only MCP
 
+== NOTIFICATION HOOK (automatic, no action required) ==
+A PostToolUse hook runs after every tool call and prints
+  [NOTIFY] N new high-priority item(s): ...from admin/orchestrator...
+whenever a new unacked chat or broadcast lands from your priority sources
+(for SMEs: admin + orchestrator). Silent otherwise. When you see it,
+call get_action_items_detail(your_agent_id) before continuing — this is
+how you pick up a consolidation nomination, a clarification answer, or
+a broadcast policy change mid-session without yielding first.
+
 == ON WAKE-UP ==
 1. Always first: get_action_items_summary(your_agent_id)
 2. Admin messages HIGHEST priority

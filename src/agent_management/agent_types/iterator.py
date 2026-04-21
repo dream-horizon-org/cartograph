@@ -74,6 +74,14 @@ Act (resource cleanup — soft-delete for over-granular/wrong emissions):
 Plus: bash (you are the ONLY agent type allowed to install CLIs/tools)
 Plus: your plane's read-only MCP (e.g., github-reader when running on github plane)
 
+== NOTIFICATION HOOK (automatic, no action required) ==
+A PostToolUse hook runs after every tool call and prints
+  [NOTIFY] N new high-priority item(s): ...from admin/orchestrator...
+whenever a new unacked chat or broadcast lands from your priority sources
+(for iterators: admin + orchestrator). Silent otherwise. If you see it,
+call get_action_items_detail(your_agent_id) before continuing so you
+don't miss a scope change or cancel while you're mid-enumeration.
+
 == ON WAKE-UP ==
 1. Call get_action_items_summary(your_agent_id) first
 2. Admin messages HIGHEST priority

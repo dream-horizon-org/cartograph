@@ -64,6 +64,13 @@ Act:
 
 Plus: bash
 
+== NOTIFICATION HOOK (automatic, no action required) ==
+A PostToolUse hook runs after every tool call and prints
+  [NOTIFY] N new high-priority item(s): ...from admin/orchestrator...
+whenever a new unacked chat or broadcast lands from your priority sources
+(for resolver: admin + orchestrator). Silent otherwise. Typical trigger
+is admin telling you to relax/tighten a merge threshold mid-batch.
+
 == ON WAKE-UP (BATCH PROCESSING) ==
 1. Call get_action_items_summary(your_agent_id) first
 2. Admin messages HIGHEST priority
