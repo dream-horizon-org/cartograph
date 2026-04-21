@@ -787,16 +787,17 @@ def create_agent(
 def list_agents(agent_id: str) -> dict[str, list]:
     """List all non-decommissioned agents in the system.
 
-    Returns agents with their agent_id, agent_type, status, plane, resource_id,
-    created_at. Useful for orchestrator to see what's been spawned.
-
-    Any agent can call this.
+    Returns agents with agent_id, agent_type, status, plane (iterators only),
+    invocation_count, sleep_until (nullable), errored_at (nullable),
+    created_at. Any agent can call this. SME→resource assignment lives in
+    resource_component_agents, not on agent_runs — join that table if you
+    need it.
     """
     # Validate caller is a real agent
     _get_agent_type(agent_id)
     rows = execute(
-        """SELECT agent_id, agent_type, status, plane, resource_id,
-                  invocation_count, created_at
+        """SELECT agent_id, agent_type, status, plane,
+                  invocation_count, sleep_until, errored_at, created_at
            FROM agent_runs
            WHERE status != 'decommissioned'
            ORDER BY
