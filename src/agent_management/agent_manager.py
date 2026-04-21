@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -82,6 +83,7 @@ class AgentManager:
         os.makedirs(workspace_path, exist_ok=True)
 
         self._write_mcp_json(workspace_path, config.mcp_servers)
+        self._write_claude_settings(workspace_path, agent_id, agent_type)
 
         db.create_agent_run(
             agent_id=agent_id,
@@ -326,6 +328,58 @@ class AgentManager:
         with open(path, "w") as f:
             json.dump(mcp_json, f, indent=2)
         logger.info("Wrote MCP config for %s: %s", workspace_path, list(servers.keys()))
+
+    # Per-agent-type priority sources for the notification hook. admin is
+    # always top priority. SMEs / iterators / resolvers additionally care
+    # about orchestrator messages. Orchestrator itself cares only about admin.
+    _HOOK_PRIORITY_BY_TYPE = {
+        "orchestrator": "admin",
+        "iterator":     "admin,orchestrator",
+        "sme":          "admin,orchestrator",
+        "resolver":     "admin,orchestrator",
+    }
+
+    def _write_claude_settings(
+        self, workspace_path: str, agent_id: str, agent_type: str
+    ) -> None:
+        """Write .claude/settings.json with a PostToolUse hook that pings
+        the notify script. The hook fires after every tool call; the script
+        itself is rate-limited (10s) so high-frequency tool loops don't
+        stampede the DB.
+
+        Priority source types are baked in per agent_type (see
+        _HOOK_PRIORITY_BY_TYPE). Changing them requires re-writing the
+        settings file (re-running create_agent or a targeted rewrite).
+        """
+        priority = self._HOOK_PRIORITY_BY_TYPE.get(agent_type, "admin")
+        hook_script = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "hooks", "notify.py")
+        )
+        settings = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    f"{sys.executable} {hook_script} "
+                                    f"--agent-id={agent_id} --priority={priority}"
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        settings_dir = os.path.join(workspace_path, ".claude")
+        os.makedirs(settings_dir, exist_ok=True)
+        with open(os.path.join(settings_dir, "settings.json"), "w") as f:
+            json.dump(settings, f, indent=2)
+        logger.info(
+            "Wrote hook config for %s: priority=%s", agent_id, priority
+        )
 
     def _extract_session_id(self, output: str) -> str | None:
         try:

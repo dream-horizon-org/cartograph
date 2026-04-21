@@ -25,6 +25,7 @@ from cartograph_mcp.tools import tasks as tasks_tool
 from cartograph_mcp.tools import resources as resources_tool
 from cartograph_mcp.tools import agent_lifecycle
 from cartograph_mcp.tools import components as components_tool
+from cartograph_mcp.tools import notifications as notifications_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -621,6 +622,34 @@ def get_unresolved(
 
 
 @mcp.tool()
+def get_agent_notifications(
+    agent_id: str,
+    priority_from_agent_types: list[str] | None = None,
+    since: str | None = None,
+) -> dict[str, Any]:
+    """Compact unacked-message count from priority sources (for PostToolUse hook).
+
+    Used by the notify hook script to decide whether to interrupt the agent
+    mid-session with a [NOTIFY] line. Cheap: one indexed query per message
+    type. Tasks are intentionally excluded — they're persistent action items
+    that surface via get_action_items_summary on normal wake-up.
+
+    Args:
+        priority_from_agent_types: source types to count (default ['admin']).
+            Valid: 'admin', 'orchestrator', 'iterator', 'sme', 'resolver'.
+        since: ISO timestamp; only items strictly after this count. None =
+            all unacked. Round-trip the response's max_seen_at back as
+            since on the next call to see only newer items.
+
+    Returns: {high_priority_count, breakdown: [{from, type, count}],
+              max_seen_at: ISO string | null}
+    """
+    return notifications_tool.get_agent_notifications(
+        agent_id, priority_from_agent_types, since
+    )
+
+
+@mcp.tool()
 def reject_resource(
     agent_id: str,
     resource_id: str,
@@ -833,7 +862,8 @@ def main() -> None:
         "decommission_component, decommission_components_bulk, "
         "upsert_component, upsert_attribution, create_edge, "
         "insert_unresolved, resolve_reference, "
-        "get_component, get_attributions, get_edges, get_unresolved"
+        "get_component, get_attributions, get_edges, get_unresolved, "
+        "get_agent_notifications"
     )
     try:
         # FastMCP.run() with transport='streamable-http' serves at /mcp
