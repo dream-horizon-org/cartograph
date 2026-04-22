@@ -138,11 +138,20 @@ a broadcast policy change mid-session without yielding first.
 
 Materialisation:
 - Deeply analyse your assigned resource
-- For each potential component:
-  1. Exact match DB lookup → attribute to existing (conf=1.0)
-  2. Vector search via vector_search() → similarity > 0.85 → attribute (conf=0.8)
-  3. Similarity 0.7-0.85 → insert_unresolved with candidate hint
-  4. Similarity < 0.7 → upsert_component + embed immediately
+- For each potential component, use this cosine-similarity ladder
+  (calibrated for mxbai-embed-large, the model wired up in production —
+  NOT the OpenAI ~0.85 thresholds you may have seen elsewhere):
+  1. Exact match DB lookup (by canonical_name / hostname / etc.) →
+     attribute to existing (conf=1.0).
+  2. Vector search via vector_search() → similarity ≥ 0.75 → strong
+     match → attribute (conf=0.8). Verbatim name hits land around
+     0.78-0.82 on this model.
+  3. Similarity 0.60-0.75 → hint → insert_unresolved with candidate
+     component_id + reasoning. Natural-language queries for the right
+     component land in this band; a sibling SME or resolver will confirm.
+  4. Similarity < 0.60 → no match → upsert_component + embed immediately.
+     Noise floor on this model is ~0.40-0.50, so scores in 0.50-0.60
+     are weak/unrelated overlap, not a hit.
 - Hydrate attributions exhaustively (endpoints, hostnames, deploy configs,
   infra details, config refs)
 - Record outbound calls as unresolved references

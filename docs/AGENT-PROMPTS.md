@@ -469,11 +469,17 @@ Reject threshold: both agents < 0.3 → auto-reject
       logs (repo refs, hostnames), metrics (dashboards, alerts), service map
     - For Config (supporter): resolve config key references, register hostnames.
       Do NOT create new components.
-    - For each component you discover:
+    - For each component you discover (cosine bands calibrated for
+      mxbai-embed-large — the model live in prod since Phase 3.7):
         1. Check DB: exact match on name/hostname → attribute to existing
-        2. No exact match → vector_search → similarity > 0.85 → attribute (conf=0.8)
-        3. Similarity 0.7-0.85 → insert_unresolved with candidate hint
-        4. Similarity < 0.7 → create new component + embed immediately
+        2. No exact match → vector_search → similarity ≥ 0.75 → strong match,
+           attribute (conf=0.8). Verbatim name queries land ~0.78-0.82.
+        3. Similarity 0.60-0.75 → hint → insert_unresolved with candidate
+           component_id. Natural-language queries for the right component
+           land here.
+        4. Similarity < 0.60 → no match → create new component + embed.
+           Noise floor on this model is ~0.40-0.50; scores in 0.50-0.60
+           are weak overlap, not a hit.
     - Record ALL attributions: endpoints, hostnames, deploy configs, infra, etc.
     - Record outbound calls as unresolved references
     - WRITE component_doc_md (Phase 3) — 3–8 lines of markdown on every

@@ -524,7 +524,16 @@ Embeddings generated at write time via `cartograph-db` MCP. No batch step.
 | `edges`        | `"{edge_type}: {identifier}"`                          | Fuzzy match calls across components — e.g., match `GET /scorecard/cricket` to `GET /cricket/scorecard` |
 
 
-Lookup protocol: exact match first → vector fallback (>0.85 match, 0.7-0.85 hint, <0.7 create new).
+Lookup protocol (bands calibrated empirically for `mxbai-embed-large`):
+  - exact match first (canonical_name / hostname / etc.)
+  - vector fallback:
+    - **≥ 0.75** → strong match → attribute to existing
+    - **0.60 – 0.75** → hint → `insert_unresolved` with candidate
+    - **< 0.60** → create new component
+  Noise floor on this model is ~0.40-0.50 — scores in that range are
+  cosine artefacts, not semantic matches. Bands were recalibrated in
+  Phase 3.7 after production data showed the prior OpenAI-sized
+  thresholds (0.85/0.70) sat above even verbatim-name hits.
 
 Model: **`mxbai-embed-large` via local Ollama** (1024 dims, Metal-accelerated on Apple Silicon). Warm embed ~40-60ms per call; no API key, no network egress. Configurable via `CARTOGRAPH_EMBEDDING_MODEL` + `CARTOGRAPH_EMBEDDING_DIMS` + `CARTOGRAPH_OLLAMA_URL`. Schema migration flips `vector(N)` automatically on boot if the configured dim differs.
 

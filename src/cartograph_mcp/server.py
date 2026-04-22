@@ -790,13 +790,18 @@ def vector_search(
     Open to all active agents. `table` must be one of:
     components, attributions, unresolved, edges.
 
-    Interpretation bands (caller applies):
-      similarity > 0.85  → strong match (confident attribution)
-      0.7 to 0.85        → hint (insert_unresolved + mark candidate)
-      < 0.7              → treat as no match (create new component)
+    Interpretation bands (calibrated for mxbai-embed-large, the model
+    wired up in production — Phase 3.7):
+      similarity >= 0.75  → strong match (confident attribution)
+      0.60 to 0.75        → hint (insert_unresolved + mark candidate)
+      <  0.60             → treat as no match (create new component)
+    Noise floor is ~0.40-0.50 on this model; scores below 0.60 are
+    cosine artefacts, not semantic matches. These bands replace the
+    earlier OpenAI-sized 0.85/0.70 ladder, which sat above even
+    verbatim-name hits on mxbai.
 
-    If the query can't be embedded (missing API key, transport error, empty
-    text), returns {"query_embedded": False, "results": []}. Callers must
+    If the query can't be embedded (Ollama unreachable, empty text),
+    returns {"query_embedded": False, "results": []}. Callers must
     check this flag to distinguish "no hits" from "could not search".
     """
     return search_tool.vector_search(agent_id, query_text, table, limit)
