@@ -24,6 +24,7 @@ from cartograph_mcp.tools import action_items, chat, broadcast, secrets
 from cartograph_mcp.tools import tasks as tasks_tool
 from cartograph_mcp.tools import resources as resources_tool
 from cartograph_mcp.tools import agent_lifecycle
+from cartograph_mcp.tools import clarification as clarification_tool
 from cartograph_mcp.tools import components as components_tool
 from cartograph_mcp.tools import consolidation as consolidation_tool
 from cartograph_mcp.tools import notifications as notifications_tool
@@ -718,6 +719,61 @@ def get_consolidation_thread(
     return {
         "thread": consolidation_tool.get_consolidation_thread(
             agent_id, consolidation_id, page, limit
+        )
+    }
+
+
+@mcp.tool()
+def create_clarification(
+    asker_agent_id: str,
+    responder_agent_id: str,
+    question_message: str,
+) -> dict[str, Any]:
+    """Any agent asks another agent (or 'admin') a question.
+    Inserts clarification row (status=B2) + communication.
+    """
+    return clarification_tool.create_clarification(
+        asker_agent_id, responder_agent_id, question_message,
+    )
+
+
+@mcp.tool()
+def respond_clarification(
+    agent_id: str,
+    clarification_id: str,
+    message: str,
+    new_status: str,
+) -> dict[str, Any]:
+    """Asker or responder responds with a state transition + message.
+
+    Valid transitions:
+      responder (B2): B2 → B1 | B2 → QR | B2 → QC
+      asker (B1):     B1 → B2 | B1 → QC
+      asker (QC):     QC → CC | QC → B2
+      asker (QR):     QR → CC
+    """
+    return clarification_tool.respond_clarification(
+        agent_id, clarification_id, message, new_status,
+    )
+
+
+@mcp.tool()
+def get_my_clarifications(agent_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Non-terminal clarifications where agent is asker or responder."""
+    return {"clarifications": clarification_tool.get_my_clarifications(agent_id)}
+
+
+@mcp.tool()
+def get_clarification_thread(
+    agent_id: str,
+    clarification_id: str,
+    page: int = 1,
+    limit: int = 50,
+) -> dict[str, list[dict[str, Any]]]:
+    """Paginated clarification thread. Scoped to asker + responder."""
+    return {
+        "thread": clarification_tool.get_clarification_thread(
+            agent_id, clarification_id, page, limit
         )
     }
 
