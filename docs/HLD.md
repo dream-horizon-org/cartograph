@@ -277,7 +277,7 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `get_attributions(component_id)` | ✓ | ✓ | ✓ | ✓ | |
 | `get_edges(component_id)` | ✓ | ✓ | ✓ | ✓ | Returns `{outbound, inbound}` |
 | `get_unresolved(component_id)` | ✓ | ✓ | ✓ | ✓ | |
-| `vector_search(query, table, limit)` | ✓ | ✓ | ✓ | ✓ | *(planned, Phase 3 prep — needs embedding pipeline)* |
+| `vector_search(agent_id, query, table, limit)` | ✓ | ✓ | ✓ | ✓ | Embeds query with `text-embedding-3-small`, KNN-cosines against the target table. Returns `{query_embedded: bool, results}`. Tables: components / attributions / unresolved / edges. Limit clamped [1, 50]. |
 
 #### Notifications (live · Phase 2.3)
 
@@ -285,24 +285,24 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 |---|---|---|---|---|---|
 | `get_agent_notifications(agent_id, priority_from_agent_types?, since?)` | ✓ | ✓ | ✓ | ✓ | Compact count of unacked chats + broadcasts from priority source types. Used by the per-agent PostToolUse hook for async wake-up. Hook emits `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"[NOTIFY] …"}}` on stdout (plain stdout is swallowed by Claude Code — the JSON envelope is mandatory to reach the model). Tasks intentionally excluded (they surface via action_items_summary on normal wake-up). |
 
-#### Consolidation (planned · Phase 3)
+#### Consolidation (live · Phase 3)
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `nominate_consolidation(agent_id, comp_a, comp_b, type, confidence, message)` | — | — | ✓ *owns comp_a* | — | merge/split |
-| `respond_consolidation(agent_id, cons_id, confidence, message, new_status)` | — | — | ✓ *participant* | — | Must be agent_a or agent_b |
-| `review_consolidation(agent_id, cons_id, r_conf, message, new_status, mutation_assigned_to?)` | — | — | — | ✓ | Resolver-only |
-| `get_my_consolidations(agent_id)` | ✓ | — | ✓ | ✓ | Scoped: involving this agent |
-| `get_consolidation_thread(cons_id)` | ✓ | — | ✓ *participant* | ✓ | Empty for non-participants |
+| `nominate_consolidation(agent_id, comp_a, comp_b?, type, confidence, message)` | — | — | ✓ *owns comp_a* | — | merge requires comp_b (owned by different SME); split: comp_b optional (child spawned in Phase 4). Writes row status=B2 + initial comm with `state_transition` metadata. |
+| `respond_consolidation(agent_id, cons_id, confidence, message, new_status)` | — | — | ✓ *participant* | — | State-machine validated. Writes `a_conf_score` or `b_conf_score` per role. Manual escalate to R requires `r_conf_score` already set; first escalation goes through auto_transitions. |
+| `review_consolidation(agent_id, cons_id, r_conf, message, new_status, mutation_assigned_to?)` | — | — | — | ✓ | R → B1/B2/F/M. M requires `mutation_assigned_to`; split enforces it equals agent_a; merge requires it be agent_a or agent_b. |
+| `get_my_consolidations(agent_id)` | — | — | ✓ *participant* | ✓ *all* | Non-terminal only. Resolver sees all non-terminal rows. |
+| `get_consolidation_thread(agent_id, cons_id, page, limit)` | — | — | ✓ *participant* | ✓ | Paginated. Non-participants get `[]` (silent denial). |
 
-#### Clarifications (planned · Phase 3)
+#### Clarifications (live · Phase 3)
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `create_clarification(asker, responder, question)` | ✓ | ✓ | ✓ | ✓ | Any agent |
-| `respond_clarification(agent_id, clar_id, message, new_status)` | ✓ | ✓ | ✓ | ✓ | Asker or responder only |
-| `get_my_clarifications(agent_id)` | ✓ | ✓ | ✓ | ✓ | |
-| `get_clarification_thread(clar_id)` | ✓ | ✓ | ✓ | ✓ | Asker or responder only |
+| `create_clarification(asker, responder, question)` | ✓ | ✓ | ✓ | ✓ | Responder can be any agent or literal `'admin'`. Inserts status=B2 + initial comm. |
+| `respond_clarification(agent_id, clar_id, message, new_status)` | ✓ | ✓ | ✓ | ✓ | State-machine validated per role (asker/responder). |
+| `get_my_clarifications(agent_id)` | ✓ | ✓ | ✓ | ✓ | Non-terminal where agent is asker or responder |
+| `get_clarification_thread(agent_id, clar_id, page, limit)` | ✓ | ✓ | ✓ | ✓ | Scoped to asker + responder. |
 
 #### Mutation (planned · Phase 4)
 
@@ -1111,28 +1111,32 @@ READ-ONLY (one per plane, scoped per agent):
 WRITE TARGET (single, shared by all agents):
 
   cartograph-db  (FastMCP streamable-http on :8100/mcp)
-    LIVE groups (30 tools registered in src/cartograph_mcp/server.py;
+    LIVE groups (58 tools registered in src/cartograph_mcp/server.py;
     see TRIGGER-MANAGEMENT.md §3 for per-tool contracts):
-      action_items    (2): summary, detail
-      chat            (4): send, ack, unacked, history
-      broadcast       (3): send, ack, unacked
-      secrets         (4): put, get, list, delete
-      tasks           (5): create, respond, raise_blocker, my, thread
-      resources       (8): upsert, upsert_bulk, get, list_for_plane,
-                           list_all, get_counts, mark_done,
-                           reject, reject_bulk
-      agent_lifecycle (3): create_agent, list_agents, reset_agent
+      action_items    (2):  summary, detail
+      chat            (4):  send, ack, unacked, history
+      broadcast       (3):  send, ack, unacked
+      secrets         (4):  put, get, list, delete
+      tasks           (5):  create, respond, raise_blocker, my, thread
+      resources       (9):  upsert, upsert_bulk, get, list_for_plane,
+                            list_all, get_counts, mark_done,
+                            reject, reject_bulk
+      agent_lifecycle (11): create_agent, bulk_spawn_smes, list_agents,
+                            reset_agent, decommission_agent(_bulk),
+                            decommission_component(_bulk),
+                            sleep_self, bulk_sleep_agents, bulk_wake_agents
+      components      (9):  upsert_component, upsert_attribution,
+                            create_edge, insert_unresolved,
+                            resolve_reference + 4 reads
+      notifications   (1):  get_agent_notifications
+      consolidation   (5):  nominate, respond, review, get_my, get_thread
+      clarification   (4):  create, respond, get_my, get_thread
+      search          (1):  vector_search
 
-    PLANNED (Phase 2+):
-      upsert_component, upsert_attribution, create_edge, insert_unresolved,
-      resolve_reference, nominate_consolidation, respond_consolidation,
-      review_consolidation, execute_mutation, complete_consolidation,
-      absorb_agent, spawn_child_agent, transfer_attributions,
-      get_proxy_items, get_proxy_chats, create_clarification,
-      respond_clarification, vector_search, and corresponding read tools
-      (get_component, get_attributions, get_edges, get_unresolved,
-      get_my_consolidations, get_consolidation_thread,
-      get_my_clarifications, get_clarification_thread).
+    PLANNED (Phase 4 — mutation):
+      execute_mutation, complete_consolidation, absorb_agent,
+      spawn_child_agent, transfer_attributions, get_proxy_items,
+      get_proxy_chats.
 
   Typed operations, NOT raw SQL.
   Scoping enforced inside each tool: agent_id + agent_type + plane checked

@@ -353,7 +353,7 @@ TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
 
-> **Implementation status.** §3.1–3.3 describe the full target tool set across all phases. As of now, 30 tools are registered in `src/cartograph_mcp/server.py` covering: action_items, chat, broadcast, secrets, tasks, resources, agent_lifecycle. Consolidation / clarification / mutation / component / attribution / edge / unresolved / vector_search tools are designed below but **not yet implemented** — see `IMPLEMENTATION-PHASES.md` for phase gating.
+> **Implementation status.** 58 tools live in `src/cartograph_mcp/server.py` covering action_items, chat, broadcast, secrets, tasks, resources, agent_lifecycle, components, notifications, consolidation, clarification, vector_search. Mutation tools (execute_mutation, complete_consolidation, absorb_agent, spawn_child_agent, transfer_attributions, get_proxy_items, get_proxy_chats) are designed below but ship in Phase 4 — see `IMPLEMENTATION-PHASES.md` for phase gating.
 
 ### 3.1 Trigger Tools (what wakes me — read-only, used by trigger manager)
 
@@ -474,10 +474,14 @@ get_edges(component_id) → EdgeRow[]
 get_unresolved(component_id) → UnresolvedRow[]
   Read unresolved references for a component.
 
-vector_search(query_text, table, limit) → Row[]
-  Embed query_text, search against specified table's embeddings.
-  Returns top N results with similarity scores.
-  Available to all agents.
+vector_search(agent_id, query_text, table, limit) → {query_embedded, results}
+  Embed query_text (text-embedding-3-small, 1536 dims) and KNN-cosine
+  against the target table's embedding column. Tables: components,
+  attributions, unresolved, edges. limit clamped to [1, 50].
+  Returns {query_embedded: False, results: []} when the query can't be
+  embedded (missing OPENAI_API_KEY, transport error, empty text) so
+  callers can distinguish "no matches" from "couldn't search".
+  Available to all active agents.
 
 get_resource(agent_id, resource_id) → ResourceRow
   Read a single resource row.
@@ -506,13 +510,16 @@ list_secrets_for_plane(agent_id, plane) → string[]
 
 Exposed to agents via `cartograph-db` MCP. Every act on a stateful entity (consolidation, task, clarification) requires a state transition. Cannot respond without changing state.
 
-**Consolidation acts:**
+**Consolidation acts (live · Phase 3):**
 
 ```
-nominate_consolidation(agent_id, component_a_id, component_b_id, type, confidence, message)
-  Creates new consolidation row (status=B2) + communication message.
-  Only SMEs can nominate.
-  Validates: agent owns component_a.
+nominate_consolidation(agent_id, component_a_id, component_b_id?, type, confidence, message)
+  Creates new consolidation row (status=B2) + communication message with
+  state_transition metadata.
+  Only SMEs can nominate. Validates: caller owns component_a.
+  type='merge' → component_b_id required, must be owned by a different SME.
+  type='split' → component_b_id optional (child component is spawned in
+                 Phase 4 via spawn_child_agent after resolver approval).
 
 respond_consolidation(agent_id, consolidation_id, confidence, message, new_status)
   Updates confidence score + appends communication.
@@ -528,26 +535,38 @@ respond_consolidation(agent_id, consolidation_id, confidence, message, new_statu
     B1 → R  (escalate to resolver, only if r_conf IS NOT NULL)
 
 review_consolidation(agent_id, consolidation_id, r_confidence, message, new_status, mutation_assigned_to?)
-  Resolver-only. Reviews and decides.
-  Validates: agent_type = 'resolver'
+  Resolver-only. Reviews and decides. Writes r_conf_score + state
+  transition + resolved_by / resolved_at (on F/D). Communication row
+  metadata carries role='resolver' + state_transition.
+  Validates: agent_type='resolver'
   Valid transitions:
-    R → B1/B2 (needs more info, sends back to either agent)
-    R → F     (rejected)
-    R → M     (approved — must set mutation_assigned_to)
-              merge: resolver picks agent with more planes
-              split: always agent_a
+    R → B1 (back to nominator) | R → B2 (back to nominated)
+    R → F  (rejected — terminal)
+    R → M  (approved — mutation_assigned_to REQUIRED)
+           merge: caller picks agent_a or agent_b (resolver judgment);
+                  must equal one of the two IDs on the row.
+           split: must equal agent_a (enforced).
 
-execute_mutation(agent_id, consolidation_id, new_status)
-  SME executes approved merge/split.
-  Validates: agent is the designated mutation POC
-  Valid transitions:
-    M → MD (mutation complete)
+execute_mutation(agent_id, consolidation_id, new_status)  -- Phase 4
+  SME executes approved merge/split. M → MD.
 
-complete_consolidation(agent_id, consolidation_id)
-  Final ack.
-  Valid transitions:
-    MD → D (done)
+complete_consolidation(agent_id, consolidation_id)  -- Phase 4
+  Resolver final ack. MD → D.
 ```
+
+**Auto-transitions (system, not an agent tool):**
+
+The trigger manager runs `auto_transitions.run_auto_transitions` on
+every cycle (see §2.1 step 5). Two rules:
+
+- `a_conf_score >= 0.85 AND b_conf_score >= 0.85 AND r_conf_score IS NULL`
+  → set `status='R'`. This is how first escalation to resolver happens —
+  not an explicit agent call. Manual `respond_consolidation(new_status='R')`
+  is refused until `r_conf_score` is non-null (resolver has already
+  weighed in).
+- `a_conf_score <= 0.3 AND b_conf_score <= 0.3`
+  → set `status='F'`. Both sides strongly disagree → terminal reject, no
+  resolver needed.
 
 **Task acts:**
 
@@ -572,7 +591,7 @@ respond_task(agent_id, task_id, message, new_status, blocker_detail?)
     WD → TC (accept, task complete)
 ```
 
-**Clarification acts:**
+**Clarification acts (live · Phase 3):**
 
 ```
 create_clarification(asker_agent_id, responder_agent_id, question_message)

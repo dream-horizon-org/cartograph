@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-21):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · **Phase 2.5 ✅** (sleep + forward-only broadcasts) · Phase 3 (Consolidation) + embedding pipeline pending.
-- **48 MCP tools** registered · **196 tests** passing.
+**Status (2026-04-22):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · **Phase 3 ✅** (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 (graph viz) pending.
+- **58 MCP tools** registered · **242 tests** passing.
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 
 ---
@@ -383,49 +383,130 @@ running correctly.
 
 ---
 
-## Phase 3: Consolidation
+## Phase 3: Consolidation ✅
 
-SMEs negotiate merges/splits. Resolver reviews and approves.
+SMEs negotiate merges/splits. Resolver reviews and approves. Embeddings
+populated at write time. Admin UI renders consolidation + clarification
+detail views with confidence pills and state-transition pills on every
+thread message.
 
-### MCP Tools Added
-**Read:**
-- `get_my_consolidations(agent_id)` — all consolidation rows where agent_a_id=agent_id OR agent_b_id=agent_id. Includes nomination_type, both conf scores, r_conf_score, status.
-- `get_consolidation_thread(consolidation_id)` — all communications WHERE source_id=consolidation_id AND type='consolidation', paginated. Scoped: agent must be agent_a or agent_b (or resolver). Not involved → empty result.
-- `get_my_clarifications(agent_id)` — `WHERE asker_agent_id=agent_id OR responder_agent_id=agent_id`.
-- `get_clarification_thread(clarification_id)` — all communications WHERE source_id=clarification_id AND type='clarification', paginated. Scoped: only asker or responder.
+Shipped across seven focused commits:
+- `fc74d05` step 1 — `components.component_doc_md` schema migration
+- `397c3bb` steps 2+3 — embedding pipeline + component_doc_md wiring
+- `9fdbae6` step 4 — `vector_search` MCP tool
+- `7e06978` step 5 — 5 consolidation MCP tools
+- `9d14cdc` step 6 — 4 clarification MCP tools
+- `a984ddf` step 7 — auto-transitions verified + action_items broadcast fix
+- `c9a6c1b` step 8 — admin UI consolidation/clarification detail views
+- `d1ceace` step 9 — SME prompt (component_doc_md + evidence ladder)
+- step 10 — 46 new tests
 
-**Act — Consolidation:**
-- `nominate_consolidation(agent_id, component_a_id, component_b_id, type, confidence, message)` — INSERT consolidation (status=B2) + INSERT communication (type='consolidation'). Validate: only SMEs; agent owns component_a via RCA table.
-- `respond_consolidation(agent_id, consolidation_id, confidence, message, new_status)` — UPDATE conf score + INSERT communication. Validate:
-  - Agent is agent_a or agent_b
-  - State actually changes
-  - Nominated (agent_b) transitions: B2→B1, B2→R (only if r_conf IS NOT NULL)
-  - Nominator (agent_a) transitions: B1→B2, B1→R (only if r_conf IS NOT NULL)
-- `review_consolidation(agent_id, consolidation_id, r_confidence, message, new_status, mutation_assigned_to?)` — Resolver only. UPDATE r_conf_score + INSERT communication. Validate: agent_type='resolver'. Transitions:
-  - R→B1 or R→B2 (needs more info)
-  - R→F (reject)
-  - R→M (approve — MUST set mutation_assigned_to. Merge: agent with more planes. Split: always agent_a.)
+### 3.1 Schema additions
+- `components.component_doc_md TEXT` (nullable). SME-authored markdown
+  blob — short human-readable description rendered in the graph-viz
+  hover popup (Phase 3.5). Set on `upsert_component`; COALESCE-style
+  update so subsequent calls that omit the key leave the value intact.
 
-**Act — Clarification:**
-- `create_clarification(asker_agent_id, responder_agent_id, question_message)` — INSERT clarification (status=B2) + INSERT communication (type='clarification').
-- `respond_clarification(agent_id, clarification_id, message, new_status)` — UPDATE status + INSERT communication. Validate:
-  - Agent is asker or responder
-  - State actually changes
-  - Responder transitions: B2→B1, B2→QR, B2→QC
-  - Asker transitions: B1→B2, B1→QC, QC→CC, QC→B2, QR→CC
+### 3.2 Embeddings
+- `shared/embedding.py` — OpenAI `text-embedding-3-small` (1536 dims).
+  Graceful degrade on missing `OPENAI_API_KEY` / API error: writes
+  `embedding=NULL`, `vector_search` skips the row.
+- Auto-embed inside `upsert_component`, `upsert_attribution`, `create_edge`,
+  `insert_unresolved` — per SCHEMA.md §Embedding Strategy.
 
-### Trigger Manager Additions
-- Scan consolidations:
-  - SME: `WHERE (agent_b_id=agent_id AND status='B2') OR (agent_a_id=agent_id AND status='B1')`
-  - Resolver: `WHERE status IN ('R', 'MD')`
-  - Mutation POC: `WHERE mutation_assigned_to=agent_id AND status='M'`
-- Scan clarifications: `WHERE (asker_agent_id=agent_id AND status IN ('B1','QR','QC')) OR (responder_agent_id=agent_id AND status='B2')`
-- Auto-transition: both a_conf_score > 0.85 AND b_conf_score > 0.85 AND r_conf_score IS NULL → SET status='R'
-- Auto-reject: both a_conf_score < 0.3 AND b_conf_score < 0.3 → SET status='F'
-- Include consolidation/clarification counts in action items
+### 3.3 MCP Tools Added
 
-### Tables Activated
+**vector_search (all agents):**
+- `vector_search(agent_id, query_text, table, limit)` — embeds query and
+  KNN-cosines against target table's embedding column. Tables:
+  `components`, `attributions`, `unresolved`, `edges`. Returns
+  `{query_embedded: bool, results: [...]}` so callers can distinguish
+  "no matches" from "couldn't embed". Limit clamped to [1, 50].
+
+**Consolidation (SME-scoped writes + resolver):**
+- `nominate_consolidation(agent_id, component_a_id, component_b_id?, type, confidence, message)`
+  — SME-only, caller must own `component_a`. type='merge' requires
+  `component_b_id` owned by another SME; type='split' accepts `component_b_id=None`
+  (the child is spawned after resolver approval, Phase 4).
+- `respond_consolidation(agent_id, consolidation_id, confidence, message, new_status)`
+  — state-machine validated. Writes `a_conf_score` if caller is agent_a,
+  `b_conf_score` if caller is agent_b. Manual escalate to R is refused
+  unless `r_conf_score` is already set; first escalation goes through
+  the auto_transitions scanner.
+- `review_consolidation(agent_id, consolidation_id, r_confidence, message, new_status, mutation_assigned_to?)`
+  — resolver-only. Transitions R → B1/B2/F/M. M requires
+  `mutation_assigned_to`; split enforces it equals `agent_a`; merge
+  requires it be `agent_a` or `agent_b`.
+- `get_my_consolidations(agent_id)` — non-terminal rows where agent is
+  a participant. Resolvers see all non-terminal.
+- `get_consolidation_thread(agent_id, consolidation_id, page, limit)`
+  — paginated thread, scoped to participants + resolver.
+
+**Clarification (all agents):**
+- `create_clarification(asker, responder, question)` — responder can be
+  any agent or literal `'admin'`. Inserts row (status=B2) + initial
+  question comm.
+- `respond_clarification(agent_id, clarification_id, message, new_status)`
+  — state-machine validated per role (asker/responder).
+- `get_my_clarifications(agent_id)` — non-terminal rows where agent is
+  asker or responder.
+- `get_clarification_thread(agent_id, clarification_id, page, limit)`
+  — paginated thread, scoped to asker + responder.
+
+All respond writes stamp `metadata.state_transition = {from, to}` on
+the communication row (mirrors `respond_task` from Phase 1), which
+powers the admin UI's per-message state pills.
+
+### 3.4 Auto-transitions (verified)
+`trigger_management/scanners/auto_transitions.py`:
+- `a_conf_score >= 0.85 AND b_conf_score >= 0.85 AND r_conf_score IS NULL` →
+  set `status='R'`.
+- `a_conf_score <= 0.3 AND b_conf_score <= 0.3` → set `status='F'`.
+Scanner called once per `trigger_loop.run_once` cycle.
+
+### 3.5 Admin UI detail views
+`/api/consolidation/:id` and `/api/clarification/:id` already returned
+`{row, thread}` from Phase 2.4; the FE replaced the JSON pre-dump with
+structured renderers:
+- Consolidation: status badge, nomination type, agent_a/b, component_a/b,
+  three color-coded confidence pills (A/B/R with high / mid / low / null
+  bands), mutation POC when set, full thread with `state_transition`
+  pills on every response.
+- Clarification: status badge, asker, responder, full thread.
+- CSS cache-bust `?v=14`.
+
+### 3.6 SME prompt
+`sme.py` gained:
+- Explicit guidance to populate `component_doc_md` on every
+  `upsert_component` call (3–8 lines, what the component does +
+  key attributions + dependencies).
+- Evidence Ladder for consolidation confidence calibration — five bands
+  mapping observable signals (shared deploy manifest, shared DB conn
+  string, shared hostname, shared repo path, name similarity) to
+  confidence ranges.
+- Updated consolidation tool contracts to match the implementation.
+
+### 3.7 Tests
+- `tests/mcp_tools/test_component_doc_md.py` (4)
+- `tests/mcp_tools/test_consolidation.py` (16)
+- `tests/mcp_tools/test_clarification.py` (11)
+- `tests/mcp_tools/test_auto_transitions_phase3.py` (3)
+- `tests/mcp_tools/test_vector_search.py` (5)
+- conftest `clean_tables` now wipes consolidations / clarifications /
+  unresolved / edges / attributions (prior gap).
+- `tests/test_agent_types.py` pre-existing `bash` → `Bash` case fix.
+
+### 3.8 Latent bug caught en passant
+`action_items._count_unacked_broadcasts` + `_get_unacked_broadcast_details`
+were still querying `to_agent` for broadcast targets, which has been
+NULL for broadcasts since the Phase 2.4 split to `to_agent_type`. Fixed
++ forward-only scoping (`is_persistent OR created_at > agent.created_at`)
+applied to match the other broadcast readers.
+
+### Tables activated
 - consolidations, clarifications
+- embedding columns on components / attributions / edges / unresolved
+  are now populated at write time (were NULL through Phase 2)
 
 ---
 

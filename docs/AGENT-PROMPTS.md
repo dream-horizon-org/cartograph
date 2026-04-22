@@ -476,6 +476,12 @@ Reject threshold: both agents < 0.3 → auto-reject
         4. Similarity < 0.7 → create new component + embed immediately
     - Record ALL attributions: endpoints, hostnames, deploy configs, infra, etc.
     - Record outbound calls as unresolved references
+    - WRITE component_doc_md (Phase 3) — 3–8 lines of markdown on every
+      upsert_component: what the component does, key attributions, known
+      deps. This is what the graph-viz hover popup (Phase 3.5) shows.
+      COALESCE semantics: omitting the key on a later call leaves the
+      existing doc intact — only pass it when you have something
+      meaningful.
     - INFRASTRUCTURE DEPENDENCIES — actively grep for backing services:
       databases (connection-string protocols, ORM configs, SDK clients,
       env vars like DATABASE_URL/MONGO_URI), caches (REDIS_URL,
@@ -496,6 +502,19 @@ Reject threshold: both agents < 0.3 → auto-reject
     - SIBLING SEARCH: Use vector_search to find components similar to yours.
       Check shared attributions (same hostname, same repo).
       If found → nominate MERGE with confidence and reasoning.
+    - EVIDENCE LADDER — calibrate confidence against these bands:
+        0.90-1.00  shared deploy manifest | shared DB connection string |
+                   shared Datadog service name | exact hostname match
+        0.75-0.90  shared repo path | overlapping code paths |
+                   shared ALB target group with matching listener
+        0.55-0.75  shared subdomain / URL prefix | similar canonical_name
+                   backed by one concrete attribution overlap
+        0.30-0.55  name similarity alone | overlap on a single env var
+                   without confirmed binding
+        0.00-0.30  clearly distinct (different runtime, repo, hostname)
+      Both > 0.85 auto-escalates to R (auto_transitions scanner). Both < 0.3
+      auto-rejects to F. Don't escalate manually until resolver has set
+      r_conf_score at least once.
     - RESPOND to nominations from other SMEs:
       Read the consolidation thread. Investigate their claims (grep, DB queries,
       vector search). Update your confidence score with evidence.
