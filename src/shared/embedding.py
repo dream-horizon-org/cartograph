@@ -1,15 +1,21 @@
 """Embedding client for Cartograph.
 
-Writes vector(1536) embeddings at the same moment we write the row, via
-OpenAI's `text-embedding-3-small` model. No batch pipeline.
+Writes vector(EMBEDDING_DIMS) embeddings at row-write time via a LOCAL
+Ollama instance (default `mxbai-embed-large`, 1024d, Metal-accelerated
+on Apple Silicon). No network egress, no API key, no rate limits. Warm
+embed latency ~40-60ms on M-series.
 
 Design notes:
-- Graceful degrade when `OPENAI_API_KEY` is unset: the helper returns `None`
-  and callers write the row with `embedding=NULL`. vector_search on such
-  rows won't match anything, but writes don't fail.
+- Graceful degrade when Ollama is unreachable or the model isn't pulled:
+  the helper returns `None` and callers write the row with
+  `embedding=NULL`. vector_search on such rows won't match anything,
+  but writes don't fail.
 - Uses stdlib `urllib` (no extra dependency) — one POST per embed call.
-- Caller is responsible for building the embed text; this module handles
-  transport + model config only.
+- Caller builds the embed text; this module handles transport + model
+  config only.
+- Ollama's `/api/embeddings` endpoint auto-loads the model on first call
+  (~1s cold-start). Callers that care about latency should call
+  `warmup()` at service boot.
 """
 
 from __future__ import annotations
@@ -24,11 +30,11 @@ from shared import config
 
 log = logging.getLogger(__name__)
 
-_OPENAI_URL = "https://api.openai.com/v1/embeddings"
+_EMBED_PATH = "/api/embeddings"
 
 
 def embed_text(text: str) -> Optional[list[float]]:
-    """Return a 1536-d float list, or None on missing key / API failure.
+    """Return a list of floats sized EMBEDDING_DIMS, or None on failure.
 
     Callers must tolerate None and write `embedding=NULL`. They should NOT
     raise or block — embeddings are a lookup accelerator, not a durability
@@ -36,35 +42,61 @@ def embed_text(text: str) -> Optional[list[float]]:
     """
     if not text or not text.strip():
         return None
-    if not config.OPENAI_API_KEY:
-        log.debug("embed_text: OPENAI_API_KEY unset, skipping")
-        return None
 
-    body = json.dumps({"input": text, "model": config.EMBEDDING_MODEL}).encode()
+    url = config.OLLAMA_URL.rstrip("/") + _EMBED_PATH
+    body = json.dumps({"model": config.EMBEDDING_MODEL, "prompt": text}).encode()
     req = urllib.request.Request(
-        _OPENAI_URL,
+        url,
         data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {config.OPENAI_API_KEY}",
-        },
+        headers={"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             resp = json.loads(r.read().decode())
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        log.warning("embed_text failed: %s", exc)
+        log.warning("embed_text failed (Ollama @ %s): %s", config.OLLAMA_URL, exc)
         return None
 
-    try:
-        vec = resp["data"][0]["embedding"]
-    except (KeyError, IndexError, TypeError):
+    vec = resp.get("embedding")
+    if not isinstance(vec, list):
         log.warning("embed_text: unexpected response shape: %s", resp)
         return None
     if len(vec) != config.EMBEDDING_DIMS:
-        log.warning("embed_text: got %d dims, expected %d", len(vec), config.EMBEDDING_DIMS)
+        log.warning(
+            "embed_text: got %d dims, expected %d — schema and model mismatch "
+            "(check CARTOGRAPH_EMBEDDING_DIMS and CARTOGRAPH_EMBEDDING_MODEL)",
+            len(vec),
+            config.EMBEDDING_DIMS,
+        )
         return None
     return vec
+
+
+def warmup() -> bool:
+    """Fire a throwaway embed so the model is loaded into GPU memory.
+
+    Ollama lazy-loads the model on first /api/embeddings call (~1s on
+    M-series). Calling this at MCP server boot means the first real
+    write/search doesn't eat the cold-start latency.
+
+    Returns True if the warm call succeeded, False otherwise. Non-fatal
+    either way — the MCP server starts regardless.
+    """
+    vec = embed_text("warmup")
+    ok = vec is not None
+    if ok:
+        log.info(
+            "Embedding warmup OK: model=%s dims=%d", config.EMBEDDING_MODEL, len(vec)
+        )
+    else:
+        log.warning(
+            "Embedding warmup FAILED (Ollama unreachable or model not pulled). "
+            "Writes will proceed with embedding=NULL and vector_search will "
+            "return query_embedded=False. Install/start Ollama and "
+            "`ollama pull %s` to enable.",
+            config.EMBEDDING_MODEL,
+        )
+    return ok
 
 
 def vector_literal(vec: Optional[list[float]]) -> Optional[str]:

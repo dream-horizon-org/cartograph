@@ -526,7 +526,7 @@ Embeddings generated at write time via `cartograph-db` MCP. No batch step.
 
 Lookup protocol: exact match first → vector fallback (>0.85 match, 0.7-0.85 hint, <0.7 create new).
 
-Model: `text-embedding-3-small` (1536 dims). All in pgvector.
+Model: **`mxbai-embed-large` via local Ollama** (1024 dims, Metal-accelerated on Apple Silicon). Warm embed ~40-60ms per call; no API key, no network egress. Configurable via `CARTOGRAPH_EMBEDDING_MODEL` + `CARTOGRAPH_EMBEDDING_DIMS` + `CARTOGRAPH_OLLAMA_URL`. Schema migration flips `vector(N)` automatically on boot if the configured dim differs.
 
 ---
 

@@ -9,9 +9,13 @@ DB_NAME = os.getenv("CARTOGRAPH_DB_NAME", "cartograph")
 DB_USER = os.getenv("CARTOGRAPH_DB_USER", "cartograph")
 DB_PASSWORD = os.getenv("CARTOGRAPH_DB_PASSWORD", "cartograph")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-EMBEDDING_MODEL = os.getenv("CARTOGRAPH_EMBEDDING_MODEL", "text-embedding-3-small")
-EMBEDDING_DIMS = 1536
+# Embedding: Ollama runs locally on Apple Silicon (Metal GPU), no API key
+# needed. `mxbai-embed-large` is a 1024d top-tier English embedder and is
+# the default; override with CARTOGRAPH_EMBEDDING_MODEL if you pull a
+# different one. Warm embed latency ~40-60ms on M-series.
+OLLAMA_URL = os.getenv("CARTOGRAPH_OLLAMA_URL", "http://localhost:11434")
+EMBEDDING_MODEL = os.getenv("CARTOGRAPH_EMBEDDING_MODEL", "mxbai-embed-large")
+EMBEDDING_DIMS = int(os.getenv("CARTOGRAPH_EMBEDDING_DIMS", "1024"))
 
 TRIGGER_POLL_INTERVAL = float(os.getenv("CARTOGRAPH_TRIGGER_POLL_INTERVAL", "2.0"))
 HEARTBEAT_TIMEOUT = int(os.getenv("CARTOGRAPH_HEARTBEAT_TIMEOUT", "300"))

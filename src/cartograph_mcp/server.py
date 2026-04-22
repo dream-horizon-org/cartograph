@@ -1076,6 +1076,14 @@ def main() -> None:
     """
     init_pool()
     run_migrations()
+
+    # Load the Ollama embedding model into GPU memory so the first real
+    # MCP call doesn't eat the ~1s cold-start latency. Non-fatal if
+    # Ollama is down — the server boots, writes still land with
+    # embedding=NULL, and vector_search returns query_embedded=False.
+    from shared import embedding as _emb
+    _emb.warmup()
+
     # Count live @mcp.tool() registrations instead of maintaining a
     # hand-written list (which drifts — was stale through Phase 3).
     tool_names = sorted(mcp._tool_manager._tools.keys())

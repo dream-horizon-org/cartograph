@@ -1,6 +1,51 @@
 """Database migrations — creates all tables from SCHEMA.md."""
 
+from shared import config
 from shared.db import get_pool
+
+
+_EMBEDDING_TABLES = [
+    ("components",   "idx_comp_embedding"),
+    ("attributions", "idx_attr_embedding"),
+    ("edges",        "idx_edge_embedding"),
+    ("unresolved",   "idx_unres_embedding"),
+]
+
+
+def _migrate_embedding_dims(cur, target_dim: int) -> None:
+    """Flip embedding columns to target_dim if they're on a different dim.
+
+    pgvector stores dim in `pg_attribute.atttypmod`. Read it to decide
+    whether a migration is needed. Drops HNSW indexes first (operator
+    class is dim-specific), nulls existing embeddings, alters the column,
+    then rebuilds HNSW.
+    """
+    for table, idx_name in _EMBEDDING_TABLES:
+        cur.execute(
+            """SELECT a.atttypmod
+               FROM pg_attribute a
+               JOIN pg_class c ON c.oid = a.attrelid
+               WHERE c.relname = %s AND a.attname = 'embedding'""",
+            (table,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            # table or column doesn't exist; nothing to migrate
+            continue
+        current_dim = row["atttypmod"]
+        # pgvector's typmod IS the dim for a pure vector(N) column
+        if current_dim == target_dim:
+            continue
+        # Rare path: embedded data would be lost. Document + proceed.
+        cur.execute(f"DROP INDEX IF EXISTS {idx_name}")
+        cur.execute(f"UPDATE {table} SET embedding = NULL")
+        cur.execute(
+            f"ALTER TABLE {table} ALTER COLUMN embedding TYPE vector({target_dim})"
+        )
+        cur.execute(
+            f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} "
+            f"USING hnsw (embedding vector_cosine_ops)"
+        )
 
 
 def run_migrations() -> None:
@@ -348,6 +393,17 @@ def run_migrations() -> None:
             cur.execute(
                 "ALTER TABLE components ADD COLUMN IF NOT EXISTS component_doc_md TEXT"
             )
+
+            # Phase 3.7: switch embeddings from OpenAI text-embedding-3-small
+            # (1536d) to local Ollama mxbai-embed-large (1024d). Runs on the
+            # Apple Silicon GPU via Metal — no API key, no egress, faster.
+            # Idempotent: only runs the flip when columns are still 1536d.
+            # Safe to drop existing embeddings because none of them had
+            # content — we never had an OPENAI_API_KEY set in production,
+            # so every embedding column is NULL. If that changes in the
+            # future, this block must be replaced with a re-embed pipeline
+            # rather than a destructive alter.
+            _migrate_embedding_dims(cur, target_dim=config.EMBEDDING_DIMS)
 
             # Rejected resources are tombstones — they must not block
             # re-upsert of a row with the same (plane, resource_type,

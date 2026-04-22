@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-22):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · **Phase 3.5 ✅** (graph viz with 3d-force-graph).
-- **58 MCP tools** registered · **246 tests** passing.
+**Status (2026-04-22):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 ✅ (graph viz with 3d-force-graph) · **Phase 3.7 ✅** (local embeddings via Ollama + Metal, 1024d).
+- **58 MCP tools** registered · **254 tests** passing.
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 
 ---
@@ -572,6 +572,65 @@ existing CDN-loaded `marked` and `DOMPurify`).
 `conftest.clean_tables` for admin UI now wipes components / attributions
 / edges / RCA / resources to avoid cross-test leakage (same gap fix as
 mcp_tools/conftest).
+
+---
+
+## Phase 3.7: Local embeddings via Ollama ✅
+
+Replaced the remote OpenAI embedder with a local Ollama instance so the
+embedding path has no API key, no network egress, and no rate limits —
+and runs on the Apple Silicon GPU via Metal.
+
+### Why
+- Production had no `OPENAI_API_KEY` set → every `vector_search` call
+  returned `{query_embedded: false, results: []}` and every embedding
+  column was NULL. The SME materialisation similarity ladder collapsed
+  to "always create new", breaking dedup before it even started.
+- Local inference on M-series is ~40-60ms warm (vs 150-300ms for OpenAI
+  round-trips) and doesn't care about internet weather.
+
+### Model
+- Default: `mxbai-embed-large` (1024 dims). Top-of-MTEB-board for
+  English in its size class, 335M params, ~670MB on disk.
+- Override via `CARTOGRAPH_EMBEDDING_MODEL` + `CARTOGRAPH_EMBEDDING_DIMS`
+  if you prefer something else (e.g. `nomic-embed-text` at 768d).
+
+### Changes
+- `shared/embedding.py`: swapped `https://api.openai.com/v1/embeddings`
+  POST for `http://localhost:11434/api/embeddings` (Ollama). Kept the
+  graceful-degrade contract — if Ollama is unreachable or the model
+  isn't pulled, `embed_text` returns None, writes land with
+  `embedding=NULL`, `vector_search` returns `query_embedded=False`.
+- `shared/embedding.py::warmup()`: new helper. Fires a throwaway embed
+  at MCP server boot so the first real call doesn't eat the ~1s
+  cold-start. Called from `cartograph_mcp.server.main()`.
+- `shared/config.py`: `OLLAMA_URL`, `EMBEDDING_MODEL=mxbai-embed-large`,
+  `EMBEDDING_DIMS=1024`. Dropped `OPENAI_API_KEY`.
+- `shared/migrations.py::_migrate_embedding_dims()`: reads each table's
+  current vector dim via `pg_attribute.atttypmod`. If it differs from
+  `config.EMBEDDING_DIMS`, drops the HNSW index, NULLs the column,
+  ALTERs to the target dim, rebuilds HNSW. Idempotent across boots.
+  Destructive-of-embeddings, but embeddings on prod were all NULL so
+  no data lost. Future dim flips (if a better model ships) will need
+  a re-embed pass, not a blind migration.
+
+### Operational
+- `brew install ollama && brew services start ollama`
+- `ollama pull mxbai-embed-large` (one-time, ~670MB).
+- MCP server restart → `run_migrations` flips the vector dims +
+  `warmup` loads the model.
+
+### Tests
+- `test_vector_search.py` updated: 5 structural tests (mostly
+  graceful-degrade behaviour when Ollama is unreachable) + 1 live
+  end-to-end test that's `@skipif` when Ollama isn't running.
+
+### Deferred
+- Re-embed pipeline for existing rows (none on prod right now, so
+  not urgent).
+- Batched embedding for bulk writes (e.g. `upsert_attributions_bulk`).
+  One-at-a-time is fine at current scale; revisit if SME materialisation
+  latency becomes a bottleneck.
 
 ---
 
