@@ -4,7 +4,7 @@ Writes are SME-scoped (enforced via agent_runs + resource_component_agents):
   - upsert_component: create or update the SME's single component, filling
     the RCA reservation row (component_id=NULL → component_id=<new>).
     Enforces the "1 active component per SME" invariant; split/merge go
-    through the consolidation pipeline (Phase 3).
+    through the consolidation pipeline.
   - upsert_attribution: only on the SME's own component.
   - create_edge: only where the SME owns source_id.
   - insert_unresolved: only where the SME owns found_in_component_id.
@@ -14,14 +14,16 @@ Writes are SME-scoped (enforced via agent_runs + resource_component_agents):
 Reads are open to every active agent:
   - get_component, get_attributions, get_edges, get_unresolved.
 
-Embeddings: columns left NULL at write time. Embedding pipeline lands in
-Phase 3 prep alongside vector_search.
+Embeddings are written inline at row-write time via shared.embedding. If
+OPENAI_API_KEY is unset or the API errors, the write still succeeds —
+embedding is stored NULL and vector_search simply won't surface that row.
 """
 
 from __future__ import annotations
 
 import json
 
+from shared import embedding as emb
 from shared.db import execute, execute_one, execute_mutate, execute_returning
 
 
@@ -88,6 +90,7 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
     component_type = (component_data.get("component_type") or "").strip()
     confidence = float(component_data.get("confidence", 1.0))
     metadata = component_data.get("metadata") or {}
+    component_doc_md = component_data.get("component_doc_md")
 
     if not canonical_name:
         raise ValueError("canonical_name is required")
@@ -100,6 +103,10 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
         )
     if not (0.0 <= confidence <= 1.0):
         raise ValueError("confidence must be in [0.0, 1.0]")
+
+    vec = emb.vector_literal(emb.embed_text(
+        emb.component_embed_text(canonical_name, display_name, component_type, metadata)
+    ))
 
     # Does this SME already own an active component? (any RCA row linked
     # to a non-decommissioned component). If yes → UPDATE path on that one.
@@ -120,13 +127,16 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
                    component_type = %s,
                    confidence = %s,
                    metadata = %s::jsonb,
+                   component_doc_md = COALESCE(%s, component_doc_md),
+                   embedding = %s::vector,
                    scanned_at = now(),
                    updated_at = now()
                WHERE id = %s
                RETURNING *""",
             (
                 canonical_name, display_name, component_type, confidence,
-                json.dumps(metadata), owned["component_id"],
+                json.dumps(metadata), component_doc_md, vec,
+                owned["component_id"],
             ),
         )
         if row is None:
@@ -166,10 +176,14 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
 
     new_component = execute_returning(
         """INSERT INTO components
-           (canonical_name, display_name, component_type, confidence, metadata, scanned_at)
-           VALUES (%s, %s, %s, %s, %s::jsonb, now())
+           (canonical_name, display_name, component_type, confidence, metadata,
+            component_doc_md, embedding, scanned_at)
+           VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s::vector, now())
            RETURNING *""",
-        (canonical_name, display_name, component_type, confidence, json.dumps(metadata)),
+        (
+            canonical_name, display_name, component_type, confidence,
+            json.dumps(metadata), component_doc_md, vec,
+        ),
     )
     execute_mutate(
         """UPDATE resource_component_agents
@@ -229,20 +243,24 @@ def upsert_attribution(agent_id: str, component_id: str, attribution_data: dict)
             "reassignment requires consolidation (Phase 3)."
         )
 
+    vec = emb.vector_literal(emb.embed_text(
+        emb.attribution_embed_text(resource_type, identifier)
+    ))
     row = execute_returning(
         """INSERT INTO attributions
            (component_id, plane, resource_type, identifier, evidence, confidence,
-            metadata, discovered_by, last_seen_at)
-           VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, now())
+            metadata, embedding, discovered_by, last_seen_at)
+           VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector, %s, now())
            ON CONFLICT (plane, resource_type, identifier) DO UPDATE
              SET evidence = EXCLUDED.evidence,
                  confidence = EXCLUDED.confidence,
                  metadata = EXCLUDED.metadata,
+                 embedding = EXCLUDED.embedding,
                  last_seen_at = now()
            RETURNING *""",
         (
             component_id, plane, resource_type, identifier, evidence,
-            confidence, json.dumps(metadata), agent_id,
+            confidence, json.dumps(metadata), vec, agent_id,
         ),
     )
     return row
@@ -285,16 +303,20 @@ def create_edge(agent_id: str, edge_data: dict) -> dict:
             "You can only create edges FROM your own component."
         )
 
+    vec = emb.vector_literal(emb.embed_text(
+        emb.edge_embed_text(edge_type, identifier)
+    ))
     row = execute_returning(
         """INSERT INTO edges
            (source_id, target_id, edge_type, identifier, source_attr_id,
-            target_attr_id, evidence, confidence, metadata, discovered_by,
-            last_seen_at)
-           VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s, now())
+            target_attr_id, evidence, confidence, metadata, embedding,
+            discovered_by, last_seen_at)
+           VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::vector, %s, now())
            ON CONFLICT (source_id, target_id, edge_type, identifier) DO UPDATE
              SET evidence = EXCLUDED.evidence,
                  confidence = EXCLUDED.confidence,
                  metadata = EXCLUDED.metadata,
+                 embedding = EXCLUDED.embedding,
                  source_attr_id = EXCLUDED.source_attr_id,
                  target_attr_id = EXCLUDED.target_attr_id,
                  last_seen_at = now()
@@ -302,7 +324,7 @@ def create_edge(agent_id: str, edge_data: dict) -> dict:
         (
             source_id, target_id, edge_type, identifier,
             source_attr_id, target_attr_id,
-            json.dumps(evidence), confidence, json.dumps(metadata), agent_id,
+            json.dumps(evidence), confidence, json.dumps(metadata), vec, agent_id,
         ),
     )
     return row
@@ -332,15 +354,18 @@ def insert_unresolved(agent_id: str, unresolved_data: dict) -> dict:
             f"SME {agent_id} does not own component {found_in_component_id}."
         )
 
+    vec = emb.vector_literal(emb.embed_text(
+        emb.unresolved_embed_text(reference_type, reference_value)
+    ))
     row = execute_returning(
         """INSERT INTO unresolved
            (found_in_component_id, reference_type, reference_value, context,
-            found_by_agent)
-           VALUES (%s, %s, %s, %s::jsonb, %s)
+            embedding, found_by_agent)
+           VALUES (%s, %s, %s, %s::jsonb, %s::vector, %s)
            RETURNING *""",
         (
             found_in_component_id, reference_type, reference_value,
-            json.dumps(context), agent_id,
+            json.dumps(context), vec, agent_id,
         ),
     )
     return row
