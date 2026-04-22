@@ -343,6 +343,12 @@ def run_migrations() -> None:
                 "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS sleep_until TIMESTAMPTZ"
             )
 
+            # Phase 3: SME-authored human-readable component doc rendered
+            # in the graph-viz hover popup. Markdown; nullable.
+            cur.execute(
+                "ALTER TABLE components ADD COLUMN IF NOT EXISTS component_doc_md TEXT"
+            )
+
             # Persistent broadcasts (Phase 2.5). Normal broadcasts are
             # forward-only — they apply to agents that exist at broadcast
             # time. is_persistent=TRUE means "this policy applies to future

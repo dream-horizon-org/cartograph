@@ -42,6 +42,8 @@ CREATE TABLE components (
     split_from_component_id UUID REFERENCES components(id) ON DELETE SET NULL,
                                                  -- if this component was born from a split, points to parent
     split_briefing  TEXT,                        -- briefing doc from parent explaining what this component is
+    component_doc_md TEXT,                       -- SME-authored markdown component doc (Phase 3).
+                                                 -- Rendered in graph-viz hover popup (Phase 3.5).
     scanned_at      TIMESTAMPTZ,                -- last time an SME analysed this
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
