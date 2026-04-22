@@ -3,6 +3,7 @@
 import logging
 import time
 
+from agent_management.db import release_stale_locks_on_sleeping
 from shared.db import execute, execute_returning
 from trigger_management.scanners import (
     chats,
@@ -59,11 +60,18 @@ def prioritise(agents: list[dict]) -> list[dict]:
 
 
 def try_lock_agent(agent_id: str) -> bool:
-    """Atomically set trigger_lock=TRUE. Returns True if lock was acquired."""
+    """Atomically set trigger_lock=TRUE. Returns True if lock was acquired.
+
+    Sleep filter is duplicated here (also in get_idle_agents) to close the
+    race where sleep_self fires between the scanner's idle-read and this
+    write. Without it, the first wake after a sleep_self call can slip
+    through and fire a spurious invocation.
+    """
     row = execute_returning(
         """UPDATE agent_runs
            SET trigger_lock = TRUE, updated_at = now()
            WHERE agent_id = %s AND status = 'idle' AND trigger_lock = FALSE
+             AND (sleep_until IS NULL OR sleep_until <= now())
            RETURNING agent_id""",
         (agent_id,),
     )
@@ -81,6 +89,13 @@ def run_once() -> int:
     recovered = recovery.run_recovery()
     if recovered > 0:
         logger.info("Recovered %d errored agent(s) this cycle", recovered)
+
+    # 1c. Release any trigger_lock=TRUE sitting on a sleeping agent
+    # (sleep_self fired after the lock was taken; we should not hold
+    # the lock through the sleep window).
+    released = release_stale_locks_on_sleeping()
+    if released > 0:
+        logger.info("Released %d stale trigger_lock on sleeping agent(s)", released)
 
     # 2. Get all idle, unlocked agents
     idle_agents = get_idle_agents()

@@ -229,6 +229,12 @@ def pickup_next_locked_agent_of_type(agent_type: str) -> dict | None:
 
     Priority within type: lower invocation_count first (fair spread).
 
+    Sleep filter is applied here too: if trigger_lock=TRUE was set before
+    sleep_self fired, we must NOT pick the agent up — that would wake it
+    mid-sleep. The locked-while-sleeping tombstone is cleaned up by
+    release_stale_locks_on_sleeping below so the row doesn't sit forever
+    with trigger_lock=TRUE.
+
     Transitions the claimed row:
       trigger_lock=TRUE → status='running', trigger_lock=FALSE,
       invocation_count += 1, heartbeat=now().
@@ -245,12 +251,36 @@ def pickup_next_locked_agent_of_type(agent_type: str) -> dict | None:
            WHERE agent_id = (
              SELECT agent_id FROM agent_runs
              WHERE agent_type = %s AND trigger_lock = TRUE
+               AND (sleep_until IS NULL OR sleep_until <= now())
              ORDER BY invocation_count ASC
              LIMIT 1
              FOR UPDATE SKIP LOCKED
            )
            RETURNING *""",
         (agent_type,),
+    )
+
+
+def release_stale_locks_on_sleeping() -> int:
+    """Clear trigger_lock on any idle agent that is currently sleeping.
+
+    Closes the race where the trigger scanner set trigger_lock=TRUE just
+    before sleep_self fired — without this, the lock would sit until the
+    sleep expired (harmless but misleading in the admin UI). Also returns
+    the row to a clean scannable state so new pending items don't stack
+    up behind a stale lock.
+
+    Called by the trigger loop each cycle. Returns the number of locks
+    released.
+    """
+    return execute_mutate(
+        """UPDATE agent_runs
+           SET trigger_lock = FALSE, updated_at = now()
+           WHERE trigger_lock = TRUE
+             AND status = 'idle'
+             AND sleep_until IS NOT NULL
+             AND sleep_until > now()""",
+        (),
     )
 
 
