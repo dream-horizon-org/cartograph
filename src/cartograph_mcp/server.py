@@ -1076,25 +1076,14 @@ def main() -> None:
     """
     init_pool()
     run_migrations()
-    logger.info("Cartograph MCP server starting on port 8100 (streamable-http)")
+    # Count live @mcp.tool() registrations instead of maintaining a
+    # hand-written list (which drifts — was stale through Phase 3).
+    tool_names = sorted(mcp._tool_manager._tools.keys())
     logger.info(
-        "Registered tools: get_action_items_summary, get_action_items_detail, "
-        "send_chat, ack_chats, get_unacked_chats, get_chat_history, "
-        "send_broadcast, ack_broadcast, get_unacked_broadcasts, "
-        "put_secret, get_secret, list_secrets_for_plane, delete_secret, "
-        "create_task, respond_task, raise_blocker, get_my_tasks, get_task_thread, "
-        "upsert_resource, upsert_resources_bulk, get_resource, "
-        "list_resources_for_plane, list_all_resources, get_resource_counts, "
-        "mark_resource_done, reject_resource, reject_resources_bulk, "
-        "bulk_spawn_smes, create_agent, list_agents, reset_agent, "
-        "decommission_agent, decommission_agents_bulk, "
-        "decommission_component, decommission_components_bulk, "
-        "sleep_self, bulk_sleep_agents, bulk_wake_agents, "
-        "upsert_component, upsert_attribution, create_edge, "
-        "insert_unresolved, resolve_reference, "
-        "get_component, get_attributions, get_edges, get_unresolved, "
-        "get_agent_notifications"
+        "Cartograph MCP server starting on port 8100 (streamable-http) — "
+        "%d tools registered", len(tool_names),
     )
+    logger.info("Registered tools: %s", ", ".join(tool_names))
     try:
         # FastMCP.run() with transport='streamable-http' serves at /mcp
         mcp.run(transport="streamable-http")
