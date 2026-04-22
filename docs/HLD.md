@@ -1256,11 +1256,16 @@ POST /api/broadcast
   Inserts communication (from_agent='admin', to_agent=NULL,
                          to_agent_type=<type>, type='broadcast').
   Admin short-circuits the need to ask orchestrator.
+
+GET /api/graph                        → {nodes, edges}   (Phase 3.5)
+  Nodes: active components with aggregated plane set + component_doc_md.
+  Edges: edges table (join filtered to active components on both sides).
+  One query per tab entry; no pagination (O(thousands) scale).
 ```
 
 ### 10.2 Frontend Behaviour
 
-Two tabs in the top nav: **Chat** (original) and **Communications** (new).
+Three tabs in the top nav: **Chat**, **Communications**, and **Graph**.
 
 Chat tab:
 - **Agent list panel:** fetched on load, refreshed every 5s. Now **grouped
@@ -1286,6 +1291,20 @@ Communications tab:
   blocker + the full thread with per-message state_transition pills.
 - **Broadcast button** in the top-right opens a dialog: pick target type
   + write message → admin broadcasts directly.
+
+Graph tab (Phase 3.5):
+- Two-panel grid: [sidebar | 3d-force-graph canvas].
+- **Sidebar**: plane legend, live component/edge counts, and a hover/click
+  panel that renders the hovered component's name, type, plane pills,
+  and `component_doc_md` (via marked + DOMPurify).
+- **Canvas**: 3d-force-graph (loaded from jsDelivr — same pattern as
+  marked/DOMPurify). Nodes = active components, colored by the set of
+  planes the component has attributions in (RGB-averaged blend when
+  multi-plane; grey when no attributions). Node size scales with plane
+  count. Links labelled `{edge_type}: {identifier}`.
+- Interactive physics: drag nodes → library-default settle behaviour
+  (no custom pause/resume wiring needed).
+- Single `GET /api/graph` fetch on tab entry; manual refresh button.
 
 ### 10.3 Why Direct DB Access (not MCP)
 

@@ -94,6 +94,63 @@ body {
   height: 100%;
 }
 
+/* Graph view (Phase 3.5): sidebar | canvas */
+#graph-view.active {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+}
+#graph-sidebar {
+  background: #161b22;
+  border-right: 1px solid #30363d;
+  padding: 14px 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#graph-sidebar header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+#graph-sidebar h2 { margin: 0; font-size: 14px; color: #c9d1d9; }
+#graph-sidebar h3 { margin: 0; font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+#graph-refresh {
+  background: transparent; color: #c9d1d9; border: 1px solid #30363d;
+  padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
+}
+.graph-legend {
+  font-size: 11px; color: #8b949e;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px;
+}
+.graph-legend div { display: flex; align-items: center; gap: 6px; }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+#graph-stats {
+  background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+  padding: 6px 8px; font-size: 12px; color: #c9d1d9;
+  display: flex; gap: 16px;
+}
+#graph-stats b { color: #8b949e; font-weight: normal; margin-right: 4px; }
+#graph-hover-doc {
+  font-size: 12px; color: #c9d1d9;
+  overflow-y: auto;
+}
+#graph-hover-doc hr { border: 0; border-top: 1px solid #30363d; margin: 8px 0; }
+.graph-node-head b { color: #c9d1d9; font-size: 13px; }
+.kv-row { display: flex; justify-content: space-between; font-size: 11px; color: #8b949e; margin-top: 2px; }
+.kv-row code { color: #c9d1d9; font-size: 11px; }
+.plane-pills { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+.plane-pill {
+  padding: 1px 7px; border-radius: 3px; font-size: 10px;
+  background: #30363d; color: #8b949e;
+}
+#graph-pane { position: relative; min-width: 0; }
+#graph-canvas {
+  width: 100%; height: 100%; background: #0d1117;
+}
+
 #sidebar {
   background: #161b22;
   border-right: 1px solid #30363d;

@@ -331,6 +331,38 @@ def create_app() -> FastAPI:
         )
         return {"clarification": row, "thread": thread}
 
+    # --- GRAPH VIEW (Phase 3.5) ---
+
+    @app.get("/api/graph")
+    def get_graph():
+        """Nodes = active components. Edges = edges table.
+
+        Each node carries its plane set (distinct planes from attributions)
+        and component_doc_md so the FE can render hover popups without a
+        second round-trip.
+        """
+        nodes = execute(
+            """SELECT c.id, c.canonical_name, c.display_name,
+                      c.component_type, c.status, c.component_doc_md,
+                      COALESCE(
+                        ARRAY_AGG(DISTINCT a.plane) FILTER (WHERE a.plane IS NOT NULL),
+                        ARRAY[]::text[]
+                      ) AS planes
+               FROM components c
+               LEFT JOIN attributions a ON a.component_id = c.id
+               WHERE c.status != 'decommissioned'
+               GROUP BY c.id
+               ORDER BY c.canonical_name"""
+        )
+        edges = execute(
+            """SELECT e.id, e.source_id, e.target_id, e.edge_type,
+                      e.identifier, e.confidence
+               FROM edges e
+               JOIN components cs ON cs.id = e.source_id AND cs.status != 'decommissioned'
+               JOIN components ct ON ct.id = e.target_id AND ct.status != 'decommissioned'"""
+        )
+        return {"nodes": nodes, "edges": edges}
+
     @app.post("/api/broadcast")
     def send_broadcast_from_admin(body: BroadcastBody):
         """Admin broadcasts to all agents of a type.

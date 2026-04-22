@@ -451,7 +451,9 @@ function switchTab(name) {
     b.classList.toggle('active', b.dataset.tab === name));
   document.getElementById('chat-view').classList.toggle('active', name === 'chat');
   document.getElementById('comms-view').classList.toggle('active', name === 'comms');
+  document.getElementById('graph-view').classList.toggle('active', name === 'graph');
   if (name === 'comms') fetchCommunications();
+  if (name === 'graph') initOrRefreshGraph();
 }
 
 // --- Communications list ---
@@ -846,3 +848,134 @@ async function _postWake(body) {
     alert(`Wake failed: ${e.message}`);
   }
 }
+
+// ============ GRAPH VIEW (Phase 3.5) ============
+//
+// 3d-force-graph renders components as nodes and edges from the edges table.
+// Node color is derived from the set of planes the component has attributions
+// in — HSL blend when multiple. Hovering or clicking a node shows its
+// component_doc_md (markdown) in the sidebar.
+
+const PLANE_COLORS = {
+  github:    '#3fb950',
+  deploy:    '#58a6ff',
+  cloud:     '#f85149',
+  telemetry: '#d2a8ff',
+  config:    '#d29922',
+};
+const NO_PLANE_COLOR = '#8b949e';
+
+let graphInstance = null;
+let graphLoadedOnce = false;
+
+function blendColors(hexColors) {
+  // Average RGB components. For 1 color, returns it unchanged; for N,
+  // gives a balanced blend. Good enough for the legend — users still see
+  // the exact plane set in the sidebar.
+  if (!hexColors.length) return NO_PLANE_COLOR;
+  if (hexColors.length === 1) return hexColors[0];
+  const rgb = hexColors.map(h => [
+    parseInt(h.slice(1, 3), 16),
+    parseInt(h.slice(3, 5), 16),
+    parseInt(h.slice(5, 7), 16),
+  ]);
+  const avg = [0, 1, 2].map(i =>
+    Math.round(rgb.reduce((s, c) => s + c[i], 0) / rgb.length));
+  return '#' + avg.map(v => v.toString(16).padStart(2, '0')).join('');
+}
+
+function nodeColor(planes) {
+  const colors = (planes || []).map(p => PLANE_COLORS[p]).filter(Boolean);
+  return blendColors(colors);
+}
+
+async function initOrRefreshGraph() {
+  if (typeof ForceGraph3D !== 'function') {
+    document.getElementById('graph-canvas').innerHTML =
+      '<p class="empty" style="padding:20px">3d-force-graph CDN failed to load. Check network.</p>';
+    return;
+  }
+  const res = await fetch('/api/graph');
+  if (!res.ok) {
+    document.getElementById('graph-canvas').innerHTML =
+      `<p class="empty" style="padding:20px">Graph fetch failed: ${res.status}</p>`;
+    return;
+  }
+  const data = await res.json();
+  document.getElementById('graph-comp-count').textContent = data.nodes.length;
+  document.getElementById('graph-edge-count').textContent = data.edges.length;
+
+  const gData = {
+    nodes: data.nodes.map(n => ({
+      id: n.id,
+      name: n.display_name || n.canonical_name,
+      canonical: n.canonical_name,
+      doc: n.component_doc_md,
+      type: n.component_type,
+      planes: n.planes,
+      color: nodeColor(n.planes),
+    })),
+    links: data.edges.map(e => ({
+      source: e.source_id,
+      target: e.target_id,
+      edge_type: e.edge_type,
+      identifier: e.identifier,
+    })),
+  };
+
+  const canvas = document.getElementById('graph-canvas');
+  if (!graphInstance) {
+    graphInstance = ForceGraph3D()(canvas)
+      .backgroundColor('#0d1117')
+      .nodeLabel(n => `${n.name} (${n.type})`)
+      .nodeColor(n => n.color)
+      .nodeVal(n => 5 + (n.planes?.length || 0) * 2)
+      .linkColor(() => 'rgba(201, 209, 217, 0.4)')
+      .linkDirectionalArrowLength(3)
+      .linkDirectionalArrowRelPos(1)
+      .linkLabel(l => `${l.edge_type}: ${l.identifier}`)
+      .onNodeHover(n => showGraphHoverDoc(n))
+      .onNodeClick(n => showGraphHoverDoc(n));
+  }
+  graphInstance.graphData(gData);
+
+  // Resize the canvas to its container on first render (fresh tab).
+  if (!graphLoadedOnce) {
+    setTimeout(() => {
+      graphInstance.width(canvas.clientWidth).height(canvas.clientHeight);
+    }, 50);
+    graphLoadedOnce = true;
+  }
+}
+
+function showGraphHoverDoc(node) {
+  const $doc = document.getElementById('graph-hover-doc');
+  if (!node) {
+    $doc.innerHTML = '<p class="empty">Hover or click a component in the graph to see its doc.</p>';
+    return;
+  }
+  const planes = (node.planes || []).length
+    ? node.planes.map(p => `<span class="plane-pill" style="background:${PLANE_COLORS[p] || NO_PLANE_COLOR}22;color:${PLANE_COLORS[p] || NO_PLANE_COLOR}">${p}</span>`).join('')
+    : '<span class="plane-pill">no attributions</span>';
+  const doc = node.doc ? renderMarkdown(node.doc) : '<p class="empty">No doc written yet — SME will populate on next materialisation.</p>';
+  $doc.innerHTML = `
+    <div class="graph-node-head">
+      <b>${escapeHtml(node.name)}</b>
+      <div class="kv-row"><span>canonical</span><code>${escapeHtml(node.canonical)}</code></div>
+      <div class="kv-row"><span>type</span><code>${escapeHtml(node.type)}</code></div>
+      <div class="plane-pills">${planes}</div>
+    </div>
+    <hr>
+    ${doc}
+  `;
+}
+
+document.getElementById('graph-refresh')?.addEventListener('click', initOrRefreshGraph);
+
+// Resize graph if window resizes and graph tab is visible.
+window.addEventListener('resize', () => {
+  if (graphInstance && document.getElementById('graph-view').classList.contains('active')) {
+    const canvas = document.getElementById('graph-canvas');
+    graphInstance.width(canvas.clientWidth).height(canvas.clientHeight);
+  }
+});

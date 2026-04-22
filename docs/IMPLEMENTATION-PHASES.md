@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-22):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · **Phase 3 ✅** (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 (graph viz) pending.
-- **58 MCP tools** registered · **242 tests** passing.
+**Status (2026-04-22):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · **Phase 3.5 ✅** (graph viz with 3d-force-graph).
+- **58 MCP tools** registered · **246 tests** passing.
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 
 ---
@@ -507,6 +507,71 @@ applied to match the other broadcast readers.
 - consolidations, clarifications
 - embedding columns on components / attributions / edges / unresolved
   are now populated at write time (were NULL through Phase 2)
+
+---
+
+## Phase 3.5: Graph Viz ✅
+
+Interactive 3D force-directed graph of components + dependencies, served
+from the admin UI. Nothing new on the agent side — the graph is a
+read-only visualisation of the data SMEs write via Phase 2/3 tools.
+
+### Components
+
+**Backend** (`admin_ui/server.py`): new `GET /api/graph` endpoint.
+```json
+{
+  "nodes": [{id, canonical_name, display_name, component_type,
+             status, component_doc_md, planes: [plane, ...]}],
+  "edges": [{id, source_id, target_id, edge_type, identifier, confidence}]
+}
+```
+Nodes aggregate distinct planes per component via a LEFT JOIN on
+attributions. Decommissioned components and edges to/from them are
+filtered out. Single query per request; no pagination (component count
+expected to stay in the low thousands).
+
+**Frontend:** new **Graph** tab in the top nav, sitting beside Chat +
+Communications. Uses `3d-force-graph@1.73.4` from jsDelivr (pure JS,
+bundles three.js + three-forcegraph internally — consistent with the
+existing CDN-loaded `marked` and `DOMPurify`).
+
+- Node color per plane (github/deploy/cloud/telemetry/config). Multi-
+  plane components get an RGB-averaged blend so components with
+  attributions across planes stand out visually. Components without any
+  attributions render grey.
+- Node size scales with plane count — more planes = bigger node.
+- Link label: `{edge_type}: {identifier}`.
+- Hover or click a node → sidebar renders:
+  - Canonical name + display name + component type
+  - Plane pills (same color key as nodes)
+  - `component_doc_md` rendered through the existing `marked` +
+    `DOMPurify` pipeline (reused from the chat view)
+- Sidebar legend + live counts of components / edges.
+- Interactive physics: drag a node → it bounces/jiggles/settles (library
+  default — no custom pause/resume logic). Zoom via scroll, orbit via
+  left-drag, pan via right-drag.
+
+### Files touched
+- `src/admin_ui/server.py` — new `/api/graph` endpoint.
+- `src/admin_ui/static/index.html` — Graph tab, graph view, CDN script.
+- `src/admin_ui/static/app.js` — `switchTab` handles 'graph';
+  `initOrRefreshGraph()`, `blendColors()`, `nodeColor()`,
+  `showGraphHoverDoc()`; window resize handler.
+- `src/admin_ui/static/style.css` — `#graph-view.active` grid,
+  sidebar styling, legend dots, plane pills, canvas fill.
+- Cache-bust bumped to `?v=15`.
+
+### Tests
+`tests/admin_ui/test_graph_endpoint.py` (4):
+- empty graph
+- components + edges returned with component_doc_md
+- plane aggregation across multiple attributions per component
+- decommissioned components + their edges excluded from both lists
+
+`conftest.clean_tables` for admin UI now wipes components / attributions
+/ edges / RCA / resources to avoid cross-test leakage (same gap fix as
+mcp_tools/conftest).
 
 ---
 

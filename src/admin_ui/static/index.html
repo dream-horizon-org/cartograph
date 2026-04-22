@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cartograph Admin</title>
-  <link rel="stylesheet" href="/style.css?v=14">
+  <link rel="stylesheet" href="/style.css?v=15">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -14,6 +14,8 @@
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/sql.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/bash.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/json.min.js"></script>
+  <!-- 3d-force-graph (Phase 3.5) — loads three.js + three-forcegraph internally -->
+  <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
 </head>
 <body>
   <div id="app-shell">
@@ -22,6 +24,7 @@
       <div class="tabs">
         <button class="tab active" data-tab="chat">Chat</button>
         <button class="tab" data-tab="comms">Communications</button>
+        <button class="tab" data-tab="graph">Graph</button>
       </div>
       <button id="broadcast-btn" title="Broadcast to all agents of a type">📢 Broadcast</button>
     </nav>
@@ -155,6 +158,36 @@
         </div>
       </aside>
     </section>
+
+    <!-- GRAPH VIEW (Phase 3.5) -->
+    <section id="graph-view" class="view">
+      <aside id="graph-sidebar">
+        <header>
+          <h2>Components</h2>
+          <button id="graph-refresh" title="Refresh graph">↻</button>
+        </header>
+        <div class="graph-legend">
+          <div><span class="legend-dot" style="background:#3fb950"></span>github</div>
+          <div><span class="legend-dot" style="background:#58a6ff"></span>deploy</div>
+          <div><span class="legend-dot" style="background:#f85149"></span>cloud</div>
+          <div><span class="legend-dot" style="background:#d2a8ff"></span>telemetry</div>
+          <div><span class="legend-dot" style="background:#d29922"></span>config</div>
+          <div><span class="legend-dot" style="background:#8b949e"></span>no attributions yet</div>
+        </div>
+        <div id="graph-stats">
+          <div><b>Components</b> <span id="graph-comp-count">–</span></div>
+          <div><b>Edges</b> <span id="graph-edge-count">–</span></div>
+        </div>
+        <hr>
+        <h3>Hover a node</h3>
+        <div id="graph-hover-doc">
+          <p class="empty">Hover or click a component in the graph to see its doc.</p>
+        </div>
+      </aside>
+      <main id="graph-pane">
+        <div id="graph-canvas"></div>
+      </main>
+    </section>
   </div>
 
   <!-- BROADCAST DIALOG -->
@@ -215,6 +248,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=14"></script>
+  <script src="/app.js?v=15"></script>
 </body>
 </html>

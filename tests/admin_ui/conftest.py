@@ -38,6 +38,11 @@ def clean_tables():
     assert config.DB_NAME != "cartograph", "Refusing to wipe dev DB"
     execute_mutate("DELETE FROM broadcast_acks")
     execute_mutate("DELETE FROM communications")
+    execute_mutate("DELETE FROM edges")
+    execute_mutate("DELETE FROM attributions")
+    execute_mutate("DELETE FROM resource_component_agents")
+    execute_mutate("DELETE FROM resources")
+    execute_mutate("DELETE FROM components")
     execute_mutate("DELETE FROM agent_runs")
     yield
 
