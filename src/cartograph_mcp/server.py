@@ -25,6 +25,7 @@ from cartograph_mcp.tools import tasks as tasks_tool
 from cartograph_mcp.tools import resources as resources_tool
 from cartograph_mcp.tools import agent_lifecycle
 from cartograph_mcp.tools import components as components_tool
+from cartograph_mcp.tools import consolidation as consolidation_tool
 from cartograph_mcp.tools import notifications as notifications_tool
 from cartograph_mcp.tools import search as search_tool
 from cartograph_mcp.tools import sleep as sleep_tool
@@ -630,6 +631,95 @@ def get_unresolved(
 ) -> dict[str, list[dict[str, Any]]]:
     """Read unresolved references for a component. Open to all active agents."""
     return {"unresolved": components_tool.get_unresolved(agent_id, component_id)}
+
+
+@mcp.tool()
+def nominate_consolidation(
+    agent_id: str,
+    component_a_id: str,
+    component_b_id: str | None,
+    nomination_type: str,
+    confidence: float,
+    message: str,
+) -> dict[str, Any]:
+    """SME proposes a merge or split. Creates consolidation row (status=B2)
+    + communication. Merge requires component_b_id owned by a different SME.
+    Split accepts component_b_id=None (child is spawned after approval).
+    """
+    return consolidation_tool.nominate_consolidation(
+        agent_id, component_a_id, component_b_id, nomination_type,
+        confidence, message,
+    )
+
+
+@mcp.tool()
+def respond_consolidation(
+    agent_id: str,
+    consolidation_id: str,
+    confidence: float,
+    message: str,
+    new_status: str,
+) -> dict[str, Any]:
+    """Nominator or nominated responds with updated confidence + state change.
+
+    Valid transitions:
+      agent_a (nominator):   B1 → B2 | B1 → R (only if r_conf set)
+      agent_b (nominated):   B2 → B1 | B2 → R (only if r_conf set)
+
+    Auto-escalation to R is handled by the auto_transitions scanner when
+    both confidence scores breach thresholds — this tool only allows manual
+    escalation after the resolver has already weighed in at least once.
+    """
+    return consolidation_tool.respond_consolidation(
+        agent_id, consolidation_id, confidence, message, new_status,
+    )
+
+
+@mcp.tool()
+def review_consolidation(
+    agent_id: str,
+    consolidation_id: str,
+    r_confidence: float,
+    message: str,
+    new_status: str,
+    mutation_assigned_to: str | None = None,
+) -> dict[str, Any]:
+    """Resolver-only. Review and decide.
+
+    Valid transitions:
+      R → B1/B2 (send back for more info)
+      R → F     (reject — terminal)
+      R → M     (approve — mutation_assigned_to REQUIRED)
+                 merge: pick agent_a or agent_b (resolver picks the one
+                        with more planes of attribution)
+                 split: must be agent_a (enforced)
+      MD → D    (Phase 4 completion ack)
+    """
+    return consolidation_tool.review_consolidation(
+        agent_id, consolidation_id, r_confidence, message, new_status,
+        mutation_assigned_to,
+    )
+
+
+@mcp.tool()
+def get_my_consolidations(agent_id: str) -> dict[str, list[dict[str, Any]]]:
+    """All non-terminal consolidations involving this agent (or all for resolver)."""
+    return {"consolidations": consolidation_tool.get_my_consolidations(agent_id)}
+
+
+@mcp.tool()
+def get_consolidation_thread(
+    agent_id: str,
+    consolidation_id: str,
+    page: int = 1,
+    limit: int = 50,
+) -> dict[str, list[dict[str, Any]]]:
+    """Paginated consolidation thread. Scoped to participants + resolver."""
+    return {
+        "thread": consolidation_tool.get_consolidation_thread(
+            agent_id, consolidation_id, page, limit
+        )
+    }
 
 
 @mcp.tool()
