@@ -26,6 +26,7 @@ from cartograph_mcp.tools import resources as resources_tool
 from cartograph_mcp.tools import agent_lifecycle
 from cartograph_mcp.tools import components as components_tool
 from cartograph_mcp.tools import notifications as notifications_tool
+from cartograph_mcp.tools import search as search_tool
 from cartograph_mcp.tools import sleep as sleep_tool
 
 logging.basicConfig(
@@ -629,6 +630,30 @@ def get_unresolved(
 ) -> dict[str, list[dict[str, Any]]]:
     """Read unresolved references for a component. Open to all active agents."""
     return {"unresolved": components_tool.get_unresolved(agent_id, component_id)}
+
+
+@mcp.tool()
+def vector_search(
+    agent_id: str,
+    query_text: str,
+    table: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Embed `query_text` and return top-N rows from `table` by cosine similarity.
+
+    Open to all active agents. `table` must be one of:
+    components, attributions, unresolved, edges.
+
+    Interpretation bands (caller applies):
+      similarity > 0.85  → strong match (confident attribution)
+      0.7 to 0.85        → hint (insert_unresolved + mark candidate)
+      < 0.7              → treat as no match (create new component)
+
+    If the query can't be embedded (missing API key, transport error, empty
+    text), returns {"query_embedded": False, "results": []}. Callers must
+    check this flag to distinguish "no hits" from "could not search".
+    """
+    return search_tool.vector_search(agent_id, query_text, table, limit)
 
 
 @mcp.tool()
