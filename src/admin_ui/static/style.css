@@ -724,6 +724,30 @@ body {
   color: #c9d1d9;
   font-family: "SF Mono", Consolas, monospace;
 }
+.pill-role { background: #30363d; color: #8b949e; }
+
+.conf-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  margin-right: 4px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-family: "SF Mono", Consolas, monospace;
+}
+.conf-high { background: #23863633; color: #3fb950; }
+.conf-mid  { background: #d2a8ff22; color: #d2a8ff; }
+.conf-low  { background: #f8514933; color: #f85149; }
+.conf-null { background: #30363d; color: #8b949e; }
+
+/* Consolidation + clarification state badges — same shape as task status. */
+.status-B1, .status-B2     { background: #f85149; color: #fff; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
+.status-R                  { background: #d29922; color: #fff; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
+.status-M, .status-MD      { background: #a371f7; color: #fff; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
+.status-D                  { background: #3fb950; color: #fff; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
+.status-F                  { background: #6e7681; color: #fff; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
+.status-QR                 { background: #6e7681; color: #fff; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
+.status-QC                 { background: #d29922; color: #fff; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
+.status-CC                 { background: #3fb950; color: #fff; padding: 1px 7px; border-radius: 3px; font-size: 11px; }
 
 .comm-body {
   font-size: 13px;

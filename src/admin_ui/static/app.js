@@ -590,8 +590,68 @@ function renderSourceEntity(type, data) {
       ${threadHtml || '<p class="empty">No thread yet.</p>'}
     `;
   }
-  // Generic fallback for consolidation / clarification (Phase 3)
+  if (type === 'consolidation') return renderConsolidationDetail(data);
+  if (type === 'clarification') return renderClarificationDetail(data);
   return `<pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
+}
+
+function renderThread(thread) {
+  return (thread || []).map(c => `
+    <div class="thread-entry">
+      <div class="thread-head">
+        <b>${escapeHtml(c.from_agent)}</b> → <b>${escapeHtml(c.to_agent || c.to_agent_type || 'admin')}</b>
+        ${c.metadata && c.metadata.state_transition
+          ? `<span class="pill">${c.metadata.state_transition.from ?? '∅'} → ${c.metadata.state_transition.to}</span>`
+          : ''}
+        ${c.metadata && c.metadata.role ? `<span class="pill pill-role">${c.metadata.role}</span>` : ''}
+        <span class="ts">${new Date(c.created_at).toLocaleString()}</span>
+      </div>
+      <div class="thread-body">${renderMarkdown(c.text || '')}</div>
+    </div>
+  `).join('');
+}
+
+function confidencePill(label, score) {
+  if (score == null) return `<span class="conf-pill conf-null">${label}: —</span>`;
+  const cls = score >= 0.85 ? 'conf-high' : score >= 0.5 ? 'conf-mid' : 'conf-low';
+  return `<span class="conf-pill ${cls}">${label}: ${Number(score).toFixed(2)}</span>`;
+}
+
+function renderConsolidationDetail(data) {
+  const c = data.consolidation;
+  return `
+    <div class="detail-kv"><b>Status</b><span class="status-${c.status}">${c.status}</span></div>
+    <div class="detail-kv"><b>Type</b><span>${c.nomination_type}</span></div>
+    <div class="detail-kv"><b>Agent A (nominator)</b><span>${escapeHtml(c.agent_a_id || '')}</span></div>
+    <div class="detail-kv"><b>Agent B (nominated)</b><span>${escapeHtml(c.agent_b_id || '—')}</span></div>
+    <div class="detail-kv"><b>Component A</b><span>${escapeHtml(c.component_a_id || '')}</span></div>
+    <div class="detail-kv"><b>Component B</b><span>${escapeHtml(c.component_b_id || '—')}</span></div>
+    <div class="detail-kv"><b>Confidence</b><span>
+      ${confidencePill('A', c.a_conf_score)}
+      ${confidencePill('B', c.b_conf_score)}
+      ${confidencePill('R', c.r_conf_score)}
+    </span></div>
+    ${c.mutation_assigned_to ? `<div class="detail-kv"><b>Mutation POC</b><span>${escapeHtml(c.mutation_assigned_to)}</span></div>` : ''}
+    <div class="detail-kv"><b>Created</b><span>${new Date(c.created_at).toLocaleString()}</span></div>
+    <div class="detail-kv"><b>Updated</b><span>${new Date(c.updated_at).toLocaleString()}</span></div>
+    <hr>
+    <h3>Thread (${(data.thread || []).length})</h3>
+    ${renderThread(data.thread) || '<p class="empty">No thread yet.</p>'}
+  `;
+}
+
+function renderClarificationDetail(data) {
+  const c = data.clarification;
+  return `
+    <div class="detail-kv"><b>Status</b><span class="status-${c.status}">${c.status}</span></div>
+    <div class="detail-kv"><b>Asker</b><span>${escapeHtml(c.asker_agent_id || '')}</span></div>
+    <div class="detail-kv"><b>Responder</b><span>${escapeHtml(c.responder_agent_id || '—')}</span></div>
+    <div class="detail-kv"><b>Created</b><span>${new Date(c.created_at).toLocaleString()}</span></div>
+    <div class="detail-kv"><b>Updated</b><span>${new Date(c.updated_at).toLocaleString()}</span></div>
+    <hr>
+    <h3>Thread (${(data.thread || []).length})</h3>
+    ${renderThread(data.thread) || '<p class="empty">No thread yet.</p>'}
+  `;
 }
 
 document.getElementById('filter-apply').addEventListener('click', () => {
