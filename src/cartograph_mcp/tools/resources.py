@@ -60,10 +60,16 @@ def upsert_resource(
     import json
     meta_json = json.dumps(metadata or {})
 
+    # ON CONFLICT targets the partial unique index `resources_live_unique`
+    # (plane, resource_type, identifier) WHERE status != 'rejected'.
+    # Rejected rows are tombstones — a re-upsert creates a fresh pending
+    # row next to the tombstone instead of matching it.
     row = execute_returning(
         """INSERT INTO resources (plane, resource_type, identifier, access_desc, metadata)
            VALUES (%s, %s, %s, %s, %s::jsonb)
-           ON CONFLICT (plane, resource_type, identifier) DO UPDATE
+           ON CONFLICT (plane, resource_type, identifier)
+             WHERE status != 'rejected'
+           DO UPDATE
              SET access_desc = EXCLUDED.access_desc,
                  metadata    = EXCLUDED.metadata
            RETURNING *""",
@@ -136,7 +142,9 @@ def upsert_resources_bulk(
             cur.executemany(
                 """INSERT INTO resources (plane, resource_type, identifier, access_desc, metadata)
                    VALUES (%s, %s, %s, %s, %s::jsonb)
-                   ON CONFLICT (plane, resource_type, identifier) DO UPDATE
+                   ON CONFLICT (plane, resource_type, identifier)
+                     WHERE status != 'rejected'
+                   DO UPDATE
                      SET access_desc = EXCLUDED.access_desc,
                          metadata    = EXCLUDED.metadata
                    RETURNING id""",

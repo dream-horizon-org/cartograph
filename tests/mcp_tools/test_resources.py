@@ -4,6 +4,7 @@ import uuid
 import pytest
 
 from cartograph_mcp.tools import resources
+from shared.db import execute
 
 
 # ============ upsert_resource ============
@@ -419,3 +420,82 @@ def test_sme_not_assigned_cannot_mark_done(agent_factory):
     r = resources.upsert_resource("iter-gh", "github", "repo", "x")
     with pytest.raises(ValueError, match="not assigned to resource"):
         resources.mark_resource_done("sme-1", r["id"])
+
+
+# ============ rejected-is-tombstone ============
+#
+# Bug: a rejected row used to block re-upsert of the same identifier.
+# Fix: partial unique index `WHERE status != 'rejected'` so re-upsert
+# inserts a fresh `pending` row and the tombstone stays as audit.
+
+
+def test_upsert_after_reject_creates_fresh_pending_row(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    # Admin rejects with force=True (no SME attached so no cascade).
+    agent_factory("orch", "orchestrator")
+    original = resources.upsert_resource(
+        "iter-gh", "github", "repo", "dream11/kyc-service"
+    )
+    resources.reject_resource(
+        "orch", original["id"], reason="test wipe", force=True
+    )
+    reborn = resources.upsert_resource(
+        "iter-gh", "github", "repo", "dream11/kyc-service"
+    )
+    # Fresh row with a new id, status='pending'.
+    assert reborn["id"] != original["id"]
+    assert reborn["status"] == "pending"
+    # Old tombstone still there with its audit trail intact.
+    rows = execute(
+        """SELECT id, status, rejected_reason FROM resources
+           WHERE plane='github' AND resource_type='repo'
+             AND identifier='dream11/kyc-service'
+           ORDER BY created_at"""
+    )
+    assert len(rows) == 2
+    assert rows[0]["status"] == "rejected"
+    assert rows[0]["rejected_reason"] == "test wipe"
+    assert rows[1]["status"] == "pending"
+
+
+def test_live_rows_still_unique(agent_factory):
+    """Partial index still enforces uniqueness among non-rejected rows."""
+    _iterator(agent_factory, "iter-gh", "github")
+    r1 = resources.upsert_resource(
+        "iter-gh", "github", "repo", "dream11/foo",
+        metadata={"v": 1},
+    )
+    # Second upsert on the same live identifier: UPDATE not INSERT.
+    r2 = resources.upsert_resource(
+        "iter-gh", "github", "repo", "dream11/foo",
+        metadata={"v": 2},
+    )
+    assert r1["id"] == r2["id"]
+    assert r2["metadata"] == {"v": 2}
+
+
+def test_bulk_upsert_after_reject_creates_fresh_rows(agent_factory):
+    _iterator(agent_factory, "iter-gh", "github")
+    agent_factory("orch", "orchestrator")
+    first = resources.upsert_resources_bulk("iter-gh", "github", [
+        {"resource_type": "repo", "identifier": "dream11/kyc-service"},
+        {"resource_type": "repo", "identifier": "dream11/payments"},
+    ])
+    # Reject all of them.
+    for rid in first["ids"]:
+        resources.reject_resource("orch", rid, reason="test wipe", force=True)
+    # Re-upsert same identifiers → 2 fresh pending rows.
+    second = resources.upsert_resources_bulk("iter-gh", "github", [
+        {"resource_type": "repo", "identifier": "dream11/kyc-service"},
+        {"resource_type": "repo", "identifier": "dream11/payments"},
+    ])
+    assert second["inserted_or_updated"] == 2
+    assert set(second["ids"]).isdisjoint(set(first["ids"]))
+    live = execute(
+        """SELECT identifier FROM resources
+           WHERE plane='github' AND status='pending'
+           ORDER BY identifier"""
+    )
+    assert [r["identifier"] for r in live] == [
+        "dream11/kyc-service", "dream11/payments",
+    ]

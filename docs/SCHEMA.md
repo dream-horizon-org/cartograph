@@ -239,13 +239,21 @@ CREATE TABLE resources (
     rejected_at     TIMESTAMPTZ,                  -- when soft-deleted
     rejected_by     TEXT,                         -- agent_id that rejected
     rejected_reason TEXT,                         -- required audit trail for cleanups
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    UNIQUE(plane, resource_type, identifier)
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- No table-wide UNIQUE on (plane, resource_type, identifier).
+    -- See partial unique index below: uniqueness only among live rows
+    -- so rejected tombstones don't block re-upsert of the same identity.
 );
 
 CREATE INDEX idx_res_status ON resources(status) WHERE status = 'pending';
 CREATE INDEX idx_res_plane ON resources(plane);
+-- Live-row uniqueness: rejected rows are tombstones. A re-upsert of a
+-- previously-rejected identity inserts a fresh `pending` row next to the
+-- tombstone instead of colliding. `upsert_resource(_bulk)` ON CONFLICT
+-- targets this partial index explicitly.
+CREATE UNIQUE INDEX resources_live_unique
+  ON resources (plane, resource_type, identifier)
+  WHERE status != 'rejected';
 -- assigned_to index removed — use resource_component_agents table
 ```
 

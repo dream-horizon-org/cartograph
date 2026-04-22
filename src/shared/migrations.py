@@ -349,6 +349,22 @@ def run_migrations() -> None:
                 "ALTER TABLE components ADD COLUMN IF NOT EXISTS component_doc_md TEXT"
             )
 
+            # Rejected resources are tombstones — they must not block
+            # re-upsert of a row with the same (plane, resource_type,
+            # identifier). Replace the table-wide UNIQUE with a partial
+            # unique index scoped to live rows (status != 'rejected').
+            # Idempotent: if the old constraint or an earlier version of
+            # the partial index already exists, both paths are safe.
+            cur.execute(
+                "ALTER TABLE resources DROP CONSTRAINT IF EXISTS "
+                "resources_plane_resource_type_identifier_key"
+            )
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS resources_live_unique "
+                "ON resources (plane, resource_type, identifier) "
+                "WHERE status != 'rejected'"
+            )
+
             # Persistent broadcasts (Phase 2.5). Normal broadcasts are
             # forward-only — they apply to agents that exist at broadcast
             # time. is_persistent=TRUE means "this policy applies to future
