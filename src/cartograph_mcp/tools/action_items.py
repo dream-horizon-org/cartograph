@@ -49,13 +49,18 @@ def _count_unacked_chats(agent_id: str) -> int:
 
 
 def _count_unacked_broadcasts(agent_id: str, agent_type: str) -> int:
+    # Post–Phase 2.4, broadcasts address targets via to_agent_type, not
+    # to_agent. Also apply forward-only scoping (Phase 2.5): only broadcasts
+    # whose is_persistent=TRUE OR were sent after this agent was created.
     rows = execute(
         """SELECT COUNT(*) as cnt FROM communications c
-           WHERE c.type = 'broadcast' AND c.to_agent = %s
-           AND c.id NOT IN (
-               SELECT communication_id FROM broadcast_acks WHERE agent_id = %s
-           )""",
-        (agent_type, agent_id),
+           WHERE c.type = 'broadcast' AND c.to_agent_type = %s
+             AND (c.is_persistent OR c.created_at >
+                  (SELECT created_at FROM agent_runs WHERE agent_id = %s))
+             AND c.id NOT IN (
+                 SELECT communication_id FROM broadcast_acks WHERE agent_id = %s
+             )""",
+        (agent_type, agent_id, agent_id),
     )
     return rows[0]["cnt"] if rows else 0
 
@@ -115,12 +120,14 @@ def _get_unacked_chat_details(agent_id: str) -> list[dict]:
 def _get_unacked_broadcast_details(agent_id: str, agent_type: str) -> list[dict]:
     return execute(
         """SELECT c.* FROM communications c
-           WHERE c.type = 'broadcast' AND c.to_agent = %s
-           AND c.id NOT IN (
-               SELECT communication_id FROM broadcast_acks WHERE agent_id = %s
-           )
+           WHERE c.type = 'broadcast' AND c.to_agent_type = %s
+             AND (c.is_persistent OR c.created_at >
+                  (SELECT created_at FROM agent_runs WHERE agent_id = %s))
+             AND c.id NOT IN (
+                 SELECT communication_id FROM broadcast_acks WHERE agent_id = %s
+             )
            ORDER BY c.created_at""",
-        (agent_type, agent_id),
+        (agent_type, agent_id, agent_id),
     )
 
 
