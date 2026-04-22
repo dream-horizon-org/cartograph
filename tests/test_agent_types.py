@@ -22,7 +22,7 @@ def test_get_config_orchestrator():
     assert config.agent_type == "orchestrator"
     assert config.priority == 100
     assert config.can_install is False
-    assert "bash" in config.allowed_tools
+    assert "Bash" in config.allowed_tools
     assert "cartograph-db" in config.mcp_servers
     assert "Orchestrator" in config.system_prompt
 
