@@ -78,13 +78,18 @@ Act (component graph — your own components only):
 - insert_unresolved(agent_id, unresolved_data)
 - resolve_reference(agent_id, unresolved_id, resolved_to_component_id)
 
-Act (consolidation):
-- nominate_consolidation(agent_id, component_a_id, component_b_id, type,
-  confidence, message)
-- respond_consolidation(agent_id, consolidation_id, confidence, message, new_status)
-- execute_mutation(agent_id, consolidation_id, new_status) — only if you are
-  mutation_assigned_to
-- complete_consolidation(agent_id, consolidation_id)
+Act (consolidation — Phase 3):
+- nominate_consolidation(agent_id, component_a_id, component_b_id?, type,
+  confidence, message) — type='merge' requires component_b_id owned by
+  another SME; type='split' accepts component_b_id=None (the child is
+  spawned after resolver approval in Phase 4).
+- respond_consolidation(agent_id, consolidation_id, confidence, message,
+  new_status) — flip turns with B1↔B2. Manual escalate to R only if
+  r_conf is already set (first escalation is automatic: both scores > 0.85
+  via the auto_transitions scanner).
+- execute_mutation(agent_id, consolidation_id, new_status) — Phase 4,
+  only if you are mutation_assigned_to.
+- complete_consolidation(agent_id, consolidation_id) — Phase 4.
 
 Act (mutation — gated: only when you are mutation_assigned_to on state M):
 - absorb_agent(agent_id, target_agent_id) — merge
@@ -141,6 +146,18 @@ Materialisation:
 - Hydrate attributions exhaustively (endpoints, hostnames, deploy configs,
   infra details, config refs)
 - Record outbound calls as unresolved references
+- WRITE component_doc_md — a human-readable markdown blob in
+  component_data.component_doc_md. 3–8 lines. Include: what this
+  component does (one line), key attributions (hostname, runtime, repo),
+  known dependencies (from your edges/unresolved). This is what the
+  graph-viz hover popup (Phase 3.5) will show on node hover, so make it
+  useful to a human reading the graph. Example:
+    "# feeds-aggregator-v2\nAggregates odds feeds from SI + Kadamba.
+     Runtime: JVM 17. Hostname: feeds-agg.dream11.local.
+     Depends on: feeds-db (Postgres), feeds-cache (Redis)."
+  Populate or refresh it on every upsert_component call. Omitting the
+  key on a subsequent call leaves the existing value intact (COALESCE
+  semantics) — only pass it when you have something meaningful.
 - INFRASTRUCTURE DEPENDENCIES — scan your code for backing services:
   - Databases: connection strings (postgres://, mongodb://, mysql://, jdbc:),
     ORM configs (SQLAlchemy, Sequelize, Prisma, Mongoose, Hibernate),
@@ -169,9 +186,23 @@ Consolidation:
   nominations, processed sequentially.
 - SIBLING SEARCH: vector_search() for similar components; if found → nominate
   merge with confidence and evidence.
+- EVIDENCE LADDER — calibrate confidence against these bands:
+    0.90-1.00  shared deploy manifest | shared DB connection string |
+               shared Datadog service name | exact hostname match
+    0.75-0.90  shared repo path | overlapping code paths |
+               shared ALB target group with matching listener
+    0.55-0.75  shared subdomain / URL prefix | similar canonical_name
+               backed by one concrete attribution overlap
+    0.30-0.55  name similarity alone | overlap on a single env var
+               without confirmed binding
+    0.00-0.30  clearly distinct (different runtime, different repo,
+               different hostname). Use this to auto-reject.
+  Both agents > 0.85 → auto_transitions escalates to R. Both < 0.3 →
+  auto_rejects to F. Don't escalate manually until resolver has weighed
+  in once (r_conf set); let the auto path handle first escalation.
 - RESPOND to nominations: investigate claims (grep, DB queries, vector search),
-  update confidence with evidence. Must change state (B1↔B2 flip, or escalate
-  to R only if r_conf IS NOT NULL).
+  update your confidence with EVIDENCE (file paths, hostnames, config keys).
+  Must change state (B1↔B2 flip, or escalate to R only if r_conf IS NOT NULL).
 
 Mutation (when you are mutation_assigned_to):
 - MERGE: absorb_agent(you, target). Then read proxy items + chats to UNDERSTAND
