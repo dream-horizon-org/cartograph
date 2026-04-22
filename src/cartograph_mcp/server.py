@@ -792,13 +792,26 @@ def vector_search(
 
     Interpretation bands (calibrated for mxbai-embed-large, the model
     wired up in production — Phase 3.7):
-      similarity >= 0.75  → strong match (confident attribution)
-      0.60 to 0.75        → hint (insert_unresolved + mark candidate)
-      <  0.60             → treat as no match (create new component)
+      similarity >= 0.75  → strong match
+      0.60 to 0.75        → hint (candidate; verify before acting)
+      <  0.60             → treat as no match
     Noise floor is ~0.40-0.50 on this model; scores below 0.60 are
     cosine artefacts, not semantic matches. These bands replace the
     earlier OpenAI-sized 0.85/0.70 ladder, which sat above even
     verbatim-name hits on mxbai.
+
+    Typical SME usage:
+      1. Dedup check before upsert_component: search for your own
+         canonical_name — hit ≥ 0.75 on another SME's component means
+         don't create a duplicate, raise a clarification.
+      2. Outbound reference resolution: while hydrating your component,
+         you find refs to OTHER components (a DB hostname, an API URL
+         in your config). Search for them → create_edge if strong match,
+         insert_unresolved with candidate if hint, insert_unresolved
+         with no candidate if nothing.
+    Never use these bands to decide whether to create a second component
+    for yourself — the 1-SME=1-component invariant means you always
+    write exactly one upsert_component per materialisation.
 
     If the query can't be embedded (Ollama unreachable, empty text),
     returns {"query_embedded": False, "results": []}. Callers must

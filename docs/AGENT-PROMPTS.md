@@ -469,17 +469,36 @@ Reject threshold: both agents < 0.3 → auto-reject
       logs (repo refs, hostnames), metrics (dashboards, alerts), service map
     - For Config (supporter): resolve config key references, register hostnames.
       Do NOT create new components.
-    - For each component you discover (cosine bands calibrated for
-      mxbai-embed-large — the model live in prod since Phase 3.7):
-        1. Check DB: exact match on name/hostname → attribute to existing
-        2. No exact match → vector_search → similarity ≥ 0.75 → strong match,
-           attribute (conf=0.8). Verbatim name queries land ~0.78-0.82.
-        3. Similarity 0.60-0.75 → hint → insert_unresolved with candidate
-           component_id. Natural-language queries for the right component
-           land here.
-        4. Similarity < 0.60 → no match → create new component + embed.
-           Noise floor on this model is ~0.40-0.50; scores in 0.50-0.60
-           are weak overlap, not a hit.
+    - You own ONE component (1-SME = 1-component invariant). Hydrate
+      that component. You don't enumerate or create components for
+      every thing you find — things you find are either attributions
+      of YOUR component, or outbound refs to OTHER components.
+    - STEP 1 — Dedup check before creating:
+        vector_search(your_canonical_name_candidate, table="components").
+        Top hit ≥ 0.75 owned by another active SME → STOP. Don't
+        upsert_component. Raise a clarification or let Consolidation
+        phase nominate a merge later.
+    - STEP 2 — upsert_component ONCE. Fill RCA slot. Subsequent calls
+      UPDATE this same row (refine metadata, refresh component_doc_md).
+      No second component — splits go through Consolidation.
+    - STEP 3 — Hydrate attributions on YOUR component exhaustively:
+      endpoints, hostnames, deploy configs, ASG names, infra ids,
+      telemetry service names, repo paths.
+    - STEP 4 — Outbound references (things your component depends on
+      or calls). For each one, use this cosine-similarity ladder
+      (calibrated for mxbai-embed-large, the model live since Phase 3.7):
+        1. Exact hostname/identifier match in attributions → create_edge
+           from your component to the matched target.
+        2. vector_search(ref, table="components"/"attributions") ≥ 0.75
+           → strong match → create_edge. Verbatim name ~0.78-0.82.
+        3. Similarity 0.60-0.75 → hint → insert_unresolved with
+           candidate component_id.
+        4. Similarity < 0.60 → insert_unresolved with NO candidate;
+           Resolution phase links it. Noise floor ~0.40-0.50; don't
+           guess in 0.50-0.60.
+      This ladder is ONLY for outbound refs. You never "create a new
+      component because similarity was low" — you create at most one
+      (your own, in Step 2).
     - Record ALL attributions: endpoints, hostnames, deploy configs, infra, etc.
     - Record outbound calls as unresolved references
     - WRITE component_doc_md (Phase 3) — 3–8 lines of markdown on every

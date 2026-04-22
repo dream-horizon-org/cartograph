@@ -524,16 +524,28 @@ Embeddings generated at write time via `cartograph-db` MCP. No batch step.
 | `edges`        | `"{edge_type}: {identifier}"`                          | Fuzzy match calls across components — e.g., match `GET /scorecard/cricket` to `GET /cricket/scorecard` |
 
 
-Lookup protocol (bands calibrated empirically for `mxbai-embed-large`):
-  - exact match first (canonical_name / hostname / etc.)
+Lookup protocol for **outbound references** (not for your own
+component — you only ever have one of those under the
+1-SME = 1-component invariant). Cosine bands calibrated empirically
+for `mxbai-embed-large`:
+  - exact match first (hostname / identifier in attributions)
   - vector fallback:
-    - **≥ 0.75** → strong match → attribute to existing
+    - **≥ 0.75** → strong match → `create_edge` to the matched target
     - **0.60 – 0.75** → hint → `insert_unresolved` with candidate
-    - **< 0.60** → create new component
+    - **< 0.60** → `insert_unresolved` with NO candidate (Resolution
+      phase links it later)
   Noise floor on this model is ~0.40-0.50 — scores in that range are
   cosine artefacts, not semantic matches. Bands were recalibrated in
   Phase 3.7 after production data showed the prior OpenAI-sized
   thresholds (0.85/0.70) sat above even verbatim-name hits.
+
+Separately, SMEs run a **dedup check** once before `upsert_component`:
+if `vector_search(own_canonical_name, table="components")` hits ≥ 0.75
+on an ACTIVE component owned by a different SME, the SME raises a
+clarification / defers to Consolidation rather than creating a
+duplicate. This prevents two SMEs spawned from different planes (e.g.
+github repo + cloud deployment) from each building their own component
+for the same logical service.
 
 Model: **`mxbai-embed-large` via local Ollama** (1024 dims, Metal-accelerated on Apple Silicon). Warm embed ~40-60ms per call; no API key, no network egress. Configurable via `CARTOGRAPH_EMBEDDING_MODEL` + `CARTOGRAPH_EMBEDDING_DIMS` + `CARTOGRAPH_OLLAMA_URL`. Schema migration flips `vector(N)` automatically on boot if the configured dim differs.
 
