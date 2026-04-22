@@ -800,18 +800,22 @@ def vector_search(
     earlier OpenAI-sized 0.85/0.70 ladder, which sat above even
     verbatim-name hits on mxbai.
 
-    Typical SME usage:
-      1. Dedup check before upsert_component: search for your own
-         canonical_name — hit ≥ 0.75 on another SME's component means
-         don't create a duplicate, raise a clarification.
-      2. Outbound reference resolution: while hydrating your component,
-         you find refs to OTHER components (a DB hostname, an API URL
-         in your config). Search for them → create_edge if strong match,
-         insert_unresolved with candidate if hint, insert_unresolved
-         with no candidate if nothing.
-    Never use these bands to decide whether to create a second component
-    for yourself — the 1-SME=1-component invariant means you always
-    write exactly one upsert_component per materialisation.
+    Typical SME usage — outbound reference resolution:
+      While hydrating your component during Materialisation, you'll find
+      refs to OTHER components (a DB hostname, an API URL in your
+      config, a Kafka topic). Search for the target:
+        strong match → create_edge from your component to the target.
+        hint        → insert_unresolved with candidate component_id.
+        no match    → insert_unresolved with no candidate; Resolution
+                      phase (config SMEs) links it later.
+    SMEs do NOT use this tool to decide whether to create their own
+    component — the 1-SME=1-component invariant means they always
+    write exactly one upsert_component regardless of search results.
+    Duplicates across SMEs are Consolidation's job, not Materialisation.
+
+    Sibling-search during Consolidation is the other usage: SMEs call
+    vector_search on their own component's name to find candidates for
+    nominate_consolidation(type='merge').
 
     If the query can't be embedded (Ollama unreachable, empty text),
     returns {"query_embedded": False, "results": []}. Callers must

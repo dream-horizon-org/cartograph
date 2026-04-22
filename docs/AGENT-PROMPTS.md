@@ -469,22 +469,17 @@ Reject threshold: both agents < 0.3 → auto-reject
       logs (repo refs, hostnames), metrics (dashboards, alerts), service map
     - For Config (supporter): resolve config key references, register hostnames.
       Do NOT create new components.
-    - You own ONE component (1-SME = 1-component invariant). Hydrate
-      that component. You don't enumerate or create components for
-      every thing you find — things you find are either attributions
-      of YOUR component, or outbound refs to OTHER components.
-    - STEP 1 — Dedup check before creating:
-        vector_search(your_canonical_name_candidate, table="components").
-        Top hit ≥ 0.75 owned by another active SME → STOP. Don't
-        upsert_component. Raise a clarification or let Consolidation
-        phase nominate a merge later.
-    - STEP 2 — upsert_component ONCE. Fill RCA slot. Subsequent calls
-      UPDATE this same row (refine metadata, refresh component_doc_md).
+    - You own ONE component (1-SME = 1-component invariant).
+      Orchestrator decided to spawn you on this resource — just
+      hydrate. Don't check whether other SMEs are doing something
+      similar; Consolidation handles that later.
+    - STEP 1 — upsert_component ONCE. Fill RCA slot. Subsequent calls
+      UPDATE the same row (refine metadata, refresh component_doc_md).
       No second component — splits go through Consolidation.
-    - STEP 3 — Hydrate attributions on YOUR component exhaustively:
+    - STEP 2 — Hydrate attributions on YOUR component exhaustively:
       endpoints, hostnames, deploy configs, ASG names, infra ids,
       telemetry service names, repo paths.
-    - STEP 4 — Outbound references (things your component depends on
+    - STEP 3 — Outbound references (things your component depends on
       or calls). For each one, use this cosine-similarity ladder
       (calibrated for mxbai-embed-large, the model live since Phase 3.7):
         1. Exact hostname/identifier match in attributions → create_edge
@@ -496,9 +491,7 @@ Reject threshold: both agents < 0.3 → auto-reject
         4. Similarity < 0.60 → insert_unresolved with NO candidate;
            Resolution phase links it. Noise floor ~0.40-0.50; don't
            guess in 0.50-0.60.
-      This ladder is ONLY for outbound refs. You never "create a new
-      component because similarity was low" — you create at most one
-      (your own, in Step 2).
+      This ladder is ONLY for outbound refs.
     - Record ALL attributions: endpoints, hostnames, deploy configs, infra, etc.
     - Record outbound calls as unresolved references
     - WRITE component_doc_md (Phase 3) — 3–8 lines of markdown on every
