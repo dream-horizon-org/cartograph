@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
 **Status (2026-04-22):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 ✅ (graph viz with 3d-force-graph) · **Phase 3.7 ✅** (local embeddings via Ollama + Metal, 1024d).
-- **58 MCP tools** registered · **254 tests** passing.
+- **58 MCP tools** registered · **257 tests** passing.
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 
 ---
@@ -625,9 +625,23 @@ and runs on the Apple Silicon GPU via Metal.
   graceful-degrade behaviour when Ollama is unreachable) + 1 live
   end-to-end test that's `@skipif` when Ollama isn't running.
 
+### Backward-compat: re-embed existing rows
+- `shared/embedding_backfill.py::backfill_all()` — scans each of the 4
+  vector tables for `embedding IS NULL`, builds the embed text with
+  the same helpers as the write path, re-embeds, writes back.
+  Idempotent — a second run is a no-op.
+- Runnable two ways:
+  - CLI: `python -m shared.embedding_backfill` from `src/`.
+  - Admin-UI endpoint: `POST /api/backfill_embeddings` returns
+    per-table `{done, skipped}` counts.
+- Skipped rows (Ollama unreachable, empty embed text) stay NULL and
+  can be retried by re-running.
+
+### Status on prod
+Ran once right after the Phase 3.7 cutover — 5/5 NULL embeddings
+backfilled (2 components, 2 attributions, 1 unresolved).
+
 ### Deferred
-- Re-embed pipeline for existing rows (none on prod right now, so
-  not urgent).
 - Batched embedding for bulk writes (e.g. `upsert_attributions_bulk`).
   One-at-a-time is fine at current scale; revisit if SME materialisation
   latency becomes a bottleneck.

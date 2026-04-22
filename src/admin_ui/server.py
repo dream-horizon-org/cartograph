@@ -363,6 +363,18 @@ def create_app() -> FastAPI:
         )
         return {"nodes": nodes, "edges": edges}
 
+    @app.post("/api/backfill_embeddings")
+    def backfill_embeddings_endpoint():
+        """Re-embed rows whose embedding column is NULL across all 4 vector
+        tables. Idempotent: rows already embedded are skipped by the
+        `WHERE embedding IS NULL` filter. Returns per-table counts.
+
+        Run this after a model / dim change, or when rows were written
+        while Ollama was unreachable.
+        """
+        from shared.embedding_backfill import backfill_all
+        return backfill_all()
+
     @app.post("/api/broadcast")
     def send_broadcast_from_admin(body: BroadcastBody):
         """Admin broadcasts to all agents of a type.
