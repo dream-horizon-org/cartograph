@@ -1217,11 +1217,28 @@ async function initOrRefreshGraph() {
       // x/y/z populated by the simulation).
       const byId = {};
       for (const n of gd.nodes) byId[n.id] = n;
+      // Axis-centring soft-pull for non-junction nodes. d3-force's
+      // default center force only shifts the centroid — it doesn't
+      // prevent the cluster from elongating along a single axis. A
+      // weak per-tick pull toward 0 on each axis keeps the cluster
+      // roughly spherical without dominating other forces.
+      const AXIS_PULL = 0.03;
+      for (const n of gd.nodes) {
+        if (n.isJunction) continue;           // pinned separately
+        if (n.fx != null || n.fy != null || n.fz != null) continue;
+        if (typeof n.x !== 'number') continue;
+        n.vx = (n.vx || 0) + (-n.x) * AXIS_PULL;
+        n.vy = (n.vy || 0) + (-n.y) * AXIS_PULL;
+        n.vz = (n.vz || 0) + (-n.z) * AXIS_PULL;
+      }
+
+      // Junction pinning (unchanged): place each junction at a fixed
+      // offset from its target, in the direction of the callers'
+      // centroid.
       for (const n of gd.nodes) {
         if (!n.isJunction) continue;
         const target = byId[n.junctionTargetId];
         if (!target || target.x == null) continue;
-        // Centroid of the callers that feed this junction.
         let cx = 0, cy = 0, cz = 0, count = 0;
         for (const cid of (n.junctionCallerIds || [])) {
           const c = byId[cid];
@@ -1231,12 +1248,11 @@ async function initOrRefreshGraph() {
         }
         if (count === 0) continue;
         cx /= count; cy /= count; cz /= count;
-        // Direction from target toward callers' centroid.
         const dx = cx - target.x;
         const dy = cy - target.y;
         const dz = cz - target.z;
         const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (len < 0.1) continue;  // degenerate: callers at target
+        if (len < 0.1) continue;
         n.fx = target.x + (dx / len) * JUNCTION_OFFSET;
         n.fy = target.y + (dy / len) * JUNCTION_OFFSET;
         n.fz = target.z + (dz / len) * JUNCTION_OFFSET;
