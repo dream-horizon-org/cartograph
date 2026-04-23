@@ -976,18 +976,13 @@ function makeNodeMesh(node) {
       geom = new THREE.SphereGeometry(s, 32, 32);
       break;
   }
-  // MeshStandardMaterial with emissive=color gives a self-lit glow
-  // without needing post-processing bloom. emissiveIntensity
-  // controls how "lit from within" the node reads.
-  const col = node.color || '#cccccc';
-  const mat = new THREE.MeshStandardMaterial({
-    color: col,
-    emissive: col,
-    emissiveIntensity: node.isJunction ? 0.5 : 0.9,
-    metalness: 0.1,
-    roughness: 0.45,
+  // Matte Lambert (no glassy/metallic feel). We add bright scene
+  // lights separately so the nodes read as properly illuminated
+  // solids, not translucent bubbles.
+  const mat = new THREE.MeshLambertMaterial({
+    color: node.color || '#cccccc',
     transparent: true,
-    opacity: node.isJunction ? 0.65 : 0.96,
+    opacity: node.isJunction ? 0.55 : 0.95,
   });
   return new THREE.Mesh(geom, mat);
 }
@@ -1280,6 +1275,26 @@ async function initOrRefreshGraph() {
       const controls = graphInstance.controls();
       if (controls) {
         controls.enableZoom = false;  // we own the wheel
+      }
+    } catch (e) { /* no-op */ }
+
+    // Boost scene lighting so Lambert materials read brightly without
+    // looking translucent. 3d-force-graph ships with a default
+    // AmbientLight + DirectionalLight at modest intensity; we add a
+    // stronger ambient + key + fill so colours pop on the dark bg.
+    try {
+      const THREE = window.THREE;
+      const scene = (typeof graphInstance.scene === 'function')
+        ? graphInstance.scene() : null;
+      if (THREE && scene) {
+        const ambient = new THREE.AmbientLight(0xffffff, 0.9);
+        scene.add(ambient);
+        const key = new THREE.DirectionalLight(0xffffff, 0.7);
+        key.position.set(80, 120, 60);
+        scene.add(key);
+        const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+        fill.position.set(-120, -40, -80);
+        scene.add(fill);
       }
     } catch (e) { /* no-op */ }
 
