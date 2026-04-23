@@ -1217,19 +1217,23 @@ async function initOrRefreshGraph() {
       // x/y/z populated by the simulation).
       const byId = {};
       for (const n of gd.nodes) byId[n.id] = n;
-      // Axis-centring soft-pull for non-junction nodes. d3-force's
-      // default center force only shifts the centroid — it doesn't
-      // prevent the cluster from elongating along a single axis. A
-      // weak per-tick pull toward 0 on each axis keeps the cluster
-      // roughly spherical without dominating other forces.
-      const AXIS_PULL = 0.03;
+      // Soft spherical containment: nodes beyond a radius get pulled
+      // back toward origin, but nodes inside the radius feel nothing.
+      // Unlike a per-tick axis pull (which doesn't decay with alpha
+      // and eventually collapses the graph), this acts only at the
+      // edge and lets charge/link forces arrange the interior
+      // freely. Keeps the cluster roughly bounded without crushing it.
+      const MAX_R = 110;
       for (const n of gd.nodes) {
-        if (n.isJunction) continue;           // pinned separately
+        if (n.isJunction) continue;
         if (n.fx != null || n.fy != null || n.fz != null) continue;
         if (typeof n.x !== 'number') continue;
-        n.vx = (n.vx || 0) + (-n.x) * AXIS_PULL;
-        n.vy = (n.vy || 0) + (-n.y) * AXIS_PULL;
-        n.vz = (n.vz || 0) + (-n.z) * AXIS_PULL;
+        const r = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (r <= MAX_R) continue;
+        const pull = ((r - MAX_R) / r) * 0.05;
+        n.vx = (n.vx || 0) - n.x * pull;
+        n.vy = (n.vy || 0) - n.y * pull;
+        n.vz = (n.vz || 0) - n.z * pull;
       }
 
       // Junction pinning (unchanged): place each junction at a fixed
