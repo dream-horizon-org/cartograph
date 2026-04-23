@@ -1123,17 +1123,19 @@ key 0.7 + fill 0.35 for bright Lambert illumination.
 **Palette:** Tailwind 600-range jewel tones — teal / blue / pink /
 purple / orange; slate-800 fallback for unattributed.
 
-**Edge bundling:** when N≥3 bound edges share `(target, edge_type,
+**Edge bundling:** when N≥2 bound edges share `(target, edge_type,
 identifier)`, a virtual junction node is inserted. Callers route
 through the junction. Junction is PINNED each tick (`onEngineTick`)
 at `target_pos + unit_vector_to_callers_centroid × 14` so it
 always sits close to the target, not mid-line. Junction is slate
-and tiny so it reads as scaffolding.
+and tiny so it reads as scaffolding. Singletons stay as a straight
+edge; N≥2 always bundles so pairs also get a visible convergence
+point.
 
 **Layout forces:** charge strength `-180`, link distances
-55 / 40 / 12 (regular / junction-in / junction-out), soft radial
-containment at r=110 applied in `onEngineTick` to prevent runaway
-stretch. Library default center force untouched.
+55 / 40 / 12 / 22 (regular / junction-in / junction-out / stub),
+soft radial containment at r=110 applied in `onEngineTick` to
+prevent runaway stretch. Library default center force untouched.
 
 **Cursor-centric zoom:** manual wheel handler (library's
 `enableZoom = false`). Exponential factor `exp(deltaY * 0.0015)`
@@ -1168,6 +1170,9 @@ accessor results by identity.
 
 **Sidebar tabs on component click:** Doc · Slice · Catalog ·
 Bindings in · Bindings out · Flows. Flows grouped by incoming.
+Catalog rows show their actual bound-caller list (e.g.
+"7 caller(s): feeds-api, kyc-svc, …") when bindings exist; only
+genuine orphans render as "exposed — no caller bound yet".
 
 **Dangling-edge stubs (shipped post-3.10 polish):**
 - Orphan catalog (kind='catalog' with no bound caller matching
@@ -1177,8 +1182,14 @@ Bindings in · Bindings out · Flows. Flows grouped by incoming.
   bound edge already represents them.
 - Outgoing dangling (kind='dangling') renders as `X → ?`: real
   source, stub placeholder on the target side.
-- Stub `?` nodes pin at a fixed radial offset outside their
-  anchor (20-ish units), so they cluster at the graph boundary.
+- Stub `?` nodes pin at a FROZEN per-stub offset vector from
+  their anchor. Siblings of one anchor fan around a small tilted
+  ring (distinct theta per sibling), so multiple orphan catalogs
+  or danglings on the same component (e.g. payments `POST /charge`
+  + `POST /refund`) don't stack on top of each other. Offsets are
+  computed once at transform time and never re-derived from anchor
+  position — anchor motion doesn't rotate stub direction, so there
+  are no sibling-stub collision pulses into the cluster.
 - Hover the stub side → `"no known caller"` / `"unknown target"`
   tooltip. Hover the real side → standard caller/target flow
   lookup (finds feeders or downstream via flows on the anchor).
