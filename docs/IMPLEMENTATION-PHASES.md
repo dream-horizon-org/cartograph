@@ -1102,38 +1102,93 @@ respond to actual data shapes rather than guesses.
 
 ## Phase 3.10: Edge Graph Viz — Hovers + Light-of-Sight ✅ (depends on 3.9)
 
-Shipped across two commits: `190a06c` /api/graph payload extension
-(kind + flows) → frontend upgrades (edge styling + 3-zone hover +
-light-of-sight BFS + sidebar tabs).
+Shipped initially in two commits; iterated many times since on
+visual tuning, hover semantics, LOS behaviour, node rendering,
+junction pinning, cursor zoom. Final live behaviour as of compact:
 
 ### What's live
-- `/api/graph` returns `{nodes, edges, flows}` with per-edge `kind`
-  (bound/catalog/dangling).
-- Only BOUND edges render as 3d links — catalog + dangling surface
-  in the sidebar tabs when a node is clicked.
-- 3-zone hover on any bound link:
-  - SOURCE third  → caller's incoming edges whose flows fire this out
-  - MIDPOINT third → other callers converging on the same (to, type, id)
-  - TARGET third  → callee's outgoing edges in the flow this in triggers
-  - Live zone detection via screen-space projection of source/target
-    node coords; cursor fraction along the projected line picks the zone.
-- Light-of-sight: click any edge → BFS through bindings + flows,
-  depth-capped at 8. Lit edges render amber + directional particles
-  for 5s, then auto-clear.
-- Sidebar tabs on the component detail panel:
-  Doc · Slice · Catalog · Bindings in · Bindings out · Flows.
-  Flows grouped by incoming_edge_id to show fan-out structure.
 
-### Still deferred to later polish
-- Catalog/dangling as "stub" lines floating at nodes (currently
-  sidebar-only).
-- Colour palette tuning per theme.
-- Performance: bundling convergent edges at high fan-in.
+**Backend:** `GET /api/graph` returns `{nodes, edges, flows}` with
+per-edge `kind` (bound/catalog/dangling). Bound-edge JOIN filters
+decommissioned components.
+
+**Node rendering (per-type geometry):** `makeNodeMesh` returns a
+`THREE.MeshLambertMaterial` mesh shaped per `component_type`:
+sphere (application), cylinder (database), torus (cache), cone
+(queue), octahedron (lambda), icosahedron (cron), tetrahedron
+(external-service), cube (library), flat box (infrastructure),
+tiny tetrahedron (junction). Scene ambient 0.9 + directional
+key 0.7 + fill 0.35 for bright Lambert illumination.
+
+**Palette:** Tailwind 600-range jewel tones — teal / blue / pink /
+purple / orange; slate-800 fallback for unattributed.
+
+**Edge bundling:** when N≥3 bound edges share `(target, edge_type,
+identifier)`, a virtual junction node is inserted. Callers route
+through the junction. Junction is PINNED each tick (`onEngineTick`)
+at `target_pos + unit_vector_to_callers_centroid × 14` so it
+always sits close to the target, not mid-line. Junction is slate
+and tiny so it reads as scaffolding.
+
+**Layout forces:** charge strength `-180`, link distances
+55 / 40 / 12 (regular / junction-in / junction-out), soft radial
+containment at r=110 applied in `onEngineTick` to prevent runaway
+stretch. Library default center force untouched.
+
+**Cursor-centric zoom:** manual wheel handler (library's
+`enableZoom = false`). Exponential factor `exp(deltaY * 0.0015)`
+clamped to [0.94, 1.06] per-event. Raycasts cursor to a point at
+current orbit-target distance; scales camera offset around that
+point. Orbit target stays stable (no lerp drift).
+
+**Hover zones (3 zones):**
+- `caller` — bound-edge first half OR junction-in segment body.
+  Glows caller's incoming edges where `flow.outgoing = this_edge`.
+- `target` — bound-edge second half OR junction-out body.
+  Glows callee's outgoing edges where `flow.incoming` ∈
+  `effectiveFlowIncomingsForEdge(this_edge)` (catalog-bridged).
+- `convergence` — tiny zone at the junction itself (last 15% of
+  junction-in OR first 15% of junction-out). Glows all edges
+  converging at that junction.
+Visual refresh uses fresh arrow functions on every call
+(`linkColor(l => resolveLinkColor(l))`) because the library caches
+accessor results by identity.
+
+**Light-of-sight (strict forward BFS, layered):**
+- Seed: clicked edge (+ bundle siblings if bundled).
+- Each layer: from the DESTINATION of every edge in the current
+  layer, find flows on that destination where the edge is the
+  incoming (catalog-bridged). Add those flow outgoings as the
+  next layer.
+- Visited tracking: `"component|incoming_edge"` pairs AND
+  `outgoing_edge` ids — prevents cycles + duplicate emission.
+- 220 ms stagger per layer animates the pulse outward.
+- Persists until user clicks empty space or another edge.
+- Amber color + 4 directional particles for lit state.
+
+**Sidebar tabs on component click:** Doc · Slice · Catalog ·
+Bindings in · Bindings out · Flows. Flows grouped by incoming.
+
+### Known gaps / future polish
+- Catalog / dangling not visualised as floating stubs on the 3d
+  graph — sidebar only.
+- No true bloom post-processing (tried emissive; user rejected
+  "water bubble feel"). Current Lambert + bright lighting is the
+  compromise.
+- Frontend has no test harness yet; changes verified manually.
 
 ### Tests
 - Backend: `/api/graph` payload shape (kind discriminator + flows
   array) verified in `tests/admin_ui/test_graph_endpoint.py`.
-- Frontend: no test harness yet — manual smoke test documented.
+- 292 tests passing total.
+
+### Demo mock data
+`src/admin_ui/mock_seed.py` seeds two demo topologies:
+1. **Feeds / payments mesh** — 7+ callers converging on payments-svc
+   GET /balance (bundle demo), 3 on auth-svc POST /verify.
+2. **Chain demo** — p→q→r→s→t→u and x→y→z→s→t→u sharing s/t/u.
+   Click any head edge for multi-layer LOS propagation.
+Cleanup: `python -m admin_ui.mock_seed cleanup`.
 
 ---
 
