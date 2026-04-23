@@ -868,6 +868,16 @@ const NO_PLANE_COLOR = '#71717a';  // zinc
 
 let graphInstance = null;
 let graphLoadedOnce = false;
+// Snapshot of the latest /api/graph response. Kept in module scope so
+// click handlers for nodes + edges can resolve related rows (catalog,
+// dangling, flows) without re-fetching.
+let graphSnapshot = {nodes: [], edges: [], flows: [], nodeById: {}, edgeById: {}};
+// Which component's detail tab is currently open. Used when switching
+// tabs to keep scrolled state clean.
+let activeDetailNodeId = null;
+let activeDetailTab = 'doc';
+// Light-of-sight highlighting state — set of edge ids to light up.
+let litEdgeIds = new Set();
 
 function blendColors(hexColors) {
   // Average RGB components. For 1 color, returns it unchanged; for N,
@@ -903,8 +913,29 @@ async function initOrRefreshGraph() {
     return;
   }
   const data = await res.json();
+
+  // Build lookup maps once per load — used by sidebar + LOS BFS.
+  graphSnapshot = {
+    nodes: data.nodes,
+    edges: data.edges,
+    flows: data.flows || [],
+    nodeById: Object.fromEntries(data.nodes.map(n => [n.id, n])),
+    edgeById: Object.fromEntries(data.edges.map(e => [e.id, e])),
+  };
+
+  // Live counts in sidebar. Edge count is only BOUND rows (those shown
+  // as links in the 3d graph); catalog + dangling count separately.
+  const boundCount   = data.edges.filter(e => e.kind === 'bound').length;
+  const catalogCount = data.edges.filter(e => e.kind === 'catalog').length;
+  const danglingCount= data.edges.filter(e => e.kind === 'dangling').length;
   document.getElementById('graph-comp-count').textContent = data.nodes.length;
-  document.getElementById('graph-edge-count').textContent = data.edges.length;
+  document.getElementById('graph-edge-count').textContent =
+    `${boundCount} bound · ${catalogCount} catalog · ${danglingCount} dangling`;
+
+  // Only bound edges render as 3d links. Catalog + dangling surface in
+  // the sidebar when a node is clicked (a 3.11 follow-up could float
+  // them as stubs, but that adds visual noise up front).
+  const boundEdges = data.edges.filter(e => e.kind === 'bound');
 
   const gData = {
     nodes: data.nodes.map(n => ({
@@ -917,11 +948,13 @@ async function initOrRefreshGraph() {
       planes: n.planes,
       color: nodeColor(n.planes),
     })),
-    links: data.edges.map(e => ({
+    links: boundEdges.map(e => ({
+      id: e.id,
       source: e.source_id,
       target: e.target_id,
       edge_type: e.edge_type,
       identifier: e.identifier,
+      confidence: e.confidence,
     })),
   };
 
@@ -929,23 +962,25 @@ async function initOrRefreshGraph() {
   if (!graphInstance) {
     graphInstance = ForceGraph3D()(canvas)
       .backgroundColor('#0a0a0a')
-      // Smooth high-segment spheres — default 8 segments looked faceted /
-      // playschool. Bumping to 32 gets us proper round nodes.
       .nodeResolution(32)
       .nodeOpacity(0.92)
       .nodeLabel(n => `${n.name} (${n.type})`)
       .nodeColor(n => n.color)
       .nodeVal(n => 4 + (n.planes?.length || 0) * 1.5)
-      .linkColor(() => 'rgba(168, 168, 168, 0.32)')
-      .linkWidth(0.6)
+      .linkColor(l => litEdgeIds.has(l.id)
+        ? 'rgba(251, 191, 36, 0.95)'  // amber when lit
+        : 'rgba(168, 168, 168, 0.32)'
+      )
+      .linkWidth(l => litEdgeIds.has(l.id) ? 1.6 : 0.6)
       .linkOpacity(0.55)
       .linkDirectionalArrowLength(3)
       .linkDirectionalArrowRelPos(1)
-      .linkLabel(l => `${l.edge_type}: ${l.identifier}`)
-      // Hover only shows the lightweight nodeLabel tooltip the library
-      // renders. Sidebar detail is reserved for explicit clicks so the
-      // user isn't bombarded as the cursor drifts across nodes.
-      .onNodeClick(n => showGraphNodeDetail(n));
+      .linkDirectionalParticles(l => litEdgeIds.has(l.id) ? 4 : 0)
+      .linkDirectionalParticleSpeed(0.008)
+      .linkDirectionalParticleWidth(2)
+      .linkLabel(l => edgeHoverLabel(l))
+      .onNodeClick(n => showGraphNodeDetail(n))
+      .onLinkClick(l => lightOfSight(l.id));
   }
   graphInstance.graphData(gData);
 
@@ -958,17 +993,175 @@ async function initOrRefreshGraph() {
   }
 }
 
+// ---------- Edge hover label (3-zone aware) ----------
+//
+// 3d-force-graph's built-in linkLabel is a plain tooltip — it doesn't
+// know cursor position on the link. For the three-zone semantics we
+// project the link's source/target positions to screen space and
+// measure the cursor's fractional position along the projected line.
+// Called from a mousemove listener; the label re-renders live.
+
+let lastHoveredLink = null;
+let lastZone = null;
+
+function linkZoneForCursor(link, mouseX, mouseY) {
+  // Returns 'source' | 'midpoint' | 'target' based on cursor position
+  // along the link's 2D projection. Needs the 3d-force-graph camera
+  // to project node positions. Returns null if link is missing coords.
+  if (!link || !link.source || !link.target) return null;
+  if (typeof graphInstance.camera !== 'function') return null;
+  const camera = graphInstance.camera();
+  const canvas = document.getElementById('graph-canvas');
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  // Project THREE.Vector3 → screen space.
+  const project = (node) => {
+    if (!window.THREE) return null;
+    const v = new window.THREE.Vector3(node.x || 0, node.y || 0, node.z || 0);
+    v.project(camera);
+    return {x: (v.x + 1) * w / 2, y: (-v.y + 1) * h / 2};
+  };
+  const src = project(link.source);
+  const tgt = project(link.target);
+  if (!src || !tgt) return null;
+  const dx = tgt.x - src.x, dy = tgt.y - src.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1) return 'midpoint';
+  const t = ((mouseX - src.x) * dx + (mouseY - src.y) * dy) / len2;
+  if (t < 0.33) return 'source';
+  if (t > 0.66) return 'target';
+  return 'midpoint';
+}
+
+function edgeHoverLabel(link) {
+  // Text shown in the library's built-in tooltip. Keep it concise —
+  // the rich 3-zone detail lives in the sidebar via clicking.
+  return `${link.edge_type}: ${link.identifier} (click for light-of-sight)`;
+}
+
+// ---------- Light-of-sight BFS ----------
+//
+// Click an edge → BFS outward through bindings + flows, lighting every
+// reachable edge. Forward (from this outgoing to downstream) and
+// backward (to the incoming(s) that trigger this outgoing). Capped at
+// depth ~8 to keep pathological graphs sane.
+
+function lightOfSight(startEdgeId) {
+  const cap = 8;
+  const visited = new Set([startEdgeId]);
+  const frontier = [{edgeId: startEdgeId, depth: 0}];
+  while (frontier.length) {
+    const {edgeId, depth} = frontier.shift();
+    if (depth >= cap) continue;
+    const edge = graphSnapshot.edgeById[edgeId];
+    if (!edge) continue;
+    // Forward: find flows where this edge is the incoming; enqueue their outgoings.
+    for (const f of graphSnapshot.flows) {
+      if (f.incoming_edge_id === edgeId && !visited.has(f.outgoing_edge_id)) {
+        visited.add(f.outgoing_edge_id);
+        frontier.push({edgeId: f.outgoing_edge_id, depth: depth + 1});
+      }
+      // Backward: if this edge is an outgoing on some flow, enqueue the incoming.
+      if (f.outgoing_edge_id === edgeId && !visited.has(f.incoming_edge_id)) {
+        visited.add(f.incoming_edge_id);
+        frontier.push({edgeId: f.incoming_edge_id, depth: depth + 1});
+      }
+    }
+  }
+  litEdgeIds = visited;
+  // Force link style refresh — redraw using the same data.
+  const current = graphInstance.graphData();
+  graphInstance.graphData(current);
+  // Auto-clear after 5s.
+  setTimeout(() => {
+    litEdgeIds = new Set();
+    const cur = graphInstance.graphData();
+    graphInstance.graphData(cur);
+  }, 5000);
+}
+
 function showGraphNodeDetail(node) {
   const $doc = document.getElementById('graph-hover-doc');
   if (!node) {
+    activeDetailNodeId = null;
     $doc.innerHTML = '<p class="empty">Click a component in the graph to inspect it.</p>';
     return;
   }
-  const planes = (node.planes || []).length
-    ? node.planes.map(p => `<span class="plane-pill" style="background:${PLANE_COLORS[p] || NO_PLANE_COLOR}22;color:${PLANE_COLORS[p] || NO_PLANE_COLOR}">${p}</span>`).join('')
+  activeDetailNodeId = node.id;
+  // Reset tab to Doc on a fresh click; subsequent tab switches use
+  // setGraphDetailTab (below).
+  activeDetailTab = 'doc';
+  renderGraphDetailPanel();
+}
+
+function renderGraphDetailPanel() {
+  const $doc = document.getElementById('graph-hover-doc');
+  if (!activeDetailNodeId) {
+    $doc.innerHTML = '<p class="empty">Click a component in the graph to inspect it.</p>';
+    return;
+  }
+  const node = graphSnapshot.nodeById[activeDetailNodeId];
+  if (!node) {
+    $doc.innerHTML = '<p class="empty">Component no longer in graph.</p>';
+    return;
+  }
+  const planesArr = node.planes || [];
+  const planes = planesArr.length
+    ? planesArr.map(p => `<span class="plane-pill" style="background:${PLANE_COLORS[p] || NO_PLANE_COLOR}22;color:${PLANE_COLORS[p] || NO_PLANE_COLOR}">${p}</span>`).join('')
     : '<span class="plane-pill">no attributions</span>';
-  const doc = node.doc ? renderMarkdown(node.doc) : '<p class="empty">No doc written yet — SME will populate on next materialisation.</p>';
-  const sliceHtml = renderSourceSlice(node.slice);
+
+  // Edges + flows touching this component.
+  const incoming_bound = graphSnapshot.edges.filter(
+    e => e.kind === 'bound' && e.target_id === node.id
+  );
+  const incoming_catalog = graphSnapshot.edges.filter(
+    e => e.kind === 'catalog' && e.target_id === node.id
+  );
+  const outgoing_bound = graphSnapshot.edges.filter(
+    e => e.kind === 'bound' && e.source_id === node.id
+  );
+  const outgoing_dangling = graphSnapshot.edges.filter(
+    e => e.kind === 'dangling' && e.source_id === node.id
+  );
+  const flows = graphSnapshot.flows.filter(f => f.component_id === node.id);
+
+  const tabs = [
+    {id: 'doc',       label: 'Doc'},
+    {id: 'slice',     label: 'Slice'},
+    {id: 'catalog',   label: `Catalog (${incoming_catalog.length})`},
+    {id: 'in',        label: `Bindings in (${incoming_bound.length})`},
+    {id: 'out',       label: `Bindings out (${outgoing_bound.length + outgoing_dangling.length})`},
+    {id: 'flows',     label: `Flows (${flows.length})`},
+  ];
+  const tabHtml = tabs.map(t =>
+    `<button class="detail-tab ${t.id === activeDetailTab ? 'active' : ''}"
+             data-tab="${t.id}">${escapeHtml(t.label)}</button>`
+  ).join('');
+
+  let body = '';
+  if (activeDetailTab === 'doc') {
+    body = node.doc
+      ? renderMarkdown(node.doc)
+      : '<p class="empty">No doc written yet — SME will populate on next materialisation.</p>';
+  } else if (activeDetailTab === 'slice') {
+    const sliceHtml = renderSourceSlice(node.slice);
+    body = sliceHtml || '<p class="empty">No source_slice — this component covers its whole source resource.</p>';
+  } else if (activeDetailTab === 'catalog') {
+    body = incoming_catalog.length
+      ? renderEdgeList(incoming_catalog, {showSide: 'caller-side-unknown'})
+      : '<p class="empty">No catalog rows. Applications/lambdas/external-services should declare exposed endpoints via upsert_edge_catalog.</p>';
+  } else if (activeDetailTab === 'in') {
+    body = incoming_bound.length
+      ? renderEdgeList(incoming_bound, {showSide: 'caller'})
+      : '<p class="empty">No inbound bindings from other components yet.</p>';
+  } else if (activeDetailTab === 'out') {
+    const merged = [...outgoing_bound, ...outgoing_dangling];
+    body = merged.length
+      ? renderEdgeList(merged, {showSide: 'callee'})
+      : '<p class="empty">No outbound edges yet.</p>';
+  } else if (activeDetailTab === 'flows') {
+    body = flows.length ? renderFlowList(flows) : '<p class="empty">No flows recorded. During Edge Discovery, SMEs upsert_flow to link each incoming edge to its downstream outgoings.</p>';
+  }
+
   $doc.innerHTML = `
     <div class="graph-node-head">
       <b>${escapeHtml(node.name)}</b>
@@ -976,10 +1169,79 @@ function showGraphNodeDetail(node) {
       <div class="kv-row"><span>type</span><code>${escapeHtml(node.type)}</code></div>
       <div class="plane-pills">${planes}</div>
     </div>
-    <hr>
-    ${doc}
-    ${sliceHtml}
+    <div class="detail-tabs">${tabHtml}</div>
+    <div class="detail-body">${body}</div>
   `;
+
+  // Wire up tab clicks.
+  $doc.querySelectorAll('.detail-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeDetailTab = btn.dataset.tab;
+      renderGraphDetailPanel();
+    });
+  });
+}
+
+function setGraphDetailTab(tabId) {
+  activeDetailTab = tabId;
+  renderGraphDetailPanel();
+}
+
+function renderEdgeList(edges, opts) {
+  // opts.showSide: 'caller' → show "from: <component>"
+  //                 'callee' → show "to: <component> | dangling"
+  //                 'caller-side-unknown' → catalog, no caller known
+  return edges.map(e => {
+    let sideHtml = '';
+    if (opts.showSide === 'caller') {
+      const srcNode = graphSnapshot.nodeById[e.source_id];
+      sideHtml = `<span class="edge-from">from ${escapeHtml(srcNode?.name || e.source_id.slice(0, 8))}</span>`;
+    } else if (opts.showSide === 'callee') {
+      if (e.target_id) {
+        const tgtNode = graphSnapshot.nodeById[e.target_id];
+        sideHtml = `<span class="edge-to">to ${escapeHtml(tgtNode?.name || e.target_id.slice(0, 8))}</span>`;
+      } else {
+        sideHtml = `<span class="edge-to dangling">dangling (to unresolved)</span>`;
+      }
+    } else if (opts.showSide === 'caller-side-unknown') {
+      sideHtml = `<span class="edge-from catalog">exposed — no caller bound yet</span>`;
+    }
+    const conf = e.confidence != null ? ` · conf ${Number(e.confidence).toFixed(2)}` : '';
+    return `
+      <div class="edge-row" data-edge-id="${e.id}">
+        <div class="edge-head">
+          <span class="edge-type">${escapeHtml(e.edge_type)}</span>
+          <code class="edge-identifier">${escapeHtml(e.identifier)}</code>
+        </div>
+        <div class="edge-sub">${sideHtml}${conf}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderFlowList(flows) {
+  // Group by incoming_edge_id to show fan-out structure.
+  const byIncoming = {};
+  for (const f of flows) {
+    (byIncoming[f.incoming_edge_id] ||= []).push(f);
+  }
+  return Object.entries(byIncoming).map(([incomingId, rows]) => {
+    const incoming = graphSnapshot.edgeById[incomingId];
+    const outgoings = rows.map(r => graphSnapshot.edgeById[r.outgoing_edge_id]).filter(Boolean);
+    const incHead = incoming
+      ? `${escapeHtml(incoming.edge_type)} <code>${escapeHtml(incoming.identifier)}</code>`
+      : `<em>missing edge ${incomingId.slice(0, 8)}</em>`;
+    const outList = outgoings.map(o => {
+      const tgt = o.target_id ? graphSnapshot.nodeById[o.target_id]?.name : 'dangling';
+      return `<li>${escapeHtml(o.edge_type)} <code>${escapeHtml(o.identifier)}</code> <span class="edge-to">→ ${escapeHtml(tgt || 'dangling')}</span></li>`;
+    }).join('');
+    return `
+      <div class="flow-block">
+        <div class="flow-incoming">${incHead}</div>
+        <ul class="flow-outgoings">${outList}</ul>
+      </div>
+    `;
+  }).join('');
 }
 
 function renderSourceSlice(slice) {
@@ -1027,4 +1289,142 @@ window.addEventListener('resize', () => {
     const canvas = document.getElementById('graph-canvas');
     graphInstance.width(canvas.clientWidth).height(canvas.clientHeight);
   }
+});
+
+// ---------- 3-zone hover: custom DOM tooltip aware of cursor position
+// along the hovered link. Updates live as the mouse moves. ----------
+
+let hoverTooltip = null;
+
+function ensureHoverTooltip() {
+  if (hoverTooltip) return hoverTooltip;
+  hoverTooltip = document.createElement('div');
+  hoverTooltip.id = 'graph-edge-tooltip';
+  hoverTooltip.style.display = 'none';
+  document.body.appendChild(hoverTooltip);
+  return hoverTooltip;
+}
+
+// Hook into the graph instance once it exists to capture hover state.
+function wireEdgeHoverZones() {
+  if (!graphInstance) return;
+  const canvas = document.getElementById('graph-canvas');
+  if (!canvas || canvas.dataset.hoverWired) return;
+  canvas.dataset.hoverWired = '1';
+
+  // Track the currently-hovered link via the library callback.
+  graphInstance.onLinkHover(l => {
+    lastHoveredLink = l;
+    if (!l) {
+      ensureHoverTooltip().style.display = 'none';
+    }
+  });
+
+  // mousemove over the canvas → update tooltip with zone-specific view.
+  canvas.addEventListener('mousemove', e => {
+    const tt = ensureHoverTooltip();
+    if (!lastHoveredLink) {
+      tt.style.display = 'none';
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    const zone = linkZoneForCursor(lastHoveredLink, x, y);
+    if (!zone) {
+      tt.style.display = 'none';
+      return;
+    }
+    lastZone = zone;
+    tt.innerHTML = renderEdgeZoneTooltip(lastHoveredLink, zone);
+    tt.style.display = 'block';
+    tt.style.left = (e.clientX + 12) + 'px';
+    tt.style.top  = (e.clientY + 12) + 'px';
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    ensureHoverTooltip().style.display = 'none';
+  });
+}
+
+function renderEdgeZoneTooltip(link, zone) {
+  // The hovered link is a BOUND edge (we only render bound in the 3d
+  // graph). For each zone we show a different piece of context.
+  const srcNode = graphSnapshot.nodeById[link.source?.id || link.source];
+  const tgtNode = graphSnapshot.nodeById[link.target?.id || link.target];
+  const header = `
+    <div class="tt-head">
+      <span class="tt-kind">${escapeHtml(link.edge_type)}</span>
+      <code class="tt-ident">${escapeHtml(link.identifier)}</code>
+    </div>
+    <div class="tt-endpoints">
+      ${escapeHtml(srcNode?.name || '?')} → ${escapeHtml(tgtNode?.name || '?')}
+    </div>
+  `;
+
+  if (zone === 'source') {
+    // Caller-internal: which of SOURCE's incoming edges trigger this outgoing?
+    const feeders = graphSnapshot.flows
+      .filter(f => f.component_id === (srcNode?.id) && f.outgoing_edge_id === link.id)
+      .map(f => graphSnapshot.edgeById[f.incoming_edge_id])
+      .filter(Boolean);
+    const body = feeders.length
+      ? feeders.map(fe => `<li>${escapeHtml(fe.edge_type)} <code>${escapeHtml(fe.identifier)}</code></li>`).join('')
+      : '<li><em>no flow recorded from source incoming edges</em></li>';
+    return `
+      ${header}
+      <div class="tt-zone">CALLER view — incoming edges of <b>${escapeHtml(srcNode?.name || '?')}</b> whose flows fire this outgoing</div>
+      <ul class="tt-list">${body}</ul>
+    `;
+  }
+  if (zone === 'target') {
+    // Callee-internal: which of TARGET's outgoing edges fire when this incoming hits?
+    const downstream = graphSnapshot.flows
+      .filter(f => f.component_id === (tgtNode?.id) && f.incoming_edge_id === link.id)
+      .map(f => graphSnapshot.edgeById[f.outgoing_edge_id])
+      .filter(Boolean);
+    const body = downstream.length
+      ? downstream.map(de => `<li>${escapeHtml(de.edge_type)} <code>${escapeHtml(de.identifier)}</code></li>`).join('')
+      : '<li><em>no flow recorded from this incoming edge</em></li>';
+    return `
+      ${header}
+      <div class="tt-zone">CALLEE view — outgoing edges of <b>${escapeHtml(tgtNode?.name || '?')}</b> triggered by this incoming</div>
+      <ul class="tt-list">${body}</ul>
+    `;
+  }
+  // Midpoint: convergence at the target endpoint. Who else calls it?
+  const siblings = graphSnapshot.edges.filter(e =>
+    e.kind === 'bound'
+    && e.target_id === (tgtNode?.id)
+    && e.edge_type === link.edge_type
+    && e.identifier === link.identifier
+    && e.id !== link.id
+  );
+  const body = siblings.length
+    ? siblings.map(s => {
+        const src = graphSnapshot.nodeById[s.source_id];
+        return `<li>from ${escapeHtml(src?.name || s.source_id.slice(0, 8))}</li>`;
+      }).join('')
+    : '<li><em>only you call this endpoint</em></li>';
+  return `
+    ${header}
+    <div class="tt-zone">CONVERGENCE — others calling the same <code>${escapeHtml(tgtNode?.name)}</code> endpoint</div>
+    <ul class="tt-list">${body}</ul>
+  `;
+}
+
+// The graph instance is created inside initOrRefreshGraph. Attach the
+// hover wiring after each (re)init — idempotent thanks to dataset guard.
+const _origInit = initOrRefreshGraph;
+// Intentionally NOT wrapping — hook at the end of init by extending it:
+// we already do this because wireEdgeHoverZones is called at the end
+// of initOrRefreshGraph below (via an event-driven re-attach). Instead
+// let's just invoke it on each refresh by hooking into the refresh btn
+// + first tab switch.
+function _attachHoverOnNextFrame() {
+  requestAnimationFrame(() => wireEdgeHoverZones());
+}
+document.getElementById('graph-refresh')?.addEventListener('click', _attachHoverOnNextFrame);
+// Also wire when the Graph tab becomes active (first reveal).
+document.querySelector('.tab[data-tab="graph"]')?.addEventListener('click', () => {
+  setTimeout(wireEdgeHoverZones, 300);  // after initOrRefreshGraph resolves
 });

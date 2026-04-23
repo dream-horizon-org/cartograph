@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-23):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 ✅ (graph viz with 3d-force-graph) · Phase 3.7 ✅ (local embeddings via Ollama + Metal, 1024d) · Phase 3.8 ✅ (`components.source_slice` for monorepo splits + SME materialisation flow rewrite) · **Phase 3.9 ✅** (asymmetric edge protocol — catalog + bindings + flows).
-- **65 MCP tools** registered · **291 tests** passing.
+**Status (2026-04-23):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 ✅ (graph viz with 3d-force-graph) · Phase 3.7 ✅ (local embeddings via Ollama + Metal, 1024d) · Phase 3.8 ✅ (`components.source_slice` for monorepo splits + SME materialisation flow rewrite) · Phase 3.9 ✅ (asymmetric edge protocol — catalog + bindings + flows) · **Phase 3.10 ✅** (graph viz upgrades — edge discriminators + 3-zone hover + light-of-sight BFS + sidebar tabs).
+- **65 MCP tools** registered · **292 tests** passing.
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 
 ---
@@ -1100,7 +1100,44 @@ respond to actual data shapes rather than guesses.
 
 ---
 
-## Phase 3.10: Edge Graph Viz — Hovers + Light-of-Sight (PLANNED, depends on 3.9)
+## Phase 3.10: Edge Graph Viz — Hovers + Light-of-Sight ✅ (depends on 3.9)
+
+Shipped across two commits: `190a06c` /api/graph payload extension
+(kind + flows) → frontend upgrades (edge styling + 3-zone hover +
+light-of-sight BFS + sidebar tabs).
+
+### What's live
+- `/api/graph` returns `{nodes, edges, flows}` with per-edge `kind`
+  (bound/catalog/dangling).
+- Only BOUND edges render as 3d links — catalog + dangling surface
+  in the sidebar tabs when a node is clicked.
+- 3-zone hover on any bound link:
+  - SOURCE third  → caller's incoming edges whose flows fire this out
+  - MIDPOINT third → other callers converging on the same (to, type, id)
+  - TARGET third  → callee's outgoing edges in the flow this in triggers
+  - Live zone detection via screen-space projection of source/target
+    node coords; cursor fraction along the projected line picks the zone.
+- Light-of-sight: click any edge → BFS through bindings + flows,
+  depth-capped at 8. Lit edges render amber + directional particles
+  for 5s, then auto-clear.
+- Sidebar tabs on the component detail panel:
+  Doc · Slice · Catalog · Bindings in · Bindings out · Flows.
+  Flows grouped by incoming_edge_id to show fan-out structure.
+
+### Still deferred to later polish
+- Catalog/dangling as "stub" lines floating at nodes (currently
+  sidebar-only).
+- Colour palette tuning per theme.
+- Performance: bundling convergent edges at high fan-in.
+
+### Tests
+- Backend: `/api/graph` payload shape (kind discriminator + flows
+  array) verified in `tests/admin_ui/test_graph_endpoint.py`.
+- Frontend: no test harness yet — manual smoke test documented.
+
+---
+
+## Phase 3.10: Edge Graph Viz — Hovers + Light-of-Sight (ORIGINAL PLAN — superseded by above)
 
 Renders the asymmetric edge model from 3.9 in the 3d-force-graph
 view: catalog vs bound vs dangling are visually distinct; hovering
