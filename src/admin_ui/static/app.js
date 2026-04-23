@@ -856,17 +856,17 @@ async function _postWake(body) {
 // in — HSL blend when multiple. Hovering or clicking a node shows its
 // component_doc_md (markdown) in the sidebar.
 
-// Bright vibrant gradient palette — inspired by "bright colour
-// gradients" packs. More chroma than the prior jewel tones, but still
-// readable against #050505.
+// Richer saturated jewel tones — Tailwind 600-range. Brighter chroma
+// than the 500s but slightly darker lightness; reads as "rich + deep"
+// against #050505 without losing vibrancy.
 const PLANE_COLORS = {
-  github:    '#14b8a6',  // teal-500 — coded energy
-  deploy:    '#3b82f6',  // blue-500 — trustworthy
-  cloud:     '#ec4899',  // pink-500 — hot
-  telemetry: '#a855f7',  // purple-500
-  config:    '#f59e0b',  // amber-500
+  github:    '#0d9488',  // teal-600
+  deploy:    '#2563eb',  // blue-600
+  cloud:     '#db2777',  // pink-600
+  telemetry: '#9333ea',  // purple-600
+  config:    '#ea580c',  // orange-600 — more saturated than amber
 };
-const NO_PLANE_COLOR = '#334155';  // slate-700 — darker so unattributed sinks
+const NO_PLANE_COLOR = '#1e293b';  // slate-800 — unattributed sinks deeper
 
 let graphInstance = null;
 let graphLoadedOnce = false;
