@@ -1055,7 +1055,7 @@ async function initOrRefreshGraph() {
   const bundledEdgeIds = new Set();  // edges routed via a junction
 
   for (const [key, group] of Object.entries(convergenceGroups)) {
-    if (group.length < 3) continue;  // no bundle for pairs
+    if (group.length < 2) continue;  // bundle every shared-target endpoint
     const junctionId = `__junction__${key}`;
     junctionNodes.push({
       id: junctionId,
