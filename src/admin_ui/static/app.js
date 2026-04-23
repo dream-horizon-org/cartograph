@@ -1390,28 +1390,25 @@ function linkFraction(link, mouseX, mouseY) {
 }
 
 function linkZoneForCursor(link, mouseX, mouseY) {
-  // Junction-aware zone classification.
-  //   caller : hover on the caller side (before the junction)
-  //   midpoint: hover on the junction itself / middle of the edge
-  //   target : hover on the callee side (after the junction)
-  //
-  // For bundled links the junction sits at 80% toward target, so the
-  // in-segment is always "caller side" and the short trunk is mostly
-  // "midpoint" with its last 20% being "target side."
-  //
-  // For regular bound edges we split into thirds.
+  // Zones:
+  //   caller      : pre-junction / first half of edge → caller-side view
+  //   target      : post-junction / second half of edge → callee-side view
+  //   convergence : tiny space around the junction itself → show all
+  //                 edges converging at that junction (bundle only)
   const t = linkFraction(link, mouseX, mouseY);
   if (t == null) return null;
   if (link.isJunctionIn) {
-    return 'caller';  // whole in-segment is pre-junction
+    // Whole in-segment is caller-side, but the junction end is the
+    // convergence zone.
+    return t > 0.85 ? 'convergence' : 'caller';
   }
   if (link.isJunctionOut) {
-    return t > 0.8 ? 'target' : 'midpoint';
+    // The junction sits at the START (source end) of this link.
+    // A small zone near there = convergence; the rest = target-side.
+    return t < 0.15 ? 'convergence' : 'target';
   }
-  // Regular bound edge.
-  if (t < 0.33) return 'caller';
-  if (t > 0.66) return 'target';
-  return 'midpoint';
+  // Regular bound: split at 50%.
+  return t < 0.5 ? 'caller' : 'target';
 }
 
 function edgeHoverLabel(link) {
@@ -1534,100 +1531,98 @@ function catalogEdgeFor(edge) {
 }
 
 function lightOfSight(link) {
-  // Cancel any in-flight reveal from a prior click — new click
-  // supersedes the old chain.
+  // Cancel any in-flight reveal from a prior click.
   _losTimers.forEach(t => clearTimeout(t));
   _losTimers = [];
   litEdgeIds = new Set();
   refreshGraphVisuals();
 
-  // Resolve the seed set. Bundle-aware: clicking the trunk OR any
-  // bundled contributor lights the whole bundle as layer 0.
-  let seedIds;
+  // Resolve seed edges (real edge rows). Bundle-aware: clicking trunk
+  // OR any contributor seeds the whole bundle in layer 0.
+  let seedEdges = [];
+  const seedVisualIds = new Set();
   if (link.isJunctionOut && link.groupEdgeIds) {
-    seedIds = [...link.groupEdgeIds, link.id];
+    seedVisualIds.add(link.id);  // trunk lights too
+    for (const id of link.groupEdgeIds) {
+      const e = graphSnapshot.edgeById[id];
+      if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+    }
   } else if (link.isJunctionIn) {
     const meta = graphSnapshot.junctionOutById || {};
-    let bundle = null;
     for (const [outId, out] of Object.entries(meta)) {
       if (out.groupEdgeIds.includes(link.id)) {
-        bundle = {outId, ids: out.groupEdgeIds};
+        seedVisualIds.add(outId);
+        for (const id of out.groupEdgeIds) {
+          const e = graphSnapshot.edgeById[id];
+          if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+        }
         break;
       }
     }
-    seedIds = bundle ? [...bundle.ids, bundle.outId] : [link.id];
+    if (seedEdges.length === 0) {
+      const e = graphSnapshot.edgeById[link.id];
+      if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+    }
   } else {
-    seedIds = [link.id];
+    const e = graphSnapshot.edgeById[link.id];
+    if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
   }
 
-  // Forward-only BFS in layers.
-  // Semantics: an edge is part of the traversal if it's been visited
-  // once. Forward expansion = "this edge's flow downstream." For each
-  // visited edge id e, look at flows where e is the INCOMING. Their
-  // outgoings are layer N+1. No backward expansion. Sibling converging
-  // edges (same target+type+identifier) are included so a LOS click
-  // on one caller shows all parallel callers hitting the same endpoint
-  // (that's what "convergence" means in the graph).
-  //
-  // Cycle pruning: if a target edge is already visited, we skip it.
-  // Branch terminates there; other branches continue.
-  //
-  // Safety cap: 100 layers (graph is finite + small; this shouldn't
-  // trigger in practice).
+  // Forward BFS starting from DESTINATION of each seed edge.
+  // For each edge e (acting as an incoming at dest=e.to_component_id):
+  //   find flows on e.to_component_id where incoming matches e (or its
+  //   catalog bridge). Each such flow's outgoing goes to the next layer.
+  // Visited tracking:
+  //   visitedPairs       : "component|incoming_edge_id" — skip if seen
+  //   visitedOutgoing    : outgoing_edge_id already emitted
+  // Prevents infinite loops; keeps layers strict.
 
-  const visited = new Set(seedIds);
-  const layers = [seedIds];              // layer 0 = seed
-  const SAFETY_CAP = 100;
+  const layers = [[...seedVisualIds]];
+  const visitedPairs = new Set();
+  const visitedOutgoing = new Set();
+  seedEdges.forEach(e => visitedOutgoing.add(e.id));
 
-  let currentLayer = seedIds;
-  for (let depth = 1; depth < SAFETY_CAP; depth++) {
-    const nextLayer = new Set();
-    for (const edgeId of currentLayer) {
-      // Catalog-bridged forward expansion. For the clicked bound edge
-      // and every subsequent one, we treat any catalog row matching
-      // (to, type, identifier) as an equivalent incoming. That's how
-      // the mock + real SMEs record flows: the catalog represents the
-      // "this endpoint fired" event, independent of caller. Without
-      // bridging, clicking a caller's bound edge wouldn't expand into
-      // the callee's downstream because the flow's incoming references
-      // the catalog, not the bound row.
-      const flowIncomingIds = new Set(effectiveFlowIncomingsForEdge(edgeId));
-      for (const f of graphSnapshot.flows) {
-        if (flowIncomingIds.has(f.incoming_edge_id)
-            && !visited.has(f.outgoing_edge_id)) {
-          nextLayer.add(f.outgoing_edge_id);
-        }
+  let currentEdges = seedEdges;
+  for (let depth = 1; depth < 100; depth++) {
+    const nextOutgoingIds = new Set();
+    for (const e of currentEdges) {
+      const destComponentId = e.to_component_id;
+      if (!destComponentId) continue;
+      // Catalog-bridged incoming set for this edge at the destination.
+      const flowIncomings = effectiveFlowIncomingsForEdge(e.id);
+      // Record visited-pair for each bridged incoming so we don't
+      // re-explore this (component, incoming) combo.
+      let alreadySeen = false;
+      for (const fi of flowIncomings) {
+        const pairKey = destComponentId + '|' + fi;
+        if (visitedPairs.has(pairKey)) { alreadySeen = true; break; }
       }
-      // Also include bound sibling edges converging on the same
-      // endpoint. Shows the convergence fan-in during the reveal.
-      const e = graphSnapshot.edgeById[edgeId];
-      if (e && e.to_component_id) {
-        for (const sib of graphSnapshot.edges) {
-          if (sib.id !== edgeId
-              && sib.kind === 'bound'
-              && sib.to_component_id === e.to_component_id
-              && sib.edge_type === e.edge_type
-              && sib.identifier === e.identifier
-              && !visited.has(sib.id)) {
-            nextLayer.add(sib.id);
-          }
-        }
+      if (alreadySeen) continue;
+      for (const fi of flowIncomings) {
+        visitedPairs.add(destComponentId + '|' + fi);
+      }
+      for (const f of graphSnapshot.flows) {
+        if (f.component_id !== destComponentId) continue;
+        if (!flowIncomings.includes(f.incoming_edge_id)) continue;
+        if (visitedOutgoing.has(f.outgoing_edge_id)) continue;
+        visitedOutgoing.add(f.outgoing_edge_id);
+        nextOutgoingIds.add(f.outgoing_edge_id);
       }
     }
-    if (nextLayer.size === 0) break;
-    nextLayer.forEach(id => visited.add(id));
-    layers.push([...nextLayer]);
-    currentLayer = [...nextLayer];
+    if (nextOutgoingIds.size === 0) break;
+    layers.push([...nextOutgoingIds]);
+    currentEdges = [...nextOutgoingIds]
+      .map(id => graphSnapshot.edgeById[id])
+      .filter(Boolean);
   }
 
-  // Stagger reveal — one layer every ~220ms so the propagation reads
-  // as "light traveling outward" rather than a static flash.
+  // Stagger the reveal so the light propagates layer by layer.
   const STAGGER_MS = 220;
   const lit = new Set();
   layers.forEach((layer, i) => {
     const t = setTimeout(() => {
       layer.forEach(id => lit.add(id));
-      litEdgeIds = new Set(lit);  // fresh set so refresh sees change
+      litEdgeIds = new Set(lit);
       refreshGraphVisuals();
     }, i * STAGGER_MS);
     _losTimers.push(t);
@@ -1967,7 +1962,13 @@ function resolveUnderlyingEdge(link) {
 }
 
 function hoverZoneResolve(link, zone) {
-  // Returns {tooltipHtml, edgeIds}. edgeIds = cyan glow set.
+  // Three zones:
+  //   caller      → glow caller's incoming edges whose flows have this
+  //                 edge as an outgoing.
+  //   target      → glow callee's outgoing edges whose flows have this
+  //                 edge as an incoming (catalog-bridged).
+  //   convergence → at a junction: glow all edges arriving there
+  //                 (contributors + trunk), regardless of flows.
   const {srcNode, tgtNode} = resolveEdgeEndpoints(link);
   const underlying = resolveUnderlyingEdge(link);
   const header = `
@@ -1980,122 +1981,82 @@ function hoverZoneResolve(link, zone) {
     </div>
   `;
 
+  // Convergence zone: only meaningful at a bundle junction. For regular
+  // bound edges (no junction), we'd treat this as caller — but the
+  // zone classifier doesn't emit 'convergence' for non-bundled links,
+  // so we only handle it here for junction cases.
+  if (zone === 'convergence') {
+    const ids = new Set();
+    if (link.isJunctionOut) {
+      ids.add(link.id);  // trunk
+      (link.groupEdgeIds || []).forEach(id => ids.add(id));
+    } else if (link.isJunctionIn) {
+      const meta = graphSnapshot.junctionOutById || {};
+      for (const [outId, out] of Object.entries(meta)) {
+        if (out.groupEdgeIds.includes(link.id)) {
+          ids.add(outId);
+          out.groupEdgeIds.forEach(id => ids.add(id));
+          break;
+        }
+      }
+    } else {
+      ids.add(link.id);
+    }
+    const contribList = [...ids].map(id => {
+      const e = graphSnapshot.edgeById[id];
+      if (!e) return null;
+      const src = graphSnapshot.nodeById[e.source_id];
+      return src ? `<li>${escapeHtml(src.name)}</li>` : null;
+    }).filter(Boolean).join('');
+    return {
+      tooltipHtml: `
+        ${header}
+        <div class="tt-zone">JUNCTION — ${ids.size} edge(s) converging here</div>
+        <ul class="tt-list">${contribList || '<li><em>no contributors</em></li>'}</ul>
+      `,
+      edgeIds: [...ids],
+    };
+  }
+
   const edgeIds = new Set();
 
   if (zone === 'caller') {
-    // "Before the junction" view. Glow:
-    //   • This edge only (its slice — not sibling contributors)
-    //   • The caller component's incoming edges whose flows include
-    //     this outgoing as a downstream.
-    // Only bound incoming edges actually glow visually (catalog rows
-    // aren't rendered as lines), but the tooltip lists both.
+    // Caller-side: glow all incoming edges of the CALLER whose flows
+    // have this edge as an outgoing.
     edgeIds.add(link.id);
-
-    const feederEdgeIds = [];
+    const feederIds = [];
     if (srcNode && underlying) {
       for (const f of graphSnapshot.flows) {
         if (f.component_id === srcNode.id
             && f.outgoing_edge_id === underlying.id) {
-          feederEdgeIds.push(f.incoming_edge_id);
+          feederIds.push(f.incoming_edge_id);
         }
       }
     }
-    // Each feeder may be a catalog row (not rendered) or a bound-in
-    // edge (rendered). Glow the bound ones.
-    for (const fid of feederEdgeIds) {
+    // Bound feeders glow in canvas; catalog feeders only listed in tooltip.
+    for (const fid of feederIds) {
       const fe = graphSnapshot.edgeById[fid];
       if (fe && fe.kind === 'bound') edgeIds.add(fid);
     }
-
-    const feederList = feederEdgeIds
+    const feederList = feederIds
       .map(id => graphSnapshot.edgeById[id])
       .filter(Boolean)
-      .map(fe => `<li>${escapeHtml(fe.edge_type)} <code>${escapeHtml(fe.identifier)}</code>${fe.kind === 'catalog' ? ' <em>(catalog — own exposed surface)</em>' : ''}</li>`)
+      .map(fe => `<li>${escapeHtml(fe.edge_type)} <code>${escapeHtml(fe.identifier)}</code>${fe.kind === 'catalog' ? ' <em>(catalog)</em>' : ''}</li>`)
       .join('');
     return {
       tooltipHtml: `
         ${header}
-        <div class="tt-zone">CALLER view — incoming edges of <b>${escapeHtml(srcNode?.name || '?')}</b> that fire this outgoing</div>
+        <div class="tt-zone">CALLER — incomings of <b>${escapeHtml(srcNode?.name || '?')}</b> firing this outgoing</div>
         <ul class="tt-list">${feederList || '<li><em>no flow recorded</em></li>'}</ul>
       `,
       edgeIds: [...edgeIds],
     };
   }
 
-  if (zone === 'midpoint') {
-    // "At the junction" view. Glow the full convergence set:
-    //   • If bundled: the trunk + every in-segment contributor.
-    //   • If regular bound: the edge + every sibling bound edge
-    //     hitting the same (target, type, identifier).
-    // The tooltip lists all the callers converging here.
-
-    let contributors;
-    if (link.isJunctionOut) {
-      contributors = [...(link.groupEdgeIds || [])];
-      edgeIds.add(link.id);                // trunk
-      contributors.forEach(id => edgeIds.add(id));
-    } else if (link.isJunctionIn) {
-      // Shouldn't reach here (zone 'midpoint' returned only for
-      // junction-out or regular) — belt-and-braces.
-      const meta = graphSnapshot.junctionOutById || {};
-      for (const [outId, out] of Object.entries(meta)) {
-        if (out.groupEdgeIds.includes(link.id)) {
-          contributors = [...out.groupEdgeIds];
-          edgeIds.add(outId);
-          contributors.forEach(id => edgeIds.add(id));
-          break;
-        }
-      }
-      contributors = contributors || [link.id];
-    } else {
-      // Regular bound edge — find siblings converging on same endpoint.
-      contributors = [link.id];
-      edgeIds.add(link.id);
-      if (tgtNode) {
-        for (const sib of graphSnapshot.edges) {
-          if (sib.id !== link.id
-              && sib.kind === 'bound'
-              && sib.to_component_id === tgtNode.id
-              && sib.edge_type === link.edge_type
-              && sib.identifier === link.identifier) {
-            contributors.push(sib.id);
-            edgeIds.add(sib.id);
-          }
-        }
-      }
-    }
-
-    const contributorList = contributors
-      .map(id => graphSnapshot.edgeById[id])
-      .filter(Boolean)
-      .map(c => {
-        const src = graphSnapshot.nodeById[c.source_id];
-        return `<li>${escapeHtml(src?.name || '?')}</li>`;
-      }).join('');
-    return {
-      tooltipHtml: `
-        ${header}
-        <div class="tt-zone">CONVERGENCE — ${contributors.length} caller(s) fan in to <b>${escapeHtml(tgtNode?.name || '?')}</b></div>
-        <ul class="tt-list">${contributorList || '<li><em>no contributors found</em></li>'}</ul>
-      `,
-      edgeIds: [...edgeIds],
-    };
-  }
-
   // zone === 'target'
-  // "After the junction" view. Glow:
-  //   • This edge (or trunk)
-  //   • Target component's outgoing edges in the flow triggered by
-  //     this incoming (via catalog bridging — the underlying edge's
-  //     catalog equivalent is the incoming in target's flows).
-
+  // Glow all outgoing edges of the CALLEE whose flows have this edge
+  // as an incoming (catalog-bridged).
   edgeIds.add(link.id);
-  if (link.isJunctionOut) {
-    // Also include bundled contributors in the glow so the caller
-    // chains stay visible when exploring target-side.
-    (link.groupEdgeIds || []).forEach(id => edgeIds.add(id));
-  }
-
   const downstreamIds = [];
   if (tgtNode && underlying) {
     const incomingCandidates = effectiveFlowIncomingsForEdge(underlying.id);
@@ -2107,7 +2068,6 @@ function hoverZoneResolve(link, zone) {
     }
   }
   downstreamIds.forEach(id => edgeIds.add(id));
-
   const downstreamList = downstreamIds
     .map(id => graphSnapshot.edgeById[id])
     .filter(Boolean)
@@ -2118,8 +2078,8 @@ function hoverZoneResolve(link, zone) {
   return {
     tooltipHtml: `
       ${header}
-      <div class="tt-zone">CALLEE view — outgoings of <b>${escapeHtml(tgtNode?.name || '?')}</b> fired by this incoming</div>
-      <ul class="tt-list">${downstreamList || '<li><em>no downstream flow from this incoming</em></li>'}</ul>
+      <div class="tt-zone">CALLEE — outgoings of <b>${escapeHtml(tgtNode?.name || '?')}</b> fired by this incoming</div>
+      <ul class="tt-list">${downstreamList || '<li><em>no downstream flow</em></li>'}</ul>
     `,
     edgeIds: [...edgeIds],
   };
