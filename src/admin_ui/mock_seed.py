@@ -140,6 +140,19 @@ COMPONENTS = [
      "planes": ["github"], "doc": "# Y\nChain-2 hop."},
     {"canonical": "mock/z", "display": "Z", "type": "application",
      "planes": ["github"], "doc": "# Z\nChain-2 tail, calls S."},
+
+    # --- Fan-out demo: A/B/C/D each expose two endpoints; flows fan
+    # out from A's inbound endpoints to different downstream components.
+    # Click a1-stub at A → lights a1 → A→B(b1) → B→C(c1).
+    # Click a2-stub at A → lights a2 → A→B(b2) → B→D(d1).
+    {"canonical": "mock/fan-a", "display": "A", "type": "application",
+     "planes": ["github"], "doc": "# A\nFan-out head. Exposes a1, a2."},
+    {"canonical": "mock/fan-b", "display": "B", "type": "application",
+     "planes": ["github"], "doc": "# B\nFan-out middle. Exposes b1, b2; calls C, D."},
+    {"canonical": "mock/fan-c", "display": "C", "type": "application",
+     "planes": ["github"], "doc": "# C\nFan-out leaf. Exposes c1, c2."},
+    {"canonical": "mock/fan-d", "display": "D", "type": "application",
+     "planes": ["github"], "doc": "# D\nFan-out leaf. Exposes d1, d2."},
 ]
 
 
@@ -209,6 +222,18 @@ def seed_edges(ids: dict[str, str]) -> dict[str, str]:
         ("mock/p", "calls", "p.admin_ping"),
         # s exposes a debug endpoint nothing calls → inbound stub at s.
         ("mock/s", "calls", "s.debug"),
+        # --- Fan-out demo catalogs (A has two orphan inbounds; B's b1/b2
+        # have bound callers from A so they stay hidden; C exposes c1 +
+        # c2 but only c1 has a bound caller so c2 is an orphan; same for
+        # D where d2 is orphan).
+        ("mock/fan-a", "calls", "a1"),
+        ("mock/fan-a", "calls", "a2"),
+        ("mock/fan-b", "calls", "b1"),
+        ("mock/fan-b", "calls", "b2"),
+        ("mock/fan-c", "calls", "c1"),
+        ("mock/fan-c", "calls", "c2"),
+        ("mock/fan-d", "calls", "d1"),
+        ("mock/fan-d", "calls", "d2"),
     ]
     for canonical, etype, ident in catalog_defs:
         row = execute_returning(
@@ -268,6 +293,15 @@ def seed_edges(ids: dict[str, str]) -> dict[str, str]:
         ("mock/z", "mock/s", "calls", "s.handle"),
         ("mock/s", "mock/t", "calls", "t.handle"),
         ("mock/t", "mock/u", "calls", "u.handle"),
+
+        # --- Fan-out demo bound edges ---
+        # A calls B at b1 and b2 (two parallel bound edges, distinct
+        # identifiers → no bundling since keys differ). B calls C at c1.
+        # B calls D at d1.
+        ("mock/fan-a", "mock/fan-b", "calls", "b1"),
+        ("mock/fan-a", "mock/fan-b", "calls", "b2"),
+        ("mock/fan-b", "mock/fan-c", "calls", "c1"),
+        ("mock/fan-b", "mock/fan-d", "calls", "d1"),
     ]
     for from_c, to_c, etype, ident in bound_defs:
         row = execute_returning(
@@ -396,6 +430,22 @@ def seed_flows(ids: dict[str, str], edges: dict[str, str]) -> int:
         ("mock/u",
          "catalog::mock/u::u.handle",
          "dangling::mock/u::https://webhook.unknown/notify"),
+
+        # --- Fan-out demo flows ---
+        # A: a1 is the inbound; fires A→B(b1). a2 fires A→B(b2).
+        ("mock/fan-a",
+         "catalog::mock/fan-a::a1",
+         "bound::mock/fan-a->mock/fan-b::b1"),
+        ("mock/fan-a",
+         "catalog::mock/fan-a::a2",
+         "bound::mock/fan-a->mock/fan-b::b2"),
+        # B: b1 inbound fires B→C(c1). b2 inbound fires B→D(d1).
+        ("mock/fan-b",
+         "catalog::mock/fan-b::b1",
+         "bound::mock/fan-b->mock/fan-c::c1"),
+        ("mock/fan-b",
+         "catalog::mock/fan-b::b2",
+         "bound::mock/fan-b->mock/fan-d::d1"),
 
         # match-svc: multiple outgoings per incoming for CALLER-zone demo.
         # We don't have catalog rows for match/search/user, so we fake
