@@ -356,6 +356,264 @@ def create_edge(agent_id: str, edge_data: dict) -> dict:
     return row
 
 
+# ============ Phase 3.9: asymmetric edge tools ============
+#
+# Asymmetric edge protocol (see docs/IMPLEMENTATION-PHASES.md §3.9):
+#  - catalog row:  from_component_id IS NULL, callee owns
+#  - bound row:    both non-null, caller owns
+#  - dangling out: to_component_id IS NULL, caller owns
+#
+# Ownership is permanent on the from-side (or to-side when from IS NULL).
+# Filling `to` on a dangling row does NOT shift ownership — caller still
+# owns it.
+#
+# Multi-source consolidation: edges are a holistic view (unlike
+# attributions which are per-plane). One SME owning a component may
+# discover the same edge from multiple planes their component spans
+# (code + telemetry + deploy). All sources accumulate into ONE edge
+# row's metadata + confidence — never separate rows.
+
+
+def upsert_edge_catalog(agent_id: str, edge_data: dict) -> dict:
+    """Callee declares an exposed endpoint / consumed topic / accepted
+    query. Writes a row with from_component_id=NULL, owned by the
+    callee's SME.
+
+    Required edge_data keys: to_component_id, edge_type, identifier.
+    Optional: metadata, confidence, source_attr_id.
+
+    Idempotent on (to_component_id, edge_type, identifier) WHERE
+    from_component_id IS NULL — re-calling updates metadata + confidence
+    + last_seen_at, never creates a duplicate catalog row.
+
+    Scope: caller must own to_component_id via RCA.
+    """
+    _assert_sme(agent_id)
+    to_component_id = (edge_data.get("to_component_id") or "").strip()
+    edge_type = (edge_data.get("edge_type") or "").strip()
+    identifier = (edge_data.get("identifier") or "").strip()
+    metadata = edge_data.get("metadata") or {}
+    confidence = float(edge_data.get("confidence", 1.0))
+    target_attr_id = edge_data.get("target_attr_id")
+
+    if not to_component_id:
+        raise ValueError("to_component_id is required for catalog rows")
+    if edge_type not in _VALID_EDGE_TYPES:
+        raise ValueError(
+            f"Invalid edge_type '{edge_type}'. Valid: {sorted(_VALID_EDGE_TYPES)}"
+        )
+    if not identifier:
+        raise ValueError("identifier is required")
+    if not (0.0 <= confidence <= 1.0):
+        raise ValueError("confidence must be in [0.0, 1.0]")
+    if not _sme_owns_component(agent_id, to_component_id):
+        raise ValueError(
+            f"SME {agent_id} does not own component {to_component_id}. "
+            "You can only declare catalog entries on your own component."
+        )
+
+    vec = emb.vector_literal(emb.embed_text(
+        emb.edge_embed_text(edge_type, identifier)
+    ))
+    row = execute_returning(
+        """INSERT INTO edges
+           (from_component_id, to_component_id, edge_type, identifier,
+            target_attr_id, evidence, confidence, metadata, embedding,
+            discovered_by, last_seen_at)
+           VALUES (NULL, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb,
+                   %s::vector, %s, now())
+           ON CONFLICT (to_component_id, edge_type, identifier)
+             WHERE from_component_id IS NULL
+           DO UPDATE
+             SET metadata = edges.metadata || EXCLUDED.metadata,
+                 confidence = GREATEST(edges.confidence, EXCLUDED.confidence),
+                 target_attr_id = COALESCE(EXCLUDED.target_attr_id, edges.target_attr_id),
+                 embedding = EXCLUDED.embedding,
+                 last_seen_at = now()
+           RETURNING *""",
+        (
+            to_component_id, edge_type, identifier, target_attr_id,
+            json.dumps([]), confidence, json.dumps(metadata), vec, agent_id,
+        ),
+    )
+    return row
+
+
+def upsert_edge_outbound(agent_id: str, edge_data: dict) -> dict:
+    """Caller declares an outgoing edge. to_component_id may be NULL
+    (dangling) or set (bound). Writes a row owned by the caller's SME.
+
+    Required edge_data keys: from_component_id, edge_type, identifier.
+    Optional: to_component_id, metadata, confidence, source_attr_id,
+    target_attr_id, evidence.
+
+    Routing of ON CONFLICT depends on whether to_component_id is set:
+      - bound:    (from, to, type, identifier) WHERE both non-null
+      - dangling: (from, type, identifier)     WHERE to IS NULL
+
+    Multi-source: subsequent calls accumulate metadata + take the max
+    confidence (not the latest) — represents "we've seen this from
+    more sources, our certainty grew."
+
+    Scope: caller must own from_component_id.
+    """
+    _assert_sme(agent_id)
+    from_component_id = (edge_data.get("from_component_id") or "").strip()
+    to_raw = edge_data.get("to_component_id")
+    to_component_id = (to_raw.strip() if isinstance(to_raw, str) else None) or None
+    edge_type = (edge_data.get("edge_type") or "").strip()
+    identifier = (edge_data.get("identifier") or "").strip()
+    source_attr_id = edge_data.get("source_attr_id")
+    target_attr_id = edge_data.get("target_attr_id")
+    evidence = edge_data.get("evidence") or []
+    confidence = float(edge_data.get("confidence", 1.0))
+    metadata = edge_data.get("metadata") or {}
+
+    if not from_component_id:
+        raise ValueError("from_component_id is required")
+    if edge_type not in _VALID_EDGE_TYPES:
+        raise ValueError(
+            f"Invalid edge_type '{edge_type}'. Valid: {sorted(_VALID_EDGE_TYPES)}"
+        )
+    if not identifier:
+        raise ValueError("identifier is required")
+    if not (0.0 <= confidence <= 1.0):
+        raise ValueError("confidence must be in [0.0, 1.0]")
+    if to_component_id is not None and to_component_id == from_component_id:
+        raise ValueError("from_component_id and to_component_id must differ (no self-loops)")
+    if not _sme_owns_component(agent_id, from_component_id):
+        raise ValueError(
+            f"SME {agent_id} does not own from_component_id {from_component_id}. "
+            "You can only write outbound edges from your own component."
+        )
+
+    vec = emb.vector_literal(emb.embed_text(
+        emb.edge_embed_text(edge_type, identifier)
+    ))
+
+    if to_component_id is None:
+        # Dangling outgoing path. ON CONFLICT on (from, type, identifier)
+        # WHERE to IS NULL.
+        row = execute_returning(
+            """INSERT INTO edges
+               (from_component_id, to_component_id, edge_type, identifier,
+                source_attr_id, target_attr_id, evidence, confidence,
+                metadata, embedding, discovered_by, last_seen_at)
+               VALUES (%s, NULL, %s, %s, %s, %s, %s::jsonb, %s,
+                       %s::jsonb, %s::vector, %s, now())
+               ON CONFLICT (from_component_id, edge_type, identifier)
+                 WHERE to_component_id IS NULL
+               DO UPDATE
+                 SET metadata = edges.metadata || EXCLUDED.metadata,
+                     confidence = GREATEST(edges.confidence, EXCLUDED.confidence),
+                     source_attr_id = COALESCE(EXCLUDED.source_attr_id, edges.source_attr_id),
+                     target_attr_id = COALESCE(EXCLUDED.target_attr_id, edges.target_attr_id),
+                     embedding = EXCLUDED.embedding,
+                     last_seen_at = now()
+               RETURNING *""",
+            (
+                from_component_id, edge_type, identifier,
+                source_attr_id, target_attr_id,
+                json.dumps(evidence), confidence, json.dumps(metadata),
+                vec, agent_id,
+            ),
+        )
+    else:
+        # Bound path. ON CONFLICT on (from, to, type, identifier).
+        row = execute_returning(
+            """INSERT INTO edges
+               (from_component_id, to_component_id, edge_type, identifier,
+                source_attr_id, target_attr_id, evidence, confidence,
+                metadata, embedding, discovered_by, last_seen_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s,
+                       %s::jsonb, %s::vector, %s, now())
+               ON CONFLICT (from_component_id, to_component_id, edge_type, identifier)
+                 WHERE from_component_id IS NOT NULL AND to_component_id IS NOT NULL
+               DO UPDATE
+                 SET metadata = edges.metadata || EXCLUDED.metadata,
+                     confidence = GREATEST(edges.confidence, EXCLUDED.confidence),
+                     source_attr_id = COALESCE(EXCLUDED.source_attr_id, edges.source_attr_id),
+                     target_attr_id = COALESCE(EXCLUDED.target_attr_id, edges.target_attr_id),
+                     embedding = EXCLUDED.embedding,
+                     last_seen_at = now()
+               RETURNING *""",
+            (
+                from_component_id, to_component_id, edge_type, identifier,
+                source_attr_id, target_attr_id,
+                json.dumps(evidence), confidence, json.dumps(metadata),
+                vec, agent_id,
+            ),
+        )
+    return row
+
+
+def bind_edge(agent_id: str, edge_id: str, to_component_id: str) -> dict:
+    """Resolve a dangling outgoing edge to a target component.
+    Sets to_component_id on a row that previously had to=NULL.
+
+    Refuses if a bound row with the resulting (from, to, type, identifier)
+    already exists — caller can choose to merge metadata into the existing
+    row + delete the dangling, or rename the dangling identifier. We
+    don't silently merge.
+
+    Scope: caller must own the edge's from_component_id (which is also
+    the row's owner).
+    """
+    _assert_sme(agent_id)
+    if not edge_id:
+        raise ValueError("edge_id is required")
+    if not to_component_id:
+        raise ValueError("to_component_id is required")
+
+    edge = execute_one(
+        "SELECT * FROM edges WHERE id = %s",
+        (edge_id,),
+    )
+    if edge is None:
+        raise ValueError(f"Edge {edge_id} not found")
+    if edge["to_component_id"] is not None:
+        raise ValueError(
+            f"Edge {edge_id} is already bound to {edge['to_component_id']}; "
+            "bind_edge only resolves dangling rows (to IS NULL)."
+        )
+    if edge["from_component_id"] is None:
+        raise ValueError(
+            f"Edge {edge_id} is a catalog row (from IS NULL); cannot be bound."
+        )
+    if not _sme_owns_component(agent_id, str(edge["from_component_id"])):
+        raise ValueError(
+            f"SME {agent_id} does not own from_component_id "
+            f"{edge['from_component_id']}; cannot bind."
+        )
+    if str(to_component_id) == str(edge["from_component_id"]):
+        raise ValueError("Cannot bind to self (no self-loops)")
+
+    # Refuse if a bound row already covers this (from, to, type, identifier).
+    collision = execute_one(
+        """SELECT id FROM edges
+           WHERE from_component_id = %s AND to_component_id = %s
+             AND edge_type = %s AND identifier = %s
+             AND id <> %s""",
+        (edge["from_component_id"], to_component_id,
+         edge["edge_type"], edge["identifier"], edge_id),
+    )
+    if collision is not None:
+        raise ValueError(
+            f"A bound edge with the same (from, to, type, identifier) already "
+            f"exists at {collision['id']}. Either merge metadata into that "
+            "row + delete this dangling one, or rename the identifier."
+        )
+
+    row = execute_returning(
+        """UPDATE edges
+           SET to_component_id = %s, last_seen_at = now()
+           WHERE id = %s
+           RETURNING *""",
+        (to_component_id, edge_id),
+    )
+    return row
+
+
 # ============ insert_unresolved ============
 
 

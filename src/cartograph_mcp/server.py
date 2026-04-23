@@ -561,19 +561,92 @@ def upsert_attribution(
 
 @mcp.tool()
 def create_edge(agent_id: str, edge_data: dict[str, Any]) -> dict[str, Any]:
-    """Record a dependency edge from this SME's component. SME-ONLY (owns source).
+    """[Phase 3.9 backward-compat shim] Record a bound edge from this
+    SME's component. Prefer upsert_edge_outbound for new code.
 
-    Idempotent on (source_id, target_id, edge_type, identifier). Refuses
-    self-loops (source == target).
+    Equivalent to upsert_edge_outbound with both endpoints set. Refuses
+    self-loops. Idempotent on (from, to, type, identifier).
 
     edge_data keys:
-      source_id (your component), target_id, edge_type (calls/reads_from/
-        writes_to/triggers/publishes_to/consumes_from/runs_on),
-      identifier (specific call, e.g. 'GET /scorecard'),
-      source_attr_id? target_attr_id? (ids of the attributions on either side),
-      evidence (array), confidence, metadata.
+      source_id (your component — accepted as from_component_id alias),
+      target_id (callee — accepted as to_component_id alias),
+      edge_type, identifier, source_attr_id?, target_attr_id?, evidence,
+      confidence, metadata.
     """
     return components_tool.create_edge(agent_id, edge_data)
+
+
+@mcp.tool()
+def upsert_edge_catalog(
+    agent_id: str, edge_data: dict[str, Any]
+) -> dict[str, Any]:
+    """[Phase 3.9] Callee declares an exposed endpoint / consumed topic /
+    accepted query. Writes a catalog row (from_component_id IS NULL),
+    owned by this SME. SME-ONLY (must own to_component_id).
+
+    Idempotent on (to_component_id, edge_type, identifier) WHERE
+    from_component_id IS NULL — re-calling accumulates metadata + takes
+    max confidence; never duplicates.
+
+    edge_data keys: to_component_id (your component), edge_type
+    (calls/reads_from/writes_to/triggers/publishes_to/consumes_from/runs_on),
+    identifier (endpoint path / topic name / query template), metadata?,
+    confidence?, target_attr_id?.
+
+    When to use: applications/lambdas/external-services should declare
+    every endpoint they expose and every topic they consume. DBs /
+    caches / queues / object-stores typically don't bother — they
+    accept arbitrary queries / writes.
+    """
+    return components_tool.upsert_edge_catalog(agent_id, edge_data)
+
+
+@mcp.tool()
+def upsert_edge_outbound(
+    agent_id: str, edge_data: dict[str, Any]
+) -> dict[str, Any]:
+    """[Phase 3.9] Caller declares an outgoing edge. to_component_id may
+    be set (bound edge) or NULL (dangling — target not yet identified).
+    SME-ONLY (must own from_component_id). Caller permanently owns the
+    row; filling to later via bind_edge does NOT shift ownership.
+
+    Idempotent — re-calls accumulate metadata + take max confidence.
+    Routing of ON CONFLICT depends on whether to_component_id is set:
+      bound:    (from, to, type, identifier)   WHERE both non-null
+      dangling: (from, type, identifier)       WHERE to IS NULL
+
+    edge_data keys: from_component_id (your component), to_component_id?
+    (omit/null for dangling), edge_type, identifier, source_attr_id?,
+    target_attr_id?, evidence (array), confidence, metadata.
+
+    When to use:
+      - Bound: target component is known + (recommended) target's
+        catalog has a matching row. Just bind directly.
+      - Dangling: target's catalog is missing the identifier; write the
+        outgoing with to=NULL + create_clarification to the callee.
+        Once they add the catalog row, call bind_edge to set to.
+      - For db/cache/queue/etc. callees with no catalog: bind freely;
+        no clarification needed.
+    """
+    return components_tool.upsert_edge_outbound(agent_id, edge_data)
+
+
+@mcp.tool()
+def bind_edge(
+    agent_id: str, edge_id: str, to_component_id: str
+) -> dict[str, Any]:
+    """[Phase 3.9] Resolve a dangling outgoing edge by setting
+    to_component_id. SME-ONLY (must own the edge's from_component_id).
+
+    Refuses if a bound row with the resulting (from, to, type,
+    identifier) already exists — caller chooses to merge metadata into
+    that existing row + delete the dangling, or rename the dangling
+    identifier. No silent merge.
+
+    Use when a previously-dangling outgoing's target component appears
+    in the graph (your hygiene pass / vector_search succeeded).
+    """
+    return components_tool.bind_edge(agent_id, edge_id, to_component_id)
 
 
 @mcp.tool()
