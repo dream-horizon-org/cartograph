@@ -856,15 +856,16 @@ async function _postWake(body) {
 // in — HSL blend when multiple. Hovering or clicking a node shows its
 // component_doc_md (markdown) in the sidebar.
 
-// Polished palette — Tailwind 400-range, cohesive on a dark background.
+// Modern data-viz palette — more saturated than the Tailwind 400
+// range we had, distinct hue per plane, balanced on #0a0a0a bg.
 const PLANE_COLORS = {
-  github:    '#4ade80',  // emerald
-  deploy:    '#60a5fa',  // sky
-  cloud:     '#fb7185',  // rose
-  telemetry: '#c084fc',  // violet
-  config:    '#fbbf24',  // amber
+  github:    '#22d3ee',  // cyan-400
+  deploy:    '#38bdf8',  // sky-400 — kept close to github for "code+deploy" affinity
+  cloud:     '#f472b6',  // pink-400
+  telemetry: '#c084fc',  // violet-400
+  config:    '#fbbf24',  // amber-400
 };
-const NO_PLANE_COLOR = '#71717a';  // zinc
+const NO_PLANE_COLOR = '#475569';  // slate-600 — darker so nodes without attributions sink
 
 let graphInstance = null;
 let graphLoadedOnce = false;
@@ -956,73 +957,164 @@ async function initOrRefreshGraph() {
   // them as stubs, but that adds visual noise up front).
   const boundEdges = data.edges.filter(e => e.kind === 'bound');
 
-  // Compute per-link curvature so parallel edges (same source+target
-  // pair, multiple edge_type / identifier combos) fan out instead of
-  // stacking on top of each other. Alternating magnitudes around 0
-  // keep the layout symmetric.
-  const pairOrder = {};  // unordered "src|tgt" → running index
-  const links = boundEdges.map(e => {
-    const key = [e.source_id, e.target_id].sort().join('|');
-    const i = (pairOrder[key] = (pairOrder[key] ?? -1) + 1);
-    // 0, 0.25, -0.25, 0.5, -0.5, ... — spreads the fan
-    const curvature = i === 0 ? 0 : (i % 2 === 1 ? 1 : -1) * (0.25 * Math.ceil(i / 2));
-    return {
-      id: e.id,
-      source: e.source_id,
-      target: e.target_id,
-      edge_type: e.edge_type,
-      identifier: e.identifier,
-      confidence: e.confidence,
-      curvature,
-    };
-  });
+  // Edge bundling: when N≥3 edges share (to_component_id, edge_type,
+  // identifier) — i.e. many callers hit the same catalog endpoint —
+  // route them through a virtual junction node so they visually
+  // converge at one point and proceed as a single fat line into the
+  // target. For N<3 we stick with curved parallel lines.
+  const convergenceGroups = {};  // key → [edge rows]
+  for (const e of boundEdges) {
+    const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
+    (convergenceGroups[key] ||= []).push(e);
+  }
 
-  const gData = {nodes: transformedNodes, links};
+  const junctionNodes = [];
+  const junctionOutLinks = [];       // virtual links junction→target
+  const junctionOutById = {};        // junctionLinkId → {group, target}
+  const bundledEdgeIds = new Set();  // edges routed via a junction
+
+  for (const [key, group] of Object.entries(convergenceGroups)) {
+    if (group.length < 3) continue;  // no bundle for pairs
+    const junctionId = `__junction__${key}`;
+    junctionNodes.push({
+      id: junctionId,
+      isJunction: true,
+      // Junctions exist only to route edges visually — minimal data for
+      // node accessors. name/type etc. are what they are so nodeLabel
+      // stays meaningful if the user hovers one.
+      name: `${group.length} callers → ${group[0].edge_type} ${group[0].identifier}`,
+      canonical: key,
+      type: 'junction',
+      planes: [],
+      color: '#475569',  // slate-600 — muted
+    });
+    const sample = group[0];
+    const outId = `__junction_out__${key}`;
+    junctionOutLinks.push({
+      id: outId,
+      source: junctionId,
+      target: sample.target_id,
+      edge_type: sample.edge_type,
+      identifier: sample.identifier,
+      confidence: 1.0,
+      curvature: 0,
+      isJunctionOut: true,
+      groupEdgeIds: group.map(e => e.id),  // the real edges that bundle here
+    });
+    junctionOutById[outId] = {
+      groupEdgeIds: group.map(e => e.id),
+      target_id: sample.target_id,
+      edge_type: sample.edge_type,
+      identifier: sample.identifier,
+    };
+    for (const e of group) bundledEdgeIds.add(e.id);
+  }
+
+  // Now lay out the remaining (non-bundled) edges — apply curvature
+  // for same-pair duplicates so parallel rows still fan out cleanly.
+  const pairOrder = {};
+  const regularLinks = [];
+  const bundledLinks = [];
+  for (const e of boundEdges) {
+    if (bundledEdgeIds.has(e.id)) {
+      // Route this edge through its junction.
+      const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
+      const junctionId = `__junction__${key}`;
+      const pairKey = [e.source_id, junctionId].sort().join('|');
+      const i = (pairOrder[pairKey] = (pairOrder[pairKey] ?? -1) + 1);
+      const curvature = i === 0 ? 0 : (i % 2 === 1 ? 1 : -1) * (0.2 * Math.ceil(i / 2));
+      bundledLinks.push({
+        id: e.id,
+        source: e.source_id,
+        target: junctionId,
+        edge_type: e.edge_type,
+        identifier: e.identifier,
+        confidence: e.confidence,
+        curvature,
+        isJunctionIn: true,
+      });
+    } else {
+      const pairKey = [e.source_id, e.target_id].sort().join('|');
+      const i = (pairOrder[pairKey] = (pairOrder[pairKey] ?? -1) + 1);
+      const curvature = i === 0 ? 0 : (i % 2 === 1 ? 1 : -1) * (0.25 * Math.ceil(i / 2));
+      regularLinks.push({
+        id: e.id,
+        source: e.source_id,
+        target: e.target_id,
+        edge_type: e.edge_type,
+        identifier: e.identifier,
+        confidence: e.confidence,
+        curvature,
+      });
+    }
+  }
+
+  const links = [...regularLinks, ...bundledLinks, ...junctionOutLinks];
+  const allNodes = [...transformedNodes, ...junctionNodes];
+  const gData = {nodes: allNodes, links};
+
+  // Expose junction metadata to the rest of the module so hover on a
+  // junction-out link can explain the whole bundle + light it up.
+  graphSnapshot.junctionOutById = junctionOutById;
+  graphSnapshot.bundledEdgeIds = bundledEdgeIds;
 
   const canvas = document.getElementById('graph-canvas');
   if (!graphInstance) {
     graphInstance = ForceGraph3D()(canvas)
       .backgroundColor('#0a0a0a')
       .nodeResolution(32)
-      .nodeOpacity(0.92)
-      .nodeLabel(n => `${n.name} (${n.type})`)
+      .nodeOpacity(n => n.isJunction ? 0.45 : 0.92)
+      .nodeLabel(n => n.isJunction
+        ? `${n.name}`
+        : `${n.name} (${n.type})`
+      )
       .nodeColor(n => n.color)
-      .nodeVal(n => 4 + (n.planes?.length || 0) * 1.5)
-      // Curvature makes parallel edges fan out instead of overlapping.
+      // Junctions are visually small so the fan-in + fan-out is legible
+      // but the junction itself doesn't draw attention.
+      .nodeVal(n => n.isJunction ? 1.2 : (4 + (n.planes?.length || 0) * 1.5))
       .linkCurvature(l => l.curvature || 0)
-      .linkColor(l => {
-        if (litEdgeIds.has(l.id)) return 'rgba(251, 191, 36, 0.95)';    // LOS amber
-        if (hoverLitEdgeIds.has(l.id)) return 'rgba(34, 211, 238, 0.8)'; // hover cyan
-        return 'rgba(168, 168, 168, 0.32)';
-      })
-      .linkWidth(l => {
-        if (litEdgeIds.has(l.id)) return 1.8;
-        if (hoverLitEdgeIds.has(l.id)) return 1.2;
-        return 0.6;
-      })
-      .linkOpacity(0.6)
-      .linkDirectionalArrowLength(3)
+      .linkColor(l => resolveLinkColor(l))
+      .linkWidth(l => resolveLinkWidth(l))
+      .linkOpacity(0.65)
+      .linkDirectionalArrowLength(l => l.isJunctionIn ? 0 : 3)  // arrows only on final segment
       .linkDirectionalArrowRelPos(1)
-      .linkDirectionalParticles(l => litEdgeIds.has(l.id) ? 4 : 0)
+      .linkDirectionalParticles(l => resolveLinkParticles(l))
       .linkDirectionalParticleSpeed(0.008)
       .linkDirectionalParticleWidth(2.5)
       .linkDirectionalParticleColor(() => '#fbbf24')
       .linkLabel(l => edgeHoverLabel(l))
       .onNodeClick(n => {
+        if (n.isJunction) return;  // junctions aren't real components
         showGraphNodeDetail(n);
-        // Clicking a node keeps LOS active (user asked for this) —
-        // only clear hover set so the cyan glow from the last edge
-        // hover doesn't linger weirdly.
         hoverLitEdgeIds = new Set();
         refreshGraphVisuals();
       })
-      .onLinkClick(l => lightOfSight(l.id))
+      .onLinkClick(l => lightOfSight(l))
       .onBackgroundClick(() => {
-        // Empty-space click clears both sets.
         litEdgeIds = new Set();
         hoverLitEdgeIds = new Set();
         refreshGraphVisuals();
       });
+
+    // Post-init layout + camera tweaks — run once per page lifecycle.
+    // Node spacing: stronger repulsion + longer links so the graph
+    // breathes. Exact values tuned for ~15-50 node scale.
+    const chargeForce = graphInstance.d3Force('charge');
+    if (chargeForce && typeof chargeForce.strength === 'function') {
+      chargeForce.strength(-260);
+    }
+    const linkForce = graphInstance.d3Force('link');
+    if (linkForce && typeof linkForce.distance === 'function') {
+      linkForce.distance(90);
+    }
+    // Cursor-centric zoom — OrbitControls supports zoomToCursor in
+    // recent Three.js. Try to enable it; no-op on older versions.
+    try {
+      const controls = graphInstance.controls();
+      if (controls) {
+        controls.zoomToCursor = true;
+      }
+    } catch (e) { /* no-op */ }
   }
   graphInstance.graphData(gData);
 
@@ -1080,26 +1172,67 @@ function edgeHoverLabel(link) {
   return `${link.edge_type}: ${link.identifier} (click for light-of-sight)`;
 }
 
+// ---------- Link visual resolvers ----------
+//
+// A link is "lit" if its own id is in the corresponding set OR if it's
+// part of a bundle whose junction-out is lit. This makes the bundle
+// behave as one unit when LOS or hover targets it.
+
+function isLinkLit(link, set) {
+  if (set.has(link.id)) return true;
+  if (link.isJunctionIn) {
+    // The bundled in-segment lights up if its junction-out is lit.
+    const meta = graphSnapshot.junctionOutById || {};
+    for (const out of Object.values(meta)) {
+      if (out.groupEdgeIds.includes(link.id)) {
+        const outId = `__junction_out__${out.target_id}|${out.edge_type}|${out.identifier}`;
+        if (set.has(outId)) return true;
+      }
+    }
+  }
+  if (link.isJunctionOut) {
+    // The junction-out segment lights up when ANY of its bundled
+    // contributors lights up — gives a "the whole bundle is hot" feel.
+    if (link.groupEdgeIds && link.groupEdgeIds.some(id => set.has(id))) return true;
+  }
+  return false;
+}
+
+function resolveLinkColor(l) {
+  if (isLinkLit(l, litEdgeIds))     return 'rgba(251, 191, 36, 0.95)';   // LOS amber
+  if (isLinkLit(l, hoverLitEdgeIds))return 'rgba(34, 211, 238, 0.85)';   // hover cyan
+  if (l.isJunctionOut)              return 'rgba(168, 168, 168, 0.55)';  // bundled trunk slightly visible
+  return 'rgba(168, 168, 168, 0.30)';
+}
+
+function resolveLinkWidth(l) {
+  if (isLinkLit(l, litEdgeIds))      return l.isJunctionOut ? 2.6 : 1.8;
+  if (isLinkLit(l, hoverLitEdgeIds)) return l.isJunctionOut ? 2.0 : 1.2;
+  // Junction-out trunks render slightly thicker by default to suggest
+  // they carry many callers.
+  return l.isJunctionOut ? 1.4 : 0.6;
+}
+
+function resolveLinkParticles(l) {
+  if (!isLinkLit(l, litEdgeIds)) return 0;
+  return l.isJunctionOut ? 6 : 4;  // trunk gets denser flow
+}
+
 // ---------- Visual refresh ----------
 //
-// 3d-force-graph memoises accessor results per link until data changes
-// identity. Just re-setting litEdgeIds doesn't retrigger linkColor /
-// linkWidth / linkDirectionalParticles. .refresh() or reassigning the
-// accessor via its setter forces a re-render. We use .refresh() since
-// it's cheap and well-documented in the library.
+// 3d-force-graph memoises each link's computed material/geometry. Just
+// mutating litEdgeIds / hoverLitEdgeIds doesn't make the canvas repaint
+// in a new colour — we have to force the library to re-run its link
+// accessors. The reliable way is to re-call the accessor setter with
+// the same function: internally the library treats that as a change
+// and rebuilds. .refresh() alone is NOT sufficient for color/width/
+// particles on existing links.
 function refreshGraphVisuals() {
   if (!graphInstance) return;
-  // .refresh() re-renders without touching the data. If the version in
-  // use doesn't expose it, fall back to re-setting accessors which
-  // forces internal invalidation.
-  if (typeof graphInstance.refresh === 'function') {
-    graphInstance.refresh();
-  } else {
-    graphInstance
-      .linkColor(graphInstance.linkColor())
-      .linkWidth(graphInstance.linkWidth())
-      .linkDirectionalParticles(graphInstance.linkDirectionalParticles());
-  }
+  graphInstance
+    .linkColor(graphInstance.linkColor())
+    .linkWidth(graphInstance.linkWidth())
+    .linkDirectionalParticles(graphInstance.linkDirectionalParticles());
 }
 
 // ---------- Light-of-sight BFS ----------
@@ -1110,29 +1243,46 @@ function refreshGraphVisuals() {
 // depth 8. Persists until user clicks empty space, another edge, or
 // a node (in which case hover-glow clears but LOS stays).
 
-function lightOfSight(startEdgeId) {
+function lightOfSight(link) {
+  // Click on a junction-out trunk → light up all bundled contributors
+  // and treat any one of them as the seed (they all share the same
+  // (target, type, identifier) so the BFS forward-reach is identical).
+  let seedIds;
+  if (link.isJunctionOut && link.groupEdgeIds) {
+    seedIds = [...link.groupEdgeIds, link.id];  // include the trunk so it lights too
+  } else if (link.isJunctionIn) {
+    // Light up the whole bundle when any individual contributor is clicked.
+    const meta = graphSnapshot.junctionOutById || {};
+    let bundle = null;
+    for (const [outId, out] of Object.entries(meta)) {
+      if (out.groupEdgeIds.includes(link.id)) {
+        bundle = {outId, ids: out.groupEdgeIds};
+        break;
+      }
+    }
+    seedIds = bundle ? [...bundle.ids, bundle.outId] : [link.id];
+  } else {
+    seedIds = [link.id];
+  }
+
   const cap = 8;
-  const visited = new Set([startEdgeId]);
-  const frontier = [{edgeId: startEdgeId, depth: 0}];
+  const visited = new Set(seedIds);
+  const frontier = seedIds.map(id => ({edgeId: id, depth: 0}));
   while (frontier.length) {
     const {edgeId, depth} = frontier.shift();
     if (depth >= cap) continue;
     for (const f of graphSnapshot.flows) {
-      // Forward: this edge is the incoming of some flow → light its outgoing.
       if (f.incoming_edge_id === edgeId && !visited.has(f.outgoing_edge_id)) {
         visited.add(f.outgoing_edge_id);
         frontier.push({edgeId: f.outgoing_edge_id, depth: depth + 1});
       }
-      // Backward: this edge is the outgoing of some flow → light the incoming.
       if (f.outgoing_edge_id === edgeId && !visited.has(f.incoming_edge_id)) {
         visited.add(f.incoming_edge_id);
         frontier.push({edgeId: f.incoming_edge_id, depth: depth + 1});
       }
     }
-    // Also include bound sibling edges converging on the same catalog
-    // endpoint — when you click an edge that enters a catalog surface,
-    // it's useful to see who else calls that same endpoint. We detect
-    // this by matching (to, type, identifier) on the clicked edge.
+    // Also light sibling bound edges converging on the same endpoint —
+    // shows the full convergence set when you click anything in it.
     const e = graphSnapshot.edgeById[edgeId];
     if (e && e.to_component_id) {
       for (const sib of graphSnapshot.edges) {
@@ -1445,8 +1595,45 @@ function hoverZoneResolve(link, zone) {
   // edgeIds is the set of edges that should glow cyan in the canvas.
   // The tooltip and the glow are derived from the same computation so
   // the viz and the explanation never drift.
+
+  // Junction-out trunk: hovering any zone shows "the whole bundle" —
+  // these are the converging edges, presented as one unit.
+  if (link.isJunctionOut) {
+    const tgtNode2 = graphSnapshot.nodeById[link.target?.id || link.target];
+    const callers = (link.groupEdgeIds || []).map(id => {
+      const e = graphSnapshot.edgeById[id];
+      const src = e ? graphSnapshot.nodeById[e.source_id] : null;
+      return src ? src.name : '?';
+    });
+    const ids = [...(link.groupEdgeIds || []), link.id];
+    return {
+      tooltipHtml: `
+        <div class="tt-head">
+          <span class="tt-kind">${escapeHtml(link.edge_type)}</span>
+          <code class="tt-ident">${escapeHtml(link.identifier)}</code>
+        </div>
+        <div class="tt-zone">CONVERGENCE — ${callers.length} callers fan in to <b>${escapeHtml(tgtNode2?.name || '?')}</b></div>
+        <ul class="tt-list">${callers.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>
+      `,
+      edgeIds: ids,
+    };
+  }
+
   const srcNode = graphSnapshot.nodeById[link.source?.id || link.source];
-  const tgtNode = graphSnapshot.nodeById[link.target?.id || link.target];
+  // For junction-in (bundled contributor), the "real" target is the
+  // catalog endpoint owner — resolve via the matching junction-out.
+  let tgtNode;
+  if (link.isJunctionIn) {
+    const meta = graphSnapshot.junctionOutById || {};
+    for (const out of Object.values(meta)) {
+      if (out.groupEdgeIds.includes(link.id)) {
+        tgtNode = graphSnapshot.nodeById[out.target_id];
+        break;
+      }
+    }
+  } else {
+    tgtNode = graphSnapshot.nodeById[link.target?.id || link.target];
+  }
   const header = `
     <div class="tt-head">
       <span class="tt-kind">${escapeHtml(link.edge_type)}</span>
