@@ -335,11 +335,20 @@ def create_app() -> FastAPI:
 
     @app.get("/api/graph")
     def get_graph():
-        """Nodes = active components. Edges = edges table.
+        """Nodes = active components. Edges = edges table (all kinds).
+        Flows = flows table, for the 3.10 line-of-sight BFS.
 
-        Each node carries its plane set (distinct planes from attributions)
-        and component_doc_md so the FE can render hover popups without a
-        second round-trip.
+        Phase 3.10: edges payload discriminated by `kind`:
+          bound     — from+to both set (renders solid, directional)
+          catalog   — from IS NULL  (renders as dashed stub at callee)
+          dangling  — to IS NULL    (renders as dashed stub at caller)
+
+        Each node carries its plane set, component_doc_md, and
+        source_slice so the FE renders hover popups without a second
+        round-trip. source_id/target_id aliased to from_component_id/
+        to_component_id for the 3d-force-graph link source/target
+        convention; NULL endpoints anchor to a synthetic "stub" node
+        on the FE side (handled client-side).
         """
         nodes = execute(
             """SELECT c.id, c.canonical_name, c.display_name,
@@ -355,24 +364,32 @@ def create_app() -> FastAPI:
                GROUP BY c.id
                ORDER BY c.canonical_name"""
         )
-        # Phase 3.9: edges columns renamed. Phase 3.5/3.10 keep returning
-        # the source_id / target_id keys to the FE for compatibility
-        # (3d-force-graph needs them as link source/target). Catalog rows
-        # (from IS NULL) and dangling outgoings (to IS NULL) are excluded
-        # here — they get rendered via the 3.10 viz upgrades on a separate
-        # path. For 3.9 the basic view stays bound-edges-only.
         edges = execute(
             """SELECT e.id,
                       e.from_component_id AS source_id,
                       e.to_component_id   AS target_id,
-                      e.edge_type, e.identifier, e.confidence
+                      e.edge_type, e.identifier, e.confidence, e.metadata,
+                      CASE
+                        WHEN e.from_component_id IS NOT NULL
+                             AND e.to_component_id IS NOT NULL THEN 'bound'
+                        WHEN e.from_component_id IS NULL     THEN 'catalog'
+                        ELSE 'dangling'
+                      END AS kind
                FROM edges e
-               JOIN components cs ON cs.id = e.from_component_id AND cs.status != 'decommissioned'
-               JOIN components ct ON ct.id = e.to_component_id   AND ct.status != 'decommissioned'
-               WHERE e.from_component_id IS NOT NULL
-                 AND e.to_component_id IS NOT NULL"""
+               LEFT JOIN components cs ON cs.id = e.from_component_id
+               LEFT JOIN components ct ON ct.id = e.to_component_id
+               WHERE (cs.id IS NULL OR cs.status != 'decommissioned')
+                 AND (ct.id IS NULL OR ct.status != 'decommissioned')"""
         )
-        return {"nodes": nodes, "edges": edges}
+        flows = execute(
+            """SELECT f.id, f.component_id,
+                      f.incoming_edge_id, f.outgoing_edge_id,
+                      f.confidence
+               FROM flows f
+               JOIN components c ON c.id = f.component_id
+                 AND c.status != 'decommissioned'"""
+        )
+        return {"nodes": nodes, "edges": edges, "flows": flows}
 
     @app.post("/api/backfill_embeddings")
     def backfill_embeddings_endpoint():

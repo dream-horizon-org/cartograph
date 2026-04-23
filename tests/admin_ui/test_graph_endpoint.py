@@ -19,7 +19,7 @@ def test_graph_empty(client):
     r = client.get("/api/graph")
     assert r.status_code == 200
     data = r.json()
-    assert data == {"nodes": [], "edges": []}
+    assert data == {"nodes": [], "edges": [], "flows": []}
 
 
 def test_graph_returns_components_and_edges(client):
@@ -75,6 +75,37 @@ def test_graph_returns_source_slice(client):
     data = r.json()
     node2 = next(n for n in data["nodes"] if n["canonical_name"] == "o/whole")
     assert node2["source_slice"] is None
+
+
+def test_graph_phase_3_10_carries_kind_and_flows(client):
+    """/api/graph payload (3.10): kind per edge + flows array."""
+    c_a = _component("o/a")
+    c_b = _component("o/b")
+    # Bound edge
+    execute_mutate(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type, identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'GET /b', 'sys')""",
+        (c_a["id"], c_b["id"]),
+    )
+    # Catalog row (from IS NULL)
+    execute_mutate(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type, identifier, discovered_by)
+           VALUES (NULL, %s, 'calls', 'GET /expose', 'sys')""",
+        (c_b["id"],),
+    )
+    # Dangling (to IS NULL)
+    execute_mutate(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type, identifier, discovered_by)
+           VALUES (%s, NULL, 'calls', 'https://?/x', 'sys')""",
+        (c_a["id"],),
+    )
+    r = client.get("/api/graph")
+    data = r.json()
+    kinds = {e["kind"] for e in data["edges"]}
+    assert kinds == {"bound", "catalog", "dangling"}
+    # The flows array is present (empty here, since no flows seeded).
+    assert "flows" in data
+    assert data["flows"] == []
 
 
 def test_graph_excludes_decommissioned(client):
