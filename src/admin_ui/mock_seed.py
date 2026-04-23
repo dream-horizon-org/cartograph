@@ -116,46 +116,28 @@ COMPONENTS = [
         "doc":       "# Audit Service\nCompliance log stream. Runtime: Go.",
     },
 
-    # --- 4-layer LOS demo (A → B → C → D) ---
-    # A (4 callers) → B (2 middle) → C (2 middle) → D (4 leaves)
-    # Every flow from B and C is seeded so clicking an A→B edge
-    # propagates LOS through 3 forward layers.
-    {"canonical": "mock/demo-a1", "display": "Layer A — A1",
-     "type": "application", "planes": ["github", "deploy"],
-     "doc": "# Demo A1\nTop-of-chain caller."},
-    {"canonical": "mock/demo-a2", "display": "Layer A — A2",
-     "type": "application", "planes": ["github", "deploy"],
-     "doc": "# Demo A2\nTop-of-chain caller."},
-    {"canonical": "mock/demo-a3", "display": "Layer A — A3",
-     "type": "application", "planes": ["github", "deploy"],
-     "doc": "# Demo A3\nTop-of-chain caller."},
-    {"canonical": "mock/demo-a4", "display": "Layer A — A4",
-     "type": "application", "planes": ["github", "deploy"],
-     "doc": "# Demo A4\nTop-of-chain caller."},
-    {"canonical": "mock/demo-b1", "display": "Layer B — B1",
-     "type": "application", "planes": ["github", "cloud"],
-     "doc": "# Demo B1\nMiddle — fans into C1 + C2."},
-    {"canonical": "mock/demo-b2", "display": "Layer B — B2",
-     "type": "application", "planes": ["github", "cloud"],
-     "doc": "# Demo B2\nMiddle — fans into C1 + C2."},
-    {"canonical": "mock/demo-c1", "display": "Layer C — C1",
-     "type": "application", "planes": ["github", "cloud", "telemetry"],
-     "doc": "# Demo C1\nMiddle — fans into D1/D2/D3."},
-    {"canonical": "mock/demo-c2", "display": "Layer C — C2",
-     "type": "application", "planes": ["github", "cloud", "telemetry"],
-     "doc": "# Demo C2\nMiddle — fans into D1 + D4."},
-    {"canonical": "mock/demo-d1", "display": "Layer D — D1",
-     "type": "database", "planes": ["cloud"],
-     "doc": "# Demo D1\nPostgres leaf."},
-    {"canonical": "mock/demo-d2", "display": "Layer D — D2",
-     "type": "cache", "planes": ["cloud"],
-     "doc": "# Demo D2\nRedis leaf."},
-    {"canonical": "mock/demo-d3", "display": "Layer D — D3",
-     "type": "queue", "planes": ["cloud"],
-     "doc": "# Demo D3\nKafka queue leaf."},
-    {"canonical": "mock/demo-d4", "display": "Layer D — D4",
-     "type": "lambda", "planes": ["cloud"],
-     "doc": "# Demo D4\nEvent-driven lambda leaf."},
+    # --- Chain demo: p→q→r→s→t→u  and  x→y→z→s→t→u (share s, t, u) ---
+    # Convergence at s (r and z both call it), then single-file s→t→u.
+    # Click p→q or x→y to see full-chain LOS propagate.
+    {"canonical": "mock/p", "display": "P", "type": "application",
+     "planes": ["github"], "doc": "# P\nChain-1 head."},
+    {"canonical": "mock/q", "display": "Q", "type": "application",
+     "planes": ["github"], "doc": "# Q\nChain-1 hop."},
+    {"canonical": "mock/r", "display": "R", "type": "application",
+     "planes": ["github"], "doc": "# R\nChain-1 tail, calls S."},
+    {"canonical": "mock/s", "display": "S", "type": "application",
+     "planes": ["github", "cloud"],
+     "doc": "# S\nConvergence — R and Z both call this."},
+    {"canonical": "mock/t", "display": "T", "type": "application",
+     "planes": ["github", "cloud"], "doc": "# T\nShared middle."},
+    {"canonical": "mock/u", "display": "U", "type": "application",
+     "planes": ["github"], "doc": "# U\nFinal callee."},
+    {"canonical": "mock/x", "display": "X", "type": "application",
+     "planes": ["github"], "doc": "# X\nChain-2 head."},
+    {"canonical": "mock/y", "display": "Y", "type": "application",
+     "planes": ["github"], "doc": "# Y\nChain-2 hop."},
+    {"canonical": "mock/z", "display": "Z", "type": "application",
+     "planes": ["github"], "doc": "# Z\nChain-2 tail, calls S."},
 ]
 
 
@@ -212,11 +194,14 @@ def seed_edges(ids: dict[str, str]) -> dict[str, str]:
         ("mock/payments-svc", "calls", "POST /charge"),
         ("mock/payments-svc", "calls", "POST /refund"),
         ("mock/payments-svc", "calls", "GET /balance"),
-        # Demo 4-layer chain catalogs
-        ("mock/demo-b1", "calls", "GET /process"),
-        ("mock/demo-b2", "calls", "POST /analyze"),
-        ("mock/demo-c1", "calls", "POST /compute"),
-        ("mock/demo-c2", "calls", "GET /stats"),
+        # Chain-demo catalogs (each hop exposes its endpoint)
+        ("mock/q", "calls", "q.handle"),
+        ("mock/r", "calls", "r.handle"),
+        ("mock/s", "calls", "s.handle"),
+        ("mock/t", "calls", "t.handle"),
+        ("mock/u", "calls", "u.handle"),
+        ("mock/y", "calls", "y.handle"),
+        ("mock/z", "calls", "z.handle"),
     ]
     for canonical, etype, ident in catalog_defs:
         row = execute_returning(
@@ -267,25 +252,15 @@ def seed_edges(ids: dict[str, str]) -> dict[str, str]:
         ("mock/analytics-svc","mock/feeds-db",    "reads_from",   "SELECT * FROM events"),
         ("mock/audit-svc",    "mock/feeds-db",    "writes_to",    "INSERT audit_log"),
 
-        # --- 4-layer LOS demo wiring ---
-        # A → B: 4 callers → B1 (convergence) + 2 callers → B2
-        ("mock/demo-a1", "mock/demo-b1", "calls", "GET /process"),
-        ("mock/demo-a2", "mock/demo-b1", "calls", "GET /process"),
-        ("mock/demo-a3", "mock/demo-b1", "calls", "GET /process"),
-        ("mock/demo-a4", "mock/demo-b1", "calls", "GET /process"),
-        ("mock/demo-a1", "mock/demo-b2", "calls", "POST /analyze"),
-        ("mock/demo-a2", "mock/demo-b2", "calls", "POST /analyze"),
-        # B → C: both B's call both C's
-        ("mock/demo-b1", "mock/demo-c1", "calls", "POST /compute"),
-        ("mock/demo-b1", "mock/demo-c2", "calls", "GET /stats"),
-        ("mock/demo-b2", "mock/demo-c1", "calls", "POST /compute"),
-        ("mock/demo-b2", "mock/demo-c2", "calls", "GET /stats"),
-        # C → D: C1 fans into D1/D2/D3, C2 fans into D1 + D4
-        ("mock/demo-c1", "mock/demo-d1", "reads_from",    "SELECT * FROM data"),
-        ("mock/demo-c1", "mock/demo-d2", "writes_to",     "SET cache:result"),
-        ("mock/demo-c1", "mock/demo-d3", "publishes_to",  "compute.done"),
-        ("mock/demo-c2", "mock/demo-d1", "reads_from",    "SELECT stats"),
-        ("mock/demo-c2", "mock/demo-d4", "triggers",      "stats.rollup"),
+        # --- Chain demo: p→q→r→s→t→u and x→y→z→s→t→u ---
+        ("mock/p", "mock/q", "calls", "q.handle"),
+        ("mock/q", "mock/r", "calls", "r.handle"),
+        ("mock/r", "mock/s", "calls", "s.handle"),
+        ("mock/x", "mock/y", "calls", "y.handle"),
+        ("mock/y", "mock/z", "calls", "z.handle"),
+        ("mock/z", "mock/s", "calls", "s.handle"),
+        ("mock/s", "mock/t", "calls", "t.handle"),
+        ("mock/t", "mock/u", "calls", "u.handle"),
     ]
     for from_c, to_c, etype, ident in bound_defs:
         row = execute_returning(
@@ -374,38 +349,25 @@ def seed_flows(ids: dict[str, str], edges: dict[str, str]) -> int:
          f"catalog::mock/payments-svc::POST /charge",
          "bound::mock/payments-svc->mock/notify-svc::payment.completed"),
 
-        # --- 4-layer LOS demo flows ---
-        # On B1: incoming (catalog GET /process) triggers both outgoings to C
-        ("mock/demo-b1",
-         "catalog::mock/demo-b1::GET /process",
-         "bound::mock/demo-b1->mock/demo-c1::POST /compute"),
-        ("mock/demo-b1",
-         "catalog::mock/demo-b1::GET /process",
-         "bound::mock/demo-b1->mock/demo-c2::GET /stats"),
-        # On B2: incoming (catalog POST /analyze) triggers both outgoings to C
-        ("mock/demo-b2",
-         "catalog::mock/demo-b2::POST /analyze",
-         "bound::mock/demo-b2->mock/demo-c1::POST /compute"),
-        ("mock/demo-b2",
-         "catalog::mock/demo-b2::POST /analyze",
-         "bound::mock/demo-b2->mock/demo-c2::GET /stats"),
-        # On C1: incoming (catalog POST /compute) triggers 3 outgoings to D
-        ("mock/demo-c1",
-         "catalog::mock/demo-c1::POST /compute",
-         "bound::mock/demo-c1->mock/demo-d1::SELECT * FROM data"),
-        ("mock/demo-c1",
-         "catalog::mock/demo-c1::POST /compute",
-         "bound::mock/demo-c1->mock/demo-d2::SET cache:result"),
-        ("mock/demo-c1",
-         "catalog::mock/demo-c1::POST /compute",
-         "bound::mock/demo-c1->mock/demo-d3::compute.done"),
-        # On C2: incoming (catalog GET /stats) triggers 2 outgoings to D
-        ("mock/demo-c2",
-         "catalog::mock/demo-c2::GET /stats",
-         "bound::mock/demo-c2->mock/demo-d1::SELECT stats"),
-        ("mock/demo-c2",
-         "catalog::mock/demo-c2::GET /stats",
-         "bound::mock/demo-c2->mock/demo-d4::stats.rollup"),
+        # --- Chain demo flows (one catalog → one outgoing per hop) ---
+        ("mock/q",
+         "catalog::mock/q::q.handle",
+         "bound::mock/q->mock/r::r.handle"),
+        ("mock/r",
+         "catalog::mock/r::r.handle",
+         "bound::mock/r->mock/s::s.handle"),
+        ("mock/y",
+         "catalog::mock/y::y.handle",
+         "bound::mock/y->mock/z::z.handle"),
+        ("mock/z",
+         "catalog::mock/z::z.handle",
+         "bound::mock/z->mock/s::s.handle"),
+        ("mock/s",
+         "catalog::mock/s::s.handle",
+         "bound::mock/s->mock/t::t.handle"),
+        ("mock/t",
+         "catalog::mock/t::t.handle",
+         "bound::mock/t->mock/u::u.handle"),
 
         # match-svc: multiple outgoings per incoming for CALLER-zone demo.
         # We don't have catalog rows for match/search/user, so we fake
