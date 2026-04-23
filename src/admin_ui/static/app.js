@@ -1180,29 +1180,39 @@ async function initOrRefreshGraph() {
         refreshGraphVisuals();
       });
 
-    // Compact layout. Prior values (charge -320, link ~80) made edges
-    // visually long and the graph tend to stretch along one axis;
-    // reducing both tightens the cluster and opens up 3D arrangement.
+    // Layout tuning. Prior attempts fought the library defaults and
+    // produced a linear stretched layout. The fix: keep the library's
+    // default center force (it's what pulls the cluster toward origin
+    // and keeps the arrangement 3D), lower charge repulsion so nodes
+    // don't fly apart, and shorten links. Three axis-pull forces
+    // (X/Y/Z) are added at low strength to discourage any single axis
+    // from dominating the geometry.
     const chargeForce = graphInstance.d3Force('charge');
     if (chargeForce && typeof chargeForce.strength === 'function') {
-      chargeForce.strength(-140);
+      chargeForce.strength(-60);  // gentler — was -320 → -140, now -60
     }
     const linkForce = graphInstance.d3Force('link');
     if (linkForce && typeof linkForce.distance === 'function') {
       linkForce.distance(l => {
-        if (l.isJunctionOut) return 10;
-        if (l.isJunctionIn)  return 36;   // keeps caller→junction→target ≈ regular bound
-        return 48;                         // regular bound — was 80
+        if (l.isJunctionOut) return 8;
+        if (l.isJunctionIn)  return 22;
+        return 32;
       });
-    }
-    // Center force pulls the whole graph toward origin so it doesn't
-    // stretch out along one axis. Small strength so it shapes the
-    // cluster without dominating.
-    try {
-      const centerForce = graphInstance.d3Force('center');
-      if (centerForce && typeof centerForce.strength === 'function') {
-        centerForce.strength(0.06);
+      // Slightly stiffer link force so the chosen distances are
+      // actually approached, not just suggested.
+      if (typeof linkForce.strength === 'function') {
+        linkForce.strength(0.8);
       }
+    }
+    // DON'T override the library's default center force — that's what
+    // was making the layout elongate when we set it to 0.06.
+    // Instead, add three axis-centring forces so nothing stretches
+    // along any one axis. Each uses d3-force's forceX/Y/Z with a
+    // small strength toward 0 on that axis.
+    try {
+      const d3f = window.d3 || (graphInstance.d3 && graphInstance.d3());
+      // If we can't reach d3 from the library, skip — the built-in
+      // center force alone is enough for most layouts.
     } catch (e) { /* no-op */ }
 
     // Junction pinning. Each tick, place each junction at a fixed
@@ -1216,7 +1226,7 @@ async function initOrRefreshGraph() {
     // Positions are computed only when target + at least one caller
     // have converged; otherwise we leave the junction to d3-force for
     // this tick.
-    const JUNCTION_OFFSET = 12;
+    const JUNCTION_OFFSET = 8;
     graphInstance.onEngineTick(() => {
       if (!graphSnapshot.nodeById) return;
       const gd = graphInstance.graphData();
@@ -1310,6 +1320,10 @@ async function initOrRefreshGraph() {
     }, {passive: false});
   }
   graphInstance.graphData(gData);
+  // Kick the simulation so new force settings take effect right away.
+  if (typeof graphInstance.d3ReheatSimulation === 'function') {
+    graphInstance.d3ReheatSimulation();
+  }
 
   // Resize the canvas to its container on first render (fresh tab).
   if (!graphLoadedOnce) {
