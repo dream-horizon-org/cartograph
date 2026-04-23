@@ -353,7 +353,7 @@ TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
 
-> **Implementation status.** 58 tools live in `src/cartograph_mcp/server.py` covering action_items, chat, broadcast, secrets, tasks, resources, agent_lifecycle, components, notifications, consolidation, clarification, vector_search. Mutation tools (execute_mutation, complete_consolidation, absorb_agent, spawn_child_agent, transfer_attributions, get_proxy_items, get_proxy_chats) are designed below but ship in Phase 4 — see `IMPLEMENTATION-PHASES.md` for phase gating.
+> **Implementation status.** 65 tools live in `src/cartograph_mcp/server.py` (up from 58 with the Phase 3.9 edge protocol: `upsert_edge_catalog`, `upsert_edge_outbound`, `bind_edge`, `upsert_flow`, `get_component_edges`, `get_flow`, `get_flow_inverse`). Covers action_items, chat, broadcast, secrets, tasks, resources, agent_lifecycle, components (including asymmetric edge writes + flows), notifications, consolidation, clarification, vector_search. Mutation tools (execute_mutation, complete_consolidation, absorb_agent, spawn_child_agent, transfer_attributions, get_proxy_items, get_proxy_chats) are designed below but ship in Phase 4 — see `IMPLEMENTATION-PHASES.md` for phase gating.
 
 ### 3.1 Trigger Tools (what wakes me — read-only, used by trigger manager)
 

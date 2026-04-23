@@ -270,14 +270,21 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 |---|---|---|---|---|---|
 | `upsert_component(agent_id, component_data)` | — | — | ✓ *one per SME* | — | First call fills the SME's `component_id=NULL` RCA slot. Subsequent calls UPDATE in place. 1-active-component-per-SME invariant structurally enforced (splits go through consolidation). canonical_name cross-owner conflict → refuse. |
 | `upsert_attribution(agent_id, component_id, data)` | — | — | ✓ *own component* | — | Idempotent on `(plane, resource_type, identifier)`; cross-component conflict → refuse. |
-| `create_edge(agent_id, edge_data)` | — | — | ✓ *own source* | — | Refuses self-loops. Idempotent on `(source_id, target_id, edge_type, identifier)`. |
+| `create_edge(agent_id, edge_data)` | — | — | ✓ *own source* | — | [Phase 3.9 legacy shim] Dispatches to `upsert_edge_outbound` with both endpoints set. Accepts `source_id`/`target_id` keys. Prefer `upsert_edge_outbound` in new code. |
+| `upsert_edge_catalog(agent_id, edge_data)` | — | — | ✓ *own to_component* | — | Phase 3.9. Callee declares exposed endpoint / consumed topic. Writes `from_component_id=NULL`. Idempotent per `(to, type, identifier)`. |
+| `upsert_edge_outbound(agent_id, edge_data)` | — | — | ✓ *own from_component* | — | Phase 3.9. Caller's outgoing edge. `to_component_id` may be set (bound) or NULL (dangling). Metadata + max-confidence accumulation on repeat writes. |
+| `bind_edge(agent_id, edge_id, to_component_id)` | — | — | ✓ *owns from* | — | Phase 3.9. Resolves a dangling outgoing. Refuses collision with existing bound row. |
+| `upsert_flow(agent_id, component_id, in, out, metadata?, confidence?)` | — | — | ✓ *own component* | — | Phase 3.9. Links incoming↔outgoing inside owned component. Validates `incoming.to = outgoing.from = component_id`. Set-based. |
 | `insert_unresolved(agent_id, data)` | — | — | ✓ *own component* | — | |
 | `resolve_reference(agent_id, unresolved_id, target_component_id)` | ✓ | ✓ | ✓ | ✓ | Any active agent (cross-SME resolution). Refuses decommissioned target. |
 | `get_component(component_id)` | ✓ | ✓ | ✓ | ✓ | All readable |
 | `get_attributions(component_id)` | ✓ | ✓ | ✓ | ✓ | |
-| `get_edges(component_id)` | ✓ | ✓ | ✓ | ✓ | Returns `{outbound, inbound}` |
+| `get_edges(component_id)` | ✓ | ✓ | ✓ | ✓ | [Phase 3.9 backward-compat shape] `{outbound, inbound}`, bound-rows only. Prefer `get_component_edges` for the full view. |
+| `get_component_edges(component_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9. Returns `{incoming_bound, incoming_catalog, outgoing_bound, outgoing_dangling}`. |
+| `get_flow(component_id, incoming_edge_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9. Outgoing edges triggered by this incoming. |
+| `get_flow_inverse(component_id, outgoing_edge_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9. Incoming edges that trigger this outgoing. |
 | `get_unresolved(component_id)` | ✓ | ✓ | ✓ | ✓ | |
-| `vector_search(agent_id, query, table, limit)` | ✓ | ✓ | ✓ | ✓ | Embeds query with `text-embedding-3-small`, KNN-cosines against the target table. Returns `{query_embedded: bool, results}`. Tables: components / attributions / unresolved / edges. Limit clamped [1, 50]. |
+| `vector_search(agent_id, query, table, limit)` | ✓ | ✓ | ✓ | ✓ | Embeds query with `mxbai-embed-large` (Phase 3.7), KNN-cosines against the target table. Returns `{query_embedded: bool, results}`. Tables: components / attributions / unresolved / edges. Limit clamped [1, 50]. |
 
 #### Notifications (live · Phase 2.3)
 
@@ -1111,7 +1118,7 @@ READ-ONLY (one per plane, scoped per agent):
 WRITE TARGET (single, shared by all agents):
 
   cartograph-db  (FastMCP streamable-http on :8100/mcp)
-    LIVE groups (58 tools registered in src/cartograph_mcp/server.py;
+    LIVE groups (65 tools registered in src/cartograph_mcp/server.py;
     see TRIGGER-MANAGEMENT.md §3 for per-tool contracts):
       action_items    (2):  summary, detail
       chat            (4):  send, ack, unacked, history
@@ -1125,9 +1132,14 @@ WRITE TARGET (single, shared by all agents):
                             reset_agent, decommission_agent(_bulk),
                             decommission_component(_bulk),
                             sleep_self, bulk_sleep_agents, bulk_wake_agents
-      components      (9):  upsert_component, upsert_attribution,
-                            create_edge, insert_unresolved,
-                            resolve_reference + 4 reads
+      components      (16): upsert_component, upsert_attribution,
+                            create_edge (3.9 legacy shim),
+                            insert_unresolved, resolve_reference,
+                            upsert_edge_catalog, upsert_edge_outbound,
+                            bind_edge, upsert_flow (Phase 3.9),
+                            get_component, get_attributions, get_edges,
+                            get_unresolved, get_component_edges,
+                            get_flow, get_flow_inverse
       notifications   (1):  get_agent_notifications
       consolidation   (5):  nominate, respond, review, get_my, get_thread
       clarification   (4):  create, respond, get_my, get_thread

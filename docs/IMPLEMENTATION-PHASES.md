@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-23):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 ✅ (graph viz with 3d-force-graph) · Phase 3.7 ✅ (local embeddings via Ollama + Metal, 1024d) · **Phase 3.8 ✅** (`components.source_slice` for monorepo splits + SME materialisation flow rewrite).
-- **58 MCP tools** registered · **265 tests** passing.
+**Status (2026-04-23):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 ✅ (graph viz with 3d-force-graph) · Phase 3.7 ✅ (local embeddings via Ollama + Metal, 1024d) · Phase 3.8 ✅ (`components.source_slice` for monorepo splits + SME materialisation flow rewrite) · **Phase 3.9 ✅** (asymmetric edge protocol — catalog + bindings + flows).
+- **65 MCP tools** registered · **291 tests** passing.
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 
 ---
@@ -755,7 +755,12 @@ literal JSON example. Lesson: any `{` / `}` inside a
 
 ---
 
-## Phase 3.9: Edge Protocol — Catalog + Bindings + Flows (PLANNED)
+## Phase 3.9: Edge Protocol — Catalog + Bindings + Flows ✅
+
+Shipped across six commits (`2ae4a0d` schema → `c9072ff` edge writes →
+`06360a8` flows + categorised reads → `664d307` SME prompt →
+`1addd63` tests → docs sync). 26 new tests, 7 new MCP tools (1
+shimmed), 0 data-loss migrations.
 
 Asymmetric edge model that lets a component publish what it exposes
 (its catalog), lets callers bind to specific catalog entries, and
