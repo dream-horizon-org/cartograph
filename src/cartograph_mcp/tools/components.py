@@ -614,6 +614,154 @@ def bind_edge(agent_id: str, edge_id: str, to_component_id: str) -> dict:
     return row
 
 
+# ============ Phase 3.9: flows ============
+
+
+def upsert_flow(
+    agent_id: str,
+    component_id: str,
+    incoming_edge_id: str,
+    outgoing_edge_id: str,
+    metadata: dict | None = None,
+    confidence: float = 1.0,
+) -> dict:
+    """Link an incoming edge to an outgoing edge inside one component.
+    Set-based (many-to-many): one incoming can fan out to multiple
+    outgoings; multiple incomings can share an outgoing.
+
+    Validates:
+      - SME owns component_id via RCA
+      - incoming_edge.to_component_id   == component_id
+      - outgoing_edge.from_component_id == component_id
+
+    Idempotent on (component_id, incoming_edge_id, outgoing_edge_id).
+    Re-call accumulates metadata + max confidence.
+    """
+    _assert_sme(agent_id)
+    if not component_id or not incoming_edge_id or not outgoing_edge_id:
+        raise ValueError("component_id, incoming_edge_id, outgoing_edge_id required")
+    if incoming_edge_id == outgoing_edge_id:
+        raise ValueError("incoming and outgoing must be different edges")
+    if not (0.0 <= float(confidence) <= 1.0):
+        raise ValueError("confidence must be in [0.0, 1.0]")
+    if not _sme_owns_component(agent_id, component_id):
+        raise ValueError(
+            f"SME {agent_id} does not own component {component_id}; "
+            "cannot record flows on it."
+        )
+
+    incoming = execute_one("SELECT id, to_component_id, from_component_id FROM edges WHERE id = %s", (incoming_edge_id,))
+    if incoming is None:
+        raise ValueError(f"Incoming edge {incoming_edge_id} not found")
+    outgoing = execute_one("SELECT id, to_component_id, from_component_id FROM edges WHERE id = %s", (outgoing_edge_id,))
+    if outgoing is None:
+        raise ValueError(f"Outgoing edge {outgoing_edge_id} not found")
+
+    if str(incoming["to_component_id"] or "") != str(component_id):
+        raise ValueError(
+            f"Incoming edge {incoming_edge_id} does not point at component "
+            f"{component_id} (its to_component_id is {incoming['to_component_id']})."
+        )
+    if str(outgoing["from_component_id"] or "") != str(component_id):
+        raise ValueError(
+            f"Outgoing edge {outgoing_edge_id} does not originate from component "
+            f"{component_id} (its from_component_id is {outgoing['from_component_id']})."
+        )
+
+    metadata = metadata or {}
+    row = execute_returning(
+        """INSERT INTO flows
+           (component_id, incoming_edge_id, outgoing_edge_id,
+            confidence, metadata, discovered_by)
+           VALUES (%s, %s, %s, %s, %s::jsonb, %s)
+           ON CONFLICT (component_id, incoming_edge_id, outgoing_edge_id)
+           DO UPDATE
+             SET metadata = flows.metadata || EXCLUDED.metadata,
+                 confidence = GREATEST(flows.confidence, EXCLUDED.confidence),
+                 updated_at = now()
+           RETURNING *""",
+        (component_id, incoming_edge_id, outgoing_edge_id,
+         float(confidence), json.dumps(metadata), agent_id),
+    )
+    return row
+
+
+def get_flow(agent_id: str, component_id: str, incoming_edge_id: str) -> list[dict]:
+    """All outgoing edges in the flow triggered by `incoming_edge_id`
+    inside `component_id`. Open to all active agents."""
+    _caller(agent_id)
+    return execute(
+        """SELECT e.* FROM flows f
+           JOIN edges e ON e.id = f.outgoing_edge_id
+           WHERE f.component_id = %s AND f.incoming_edge_id = %s
+           ORDER BY e.edge_type, e.identifier""",
+        (component_id, incoming_edge_id),
+    )
+
+
+def get_flow_inverse(agent_id: str, component_id: str, outgoing_edge_id: str) -> list[dict]:
+    """All incoming edges that trigger `outgoing_edge_id` inside
+    `component_id` (reverse lookup of get_flow). Open to all active
+    agents."""
+    _caller(agent_id)
+    return execute(
+        """SELECT e.* FROM flows f
+           JOIN edges e ON e.id = f.incoming_edge_id
+           WHERE f.component_id = %s AND f.outgoing_edge_id = %s
+           ORDER BY e.edge_type, e.identifier""",
+        (component_id, outgoing_edge_id),
+    )
+
+
+def get_component_edges(agent_id: str, component_id: str) -> dict:
+    """Categorised view of all edges touching `component_id`. Replaces
+    the simpler {outbound, inbound} shape from get_edges with a
+    four-way split that surfaces catalog rows + dangling outgoings.
+
+    Returns:
+      {
+        incoming_bound:   edges where to=component_id, from non-null,
+        incoming_catalog: edges where to=component_id, from IS NULL
+                          (this component's own catalog),
+        outgoing_bound:   edges where from=component_id, to non-null,
+        outgoing_dangling: edges where from=component_id, to IS NULL,
+      }
+
+    Open to all active agents.
+    """
+    _caller(agent_id)
+    incoming_bound = execute(
+        """SELECT * FROM edges
+           WHERE to_component_id = %s AND from_component_id IS NOT NULL
+           ORDER BY edge_type, identifier""",
+        (component_id,),
+    )
+    incoming_catalog = execute(
+        """SELECT * FROM edges
+           WHERE to_component_id = %s AND from_component_id IS NULL
+           ORDER BY edge_type, identifier""",
+        (component_id,),
+    )
+    outgoing_bound = execute(
+        """SELECT * FROM edges
+           WHERE from_component_id = %s AND to_component_id IS NOT NULL
+           ORDER BY edge_type, identifier""",
+        (component_id,),
+    )
+    outgoing_dangling = execute(
+        """SELECT * FROM edges
+           WHERE from_component_id = %s AND to_component_id IS NULL
+           ORDER BY edge_type, identifier""",
+        (component_id,),
+    )
+    return {
+        "incoming_bound": incoming_bound,
+        "incoming_catalog": incoming_catalog,
+        "outgoing_bound": outgoing_bound,
+        "outgoing_dangling": outgoing_dangling,
+    }
+
+
 # ============ insert_unresolved ============
 
 

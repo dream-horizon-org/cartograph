@@ -650,6 +650,78 @@ def bind_edge(
 
 
 @mcp.tool()
+def upsert_flow(
+    agent_id: str,
+    component_id: str,
+    incoming_edge_id: str,
+    outgoing_edge_id: str,
+    metadata: dict[str, Any] | None = None,
+    confidence: float = 1.0,
+) -> dict[str, Any]:
+    """[Phase 3.9] Link an incoming edge to an outgoing edge inside one
+    of YOUR components. Set-based (many-to-many): one incoming can fan
+    out to multiple outgoings; multiple incomings can share an
+    outgoing. SME-ONLY (must own component_id).
+
+    Validates that incoming_edge.to_component_id == component_id and
+    outgoing_edge.from_component_id == component_id (Python-side, not
+    DB triggers — clearer errors).
+
+    Idempotent on (component_id, incoming, outgoing). Re-call
+    accumulates metadata + max confidence.
+
+    Use during Edge Discovery: for each of your incoming edges,
+    declare which of your outgoing edges fire when it's hit. Powers
+    blast-radius / impact analysis.
+    """
+    return components_tool.upsert_flow(
+        agent_id, component_id, incoming_edge_id, outgoing_edge_id,
+        metadata, confidence,
+    )
+
+
+@mcp.tool()
+def get_flow(
+    agent_id: str, component_id: str, incoming_edge_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """[Phase 3.9] Outgoing edges in the flow triggered by this incoming
+    edge inside the component. Open to all active agents."""
+    return {
+        "outgoing": components_tool.get_flow(agent_id, component_id, incoming_edge_id)
+    }
+
+
+@mcp.tool()
+def get_flow_inverse(
+    agent_id: str, component_id: str, outgoing_edge_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """[Phase 3.9] Incoming edges that trigger this outgoing edge inside
+    the component. Open to all active agents."""
+    return {
+        "incoming": components_tool.get_flow_inverse(agent_id, component_id, outgoing_edge_id)
+    }
+
+
+@mcp.tool()
+def get_component_edges(
+    agent_id: str, component_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """[Phase 3.9] Categorised view of all edges touching this component.
+    Open to all active agents.
+
+    Returns:
+      incoming_bound    — bound edges into this component (callers)
+      incoming_catalog  — this component's own catalog (exposed surfaces)
+      outgoing_bound    — bound edges out (resolved targets)
+      outgoing_dangling — bound edges out with target unresolved (to=NULL)
+
+    Replaces the older get_edges() in new code; get_edges still works
+    for the simpler {outbound, inbound} shape.
+    """
+    return components_tool.get_component_edges(agent_id, component_id)
+
+
+@mcp.tool()
 def insert_unresolved(
     agent_id: str, unresolved_data: dict[str, Any]
 ) -> dict[str, Any]:
