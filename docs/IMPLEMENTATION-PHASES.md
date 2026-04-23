@@ -755,6 +755,521 @@ literal JSON example. Lesson: any `{` / `}` inside a
 
 ---
 
+## Phase 3.9: Edge Protocol — Catalog + Bindings + Flows (PLANNED)
+
+Asymmetric edge model that lets a component publish what it exposes
+(its catalog), lets callers bind to specific catalog entries, and
+links incoming↔outgoing edges inside a component via a flow table.
+This is the data layer; viz upgrades that consume it ship in 3.10.
+
+### Motivation
+
+Current `edges` table is symmetric: one row per `(source, target,
+edge_type, identifier)`. Works for "A calls B at GET /x" as a single
+fact. Doesn't represent:
+
+- **Catalog of exposed endpoints / consumed topics on the callee side**
+  before any caller binds to them. Today there's no way for a callee
+  SME to declare "I expose POST /charge" except as part of an existing
+  edge — which doesn't exist until a caller arrives.
+- **Dangling outgoing on the caller side** when the target component
+  isn't pinned yet. Today modelled awkwardly through `unresolved`,
+  but `unresolved` is for "I see a string, no idea what it is" — a
+  different problem from "I know I'm calling SOMETHING via this
+  endpoint, target component just not in our graph yet."
+- **Flow inside a component**: which incoming endpoint triggers which
+  downstream calls. Required for blast-radius ("if I break DB X,
+  which endpoints degrade?") and impact analysis ("if I change endpoint
+  Y, what propagates?").
+
+### Concepts
+
+**Catalog row** — `from_component_id IS NULL`, `to_component_id =
+callee`. The callee's SME publishes this to declare "I expose this
+endpoint / I consume this topic / I accept this query". Only the
+callee's SME owns and modifies it.
+
+**Bound row** — `from_component_id = caller`, `to_component_id =
+callee`. The caller writes this to record "I call callee at this
+identifier". Only the caller's SME owns and modifies it. Filling `to`
+on a previously-dangling row does NOT transfer ownership; it stays
+with `from`.
+
+**Dangling outgoing** — `from_component_id = caller`, `to_component_id
+IS NULL`. Caller knows they're calling something at this identifier
+but the target component isn't pinned in the graph yet. Owned by
+caller. Resolved later via `bind_edge` once the target component is
+identified.
+
+**Flow row** — `(component_id, incoming_edge_id, outgoing_edge_id)`.
+Inside a single component owned by one SME, declares "when this
+incoming edge fires, this outgoing edge is one of the things that
+fires downstream." Set-based, not sequenced — multiple flow rows for
+one incoming = fan-out. Owned by the component's SME.
+
+**Multi-source = multi-plane on one SME**, NOT multi-SME. The single
+SME that owns a component may discover the same edge from multiple
+planes its component spans (e.g. github code + telemetry traces +
+deploy config). All sources accumulate into ONE edge row's `metadata`
++ `confidence`. Edges are deliberately NOT per-plane (unlike
+attributions, which are).
+
+**Soft protocol**. Nothing in SQL prevents a caller from writing
+`from=caller, to=callee, identifier=X` even when no matching catalog
+row exists on the callee. The prompt nudges callers to dangle +
+clarify in that case. Callees run a hygiene pass on every wake,
+spot illegal binds + missing catalog rows, and open clarifications
+back to the affected caller. Convergence happens through prompts +
+clarifications, never SQL blocks.
+
+### Schema changes
+
+`edges` table:
+
+```sql
+ALTER TABLE edges RENAME COLUMN source_id TO from_component_id;
+ALTER TABLE edges RENAME COLUMN target_id TO to_component_id;
+ALTER TABLE edges ALTER COLUMN from_component_id DROP NOT NULL;
+ALTER TABLE edges ALTER COLUMN to_component_id DROP NOT NULL;
+
+-- At least one endpoint must be set
+ALTER TABLE edges ADD CONSTRAINT edges_at_least_one_endpoint
+  CHECK (from_component_id IS NOT NULL OR to_component_id IS NOT NULL);
+
+-- No self-loop when both are set
+ALTER TABLE edges ADD CONSTRAINT edges_no_self_loop
+  CHECK (from_component_id IS NULL
+         OR to_component_id IS NULL
+         OR from_component_id <> to_component_id);
+
+-- Replace the global UNIQUE with three partial uniques
+DROP CONSTRAINT IF EXISTS edges_source_id_target_id_edge_type_identifier_key;
+
+CREATE UNIQUE INDEX edges_bound_unique
+  ON edges (from_component_id, to_component_id, edge_type, identifier)
+  WHERE from_component_id IS NOT NULL AND to_component_id IS NOT NULL;
+
+CREATE UNIQUE INDEX edges_catalog_unique
+  ON edges (to_component_id, edge_type, identifier)
+  WHERE from_component_id IS NULL;
+
+CREATE UNIQUE INDEX edges_dangling_unique
+  ON edges (from_component_id, edge_type, identifier)
+  WHERE to_component_id IS NULL;
+```
+
+Migration is a rename + nullability flip + index swap — no row data
+moves, no embeddings invalidate. Existing rows (all currently bound)
+satisfy `edges_bound_unique`. Idempotent: ALTER ... IF EXISTS / NOT
+EXISTS, DROP CONSTRAINT IF EXISTS, CREATE INDEX IF NOT EXISTS.
+
+`flows` table (new):
+
+```sql
+CREATE TABLE flows (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  component_id UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+  incoming_edge_id UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+  outgoing_edge_id UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+  confidence FLOAT NOT NULL DEFAULT 1.0,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  discovered_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (component_id, incoming_edge_id, outgoing_edge_id)
+);
+
+CREATE INDEX idx_flows_component ON flows(component_id);
+CREATE INDEX idx_flows_incoming ON flows(incoming_edge_id);
+CREATE INDEX idx_flows_outgoing ON flows(outgoing_edge_id);
+```
+
+Tool-level invariants on flow writes (validated in Python, not in
+SQL — keeps DB simple, error messages clearer):
+- `incoming_edge.to_component_id = component_id`
+- `outgoing_edge.from_component_id = component_id`
+- caller (agent_id) owns `component_id` via RCA
+
+### MCP tools
+
+Writes (4 new, 1 deprecated):
+
+```
+upsert_edge_catalog(agent_id, edge_data)
+  Callee declares an exposed endpoint / consumed topic / accepted query.
+  edge_data: {to_component_id, edge_type, identifier, metadata?, confidence?}
+  Inserts/updates a row with from_component_id=NULL.
+  Scope: caller must own to_component_id via RCA.
+  ON CONFLICT (to, type, identifier WHERE from IS NULL) DO UPDATE
+  with metadata merge + confidence accumulation.
+
+upsert_edge_outbound(agent_id, edge_data)
+  Caller declares an outgoing edge.
+  edge_data: {from_component_id, to_component_id?, edge_type, identifier, ...}
+  to_component_id may be NULL (dangling outgoing) or set (bound).
+  Scope: caller must own from_component_id.
+  ON CONFLICT routed by which partial index matches:
+    - bound (from, to, type, identifier)
+    - dangling (from, type, identifier WHERE to IS NULL)
+
+bind_edge(agent_id, edge_id, to_component_id)
+  Resolves a dangling outgoing by setting to_component_id.
+  Scope: caller must own the edge's from_component_id.
+  Refuses with clear error if the resulting (from, to, type, identifier)
+  collides with an existing bound row — caller can choose to merge
+  metadata into the existing row + delete the dangling, or rename the
+  dangling identifier. No silent merge.
+
+upsert_flow(agent_id, component_id, incoming_edge_id, outgoing_edge_id, metadata?, confidence?)
+  Links one incoming edge to one outgoing edge inside the SME's
+  component. Validates ownership + edge endpoints match component_id.
+  ON CONFLICT (component_id, incoming, outgoing) DO UPDATE
+  with metadata merge + confidence accumulation.
+```
+
+Deprecated (kept as a backward-compat shim that dispatches to
+`upsert_edge_outbound` so existing callers don't break):
+
+```
+create_edge(agent_id, edge_data)
+  → upsert_edge_outbound(agent_id, edge_data)
+  Logs a deprecation warning. Removed in a future phase once SME
+  prompts have transitioned.
+```
+
+Reads (3 new):
+
+```
+get_component_edges(agent_id, component_id) -> dict
+  All-agent read. Returns categorised buckets:
+    incoming_bound: edges where to=component_id and from IS NOT NULL
+    incoming_catalog: edges where to=component_id and from IS NULL (my catalog)
+    outgoing_bound: edges where from=component_id and to IS NOT NULL
+    outgoing_dangling: edges where from=component_id and to IS NULL
+  Replaces the existing get_edges() which returned just {outbound,
+  inbound}. Old shape kept as backward-compat by collapsing
+  outgoing_bound + outgoing_dangling = outbound, incoming_bound +
+  incoming_catalog = inbound.
+
+get_flow(component_id, incoming_edge_id) -> list[edge]
+  Set of outgoing edges triggered by this incoming edge inside the
+  component. All-agent read.
+
+get_flow_inverse(component_id, outgoing_edge_id) -> list[edge]
+  Set of incoming edges that trigger this outgoing edge. All-agent
+  read.
+```
+
+Existing `get_edges(component_id)` keeps working (backward-compat
+collapse) but is documented as deprecated; new callers should use
+`get_component_edges` for the richer view.
+
+### SME prompt updates
+
+Three sections touched in `agent_management/agent_types/sme.py` (and
+mirrored in `docs/AGENT-PROMPTS.md`):
+
+**Materialisation Step 2 (attributions section)** — add:
+- "If your component_type is application/lambda/external-service,
+  declare your catalog: every endpoint you expose, every topic you
+  consume, every queue you accept from. Use upsert_edge_catalog with
+  to_component_id=YOURS, from_component_id=NULL. Identifier =
+  endpoint path / topic name / queue name. metadata.description =
+  human-readable summary."
+- "Database / cache / queue / object-store components don't have
+  catalogs (they accept arbitrary queries / writes / publishes).
+  Skip catalog declaration for those types."
+
+**Materialisation Step 3 (outbound refs section)** — extend the cosine
+ladder with catalog awareness:
+- "Before binding, check the target's catalog: get_component_edges
+  (target_id) → incoming_catalog. If a row matches your intended
+  identifier, your bind is the natural happy path."
+- "If the target has a catalog but no matching row: you have two
+  choices. Recommended: write a dangling outgoing
+  (upsert_edge_outbound with to=NULL) + create_clarification to the
+  callee asking them to add the catalog row + clarify. After they
+  respond, bind_edge to set to=callee."
+- "If the target has no catalog at all (db/cache/queue/etc.):
+  upsert_edge_outbound with to=callee directly. Free-form."
+- "If you have an identifier but cannot identify ANY target component
+  (vector_search returned no useful match): write a dangling outgoing
+  with to=NULL + insert_unresolved with the identifier. Both are fine."
+
+**Edge Discovery phase (existing section)** — replace symmetric edge
+guidance with directional + flow guidance:
+- "Resolve outbound calls into bound edges (or dangling + clarify)
+  per the materialisation Step 3 ladder."
+- "Record flows: for each of YOUR component's incoming edges (rows
+  where to=YOURS), declare which of YOUR outgoing edges fire as a
+  result. upsert_flow(yours, incoming_id, outgoing_id) per link.
+  Multiple flow rows per incoming = fan-out, that's normal."
+- "Bidirectional validation now runs through catalog: when you bind
+  outbound at identifier X, check target's catalog has a row at X.
+  If not, raise clarification."
+
+**Hygiene cycle (new section in the prompt)** — added to the wake-up
+routine:
+- "Caller hygiene (every few wakes): re-check your dangling outgoings.
+  Run vector_search again — has the target component appeared in the
+  graph since you last looked? If yes, bind_edge."
+- "Callee hygiene (every few wakes): list incoming_bound edges to
+  YOUR component. For each, check whether a matching catalog row
+  exists. If a caller has bound to an identifier you don't expose,
+  decide:
+    - Catalog row should exist (you forgot or it's new behaviour) →
+      upsert_edge_catalog to add it.
+    - Caller is wrong (typo, deprecated endpoint, hallucinated
+      target) → create_clarification to the caller asking them to
+      remove or correct the bind.
+    - Either way, your routine check converges the data."
+
+### Hygiene scanner (deferred to a later phase, NOT in 3.9)
+
+Optional auto-clarification scanner: any dangling-outgoing or
+catalog-mismatched edge older than N cycles → auto-open a
+clarification. Out of scope for 3.9; 3.9 ships pure protocol +
+prompt-driven hygiene. We add the scanner later if humans-in-the-
+loop find prompt-driven hygiene too slow.
+
+### Tests
+
+Unit tests in `tests/mcp_tools/test_edges.py` (new) and
+`tests/mcp_tools/test_flows.py` (new):
+
+Edges:
+- Catalog write + ownership refusal (caller can't write a catalog
+  row for a component they don't own).
+- Outbound write + ownership refusal.
+- Dangling outbound write (to=NULL) + uniqueness on partial index.
+- Bound edge write + idempotent ON CONFLICT update with metadata
+  accumulation.
+- bind_edge happy path: dangling → bound, ownership preserved.
+- bind_edge collision refusal when bound row already exists for
+  same (from, to, type, identifier).
+- Catalog vs bound vs dangling reads via get_component_edges
+  return correctly categorised buckets.
+- Backward compat: legacy create_edge call dispatches and writes a
+  bound row. get_edges() returns the collapsed shape.
+- Migration: existing edges retain content under renamed columns;
+  count parity verified pre/post.
+
+Flows:
+- Upsert + ownership refusal.
+- Validation: incoming.to must equal component_id; outgoing.from
+  must equal component_id.
+- get_flow + get_flow_inverse return the expected sets.
+- Cascade: deleting a component cascades flows; deleting an edge
+  cascades flow rows referencing it.
+
+End-to-end:
+- Two SMEs (caller + callee). Callee declares catalog. Caller binds
+  via vector_search match. Hygiene check on callee finds no
+  mismatches. Caller updates flow. get_flow returns the set.
+
+### Docs to update
+
+- `docs/SCHEMA.md`: edges table redesign + flows table.
+- `docs/TRIGGER-MANAGEMENT.md`: tool contracts for the 7 new + 1
+  deprecated tools.
+- `docs/HLD.md`: tool matrix rows for catalog / bind / flow tools.
+- `docs/AGENT-PROMPTS.md`: SME materialisation / edge discovery /
+  hygiene sections.
+- `docs/IMPLEMENTATION-PHASES.md`: mark 3.9 shipped, status row.
+
+### Operational
+
+- Migration runs idempotently on MCP server boot.
+- Zero data migration — pure schema rename + nullability flip + index
+  swap.
+- Restart MCP server (loads new tools + runs migration), agent_manager
+  (loads new SME prompt), admin_ui (no change but harmless to refresh).
+- Existing `create_edge` callers continue to work via the shim.
+
+### Out of scope (deferred to 3.10)
+
+All graph-viz changes consuming this data: edge styling, hover
+zones, light-of-sight BFS. These ship after the data is populated
+and the protocol is exercised by real SMEs, so the viz design can
+respond to actual data shapes rather than guesses.
+
+---
+
+## Phase 3.10: Edge Graph Viz — Hovers + Light-of-Sight (PLANNED, depends on 3.9)
+
+Renders the asymmetric edge model from 3.9 in the 3d-force-graph
+view: catalog vs bound vs dangling are visually distinct; hovering
+near source / midpoint / target reveals different cuts of the
+relationship; clicking does a full BFS through bindings + flows.
+
+### Motivation
+
+Phase 3.5 ships a flat `edges → links` view that loses everything
+asymmetric about the model. Once 3.9 lands, the data exists for:
+
+- "Who calls this endpoint?" — midpoint convergence query.
+- "What does this endpoint trigger downstream?" — flow-forward.
+- "What incoming endpoints fan into this outgoing call?" —
+  flow-backward.
+- "If I follow this request all the way through, what does it
+  touch?" — light-of-sight BFS.
+
+Without the viz, blast-radius / impact-analysis remains a
+SQL-and-vector-search affair instead of a click.
+
+### Backend additions
+
+Extend `GET /api/graph` payload:
+
+```jsonc
+{
+  "nodes": [...],         // unchanged
+  "edges": [
+    {
+      "id": "...",
+      "from_component_id": "..." | null,    // null = catalog
+      "to_component_id":   "..." | null,    // null = dangling
+      "edge_type": "...",
+      "identifier": "...",
+      "kind": "bound" | "catalog" | "dangling",  // FE convenience
+      "confidence": 0.92,
+      "metadata": { ... }
+    }
+  ],
+  "flows": [
+    {
+      "component_id": "...",
+      "incoming_edge_id": "...",
+      "outgoing_edge_id": "...",
+      "confidence": ...
+    }
+  ]
+}
+```
+
+Adding `flows` to the payload is the key new piece — viz needs the
+incoming↔outgoing links to render line-of-sight. Single query at tab
+load (low thousands of components × handful of edges each = bounded);
+no pagination. Dangling/catalog rows shown by default; toggle in the
+sidebar to hide either.
+
+### 3-zone hover model
+
+Each edge line is divided into thirds:
+
+| Zone | Position on segment | Perspective | Highlight rule |
+|---|---|---|---|
+| Source-half | First third of line, anchored at source node | Caller-internal | Highlight all incoming edges of SOURCE whose flows include this outgoing edge (i.e. "what incoming requests at the caller fan out through this call"). |
+| Midpoint | Middle third of line | Convergence at endpoint | Highlight all OTHER bound edges from any source that share the same (to_component_id, edge_type, identifier) — i.e. "who else calls this endpoint" |
+| Target-half | Last third of line, anchored at target node | Callee-internal | Highlight all outgoing edges of TARGET in the flow triggered by this incoming edge (i.e. "what does the callee fire downstream when this endpoint is hit") |
+
+Hover detection: on `onLinkHover`, compute the cursor's normalised
+position along the link (0.0 at source → 1.0 at target). 0.0–0.33 =
+source-half, 0.33–0.66 = midpoint, 0.66–1.0 = target-half. The
+3d-force-graph library exposes link hover events with cursor
+position; if normalised position isn't directly available, derive
+from event.clientX/Y projected onto the link's midpoint.
+
+Highlighted edges render with a different colour + thickness; node
+ends pulse softly.
+
+### Light-of-sight (click)
+
+Clicking an edge triggers a BFS from that edge through the
+bindings + flows graph:
+
+1. Start from clicked edge.
+2. If clicked edge is bound (from, to both set):
+   - Forward: enqueue all flows where outgoing_edge_id = clicked. For
+     each flow's incoming_edge_id, recurse.
+   - Backward: enqueue all flows where incoming_edge_id = clicked. For
+     each flow's outgoing_edge_id, recurse.
+3. Mark every visited edge with a "lit" colour for ~3-5 seconds
+   (or until the user clicks elsewhere / hits Esc).
+4. Animation: light pulse propagates along each lit edge in the
+   direction of the call (linkDirectionalParticles for the lit set).
+
+Cap BFS depth at ~10 to avoid pathological graphs; show a "depth
+limit reached" indicator if reached.
+
+### Edge styling
+
+| Kind | Colour | Style |
+|---|---|---|
+| Bound (from + to set) | White ~80% opacity | Solid |
+| Catalog (from = NULL) | Plane colour of `to`, ~50% opacity | Dashed, anchored at the callee, free end floats outward as a stub |
+| Dangling outgoing (to = NULL) | Caller's plane colour, ~50% opacity | Dashed, free end floats outward |
+| Highlighted (hover or BFS) | Lit colour (white 100%) | Solid + thicker + directional particles |
+
+Sidebar toggles:
+- "Show catalog stubs" (default on)
+- "Show dangling outgoings" (default on)
+- "Group by endpoint" — when ≥ N callers bind to the same catalog
+  row, bundle their lines visually into one fat line that splits at
+  the midpoint. (Optional polish; ship later if 3.10 grows.)
+
+### Sidebar component panel — additions
+
+When a node is selected (existing hover/click behaviour), expand the
+sidebar to show a tabbed view:
+
+- **Doc** — existing component_doc_md render.
+- **Slice** — existing source_slice render (Phase 3.8).
+- **Catalog** — list of `incoming_catalog` rows owned by this
+  component. Each row: edge_type, identifier, who-calls-it count.
+- **Bindings (in)** — list of `incoming_bound` rows. Each: caller
+  name, edge_type, identifier.
+- **Bindings (out)** — list of `outgoing_bound` + `outgoing_dangling`.
+  Dangling shown with a "??" target icon.
+- **Flows** — list of (incoming, outgoing) pairs, grouped by
+  incoming for fan-out display.
+
+### Tests
+
+Frontend has no unit-test infra today, so Phase 3.10 testing is
+backend + manual:
+
+Backend (`tests/admin_ui/test_graph_endpoint.py` extended):
+- /api/graph payload contains `kind` per edge correctly.
+- Catalog rows surface in the response.
+- Dangling rows surface in the response.
+- Flows array populated.
+
+Manual smoke test (documented in IMPLEMENTATION-PHASES.md):
+- Spin up a 3-component test fixture with a catalog row, two bound
+  rows binding to it, one dangling. Verify each renders correctly.
+- Hover each zone, confirm correct highlight set.
+- Click for light-of-sight, confirm propagation.
+- Toggle catalog/dangling visibility.
+
+Cache-bust `?v=17`.
+
+### Docs to update
+
+- `docs/HLD.md` §10 (admin UI): describe the 3-zone hover + LOS
+  click + edge styling.
+- `docs/IMPLEMENTATION-PHASES.md`: mark 3.10 shipped.
+
+### Operational
+
+- Restart admin_ui only (frontend bundle + /api/graph schema change).
+- No DB migration.
+- No agent prompt changes.
+
+### Open questions to resolve during 3.10 implementation
+
+These are small enough to defer to ship-time:
+
+- Exact colour palette per kind (today's plane colours work for
+  catalog/dangling tinting; need to pick a "lit" colour — white-yellow
+  vs pure white).
+- BFS depth cap (10 seems right; revisit on real data).
+- Whether to bundle convergent edges visually or keep them separate
+  for clarity even at high fan-in (ship without bundling first; add
+  if it gets noisy).
+
+---
+
 ## Phase 4: Mutation + Resolution + Edges
 
 Executing approved merges/splits, resolving references, building the edge graph.
