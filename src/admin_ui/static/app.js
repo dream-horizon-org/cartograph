@@ -1245,29 +1245,19 @@ async function initOrRefreshGraph() {
         n.fz = target.z + (dz / len) * JUNCTION_OFFSET;
       }
     });
-    // Cursor-centric zoom. We try OrbitControls.zoomToCursor first
-    // (works on recent Three.js); if that property isn't honoured we
-    // fall back to a manual wheel handler that moves the camera
-    // along the ray through the cursor toward / away from the
-    // graph's focal point.
+    // Cursor-centric zoom. The library's default wheel zoom is
+    // disabled so our manual handler owns all wheel events (no more
+    // two-zoom-systems-fighting direction weirdness). Orbit target
+    // stays stable (no lerp) so focus doesn't drift during repeated
+    // scroll events — zoom is purely "move camera along ray through
+    // cursor," not "pan + zoom."
     try {
       const controls = graphInstance.controls();
       if (controls) {
-        controls.zoomToCursor = true;
-        // Disable the library's default wheel zoom so our custom
-        // handler (below) doesn't fight it. If zoomToCursor landed
-        // in this Three.js version, OrbitControls will still update
-        // the camera when we change its position; if not, our manual
-        // math does the work.
-        controls.enableZoom = true;  // keep enabled; zoomToCursor is hint-only
+        controls.enableZoom = false;  // we own the wheel
       }
     } catch (e) { /* no-op */ }
 
-    // Manual cursor-centric zoom — works regardless of OrbitControls
-    // version. We prevent-default the wheel event so scroll doesn't
-    // double-fire with the library default, then move the camera
-    // toward (zoom in) or away from (zoom out) the cursor's
-    // projected world position.
     canvas.addEventListener('wheel', (ev) => {
       if (!window.THREE || !graphInstance.camera) return;
       ev.preventDefault();
@@ -1276,28 +1266,41 @@ async function initOrRefreshGraph() {
       const controlsObj = graphInstance.controls ? graphInstance.controls() : null;
       const target = (controlsObj && controlsObj.target)
         || new THREE.Vector3(0, 0, 0);
+
+      // Project cursor to a world-space point at the current
+      // camera→target distance. That's what we zoom toward / away from.
       const rect = canvas.getBoundingClientRect();
       const nx = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
       const ny = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
       const ray = new THREE.Raycaster();
       ray.setFromCamera({x: nx, y: ny}, camera);
-      // Pick a point along the ray at the current orbit-target distance.
       const dist = camera.position.distanceTo(target);
       const cursorWorld = ray.ray.at(dist, new THREE.Vector3());
-      // Zoom factor: scroll up (deltaY < 0) zooms in, scroll down
-      // zooms out. Clamp to sensible step size.
-      const factor = ev.deltaY > 0 ? 1.15 : 1 / 1.15;
-      // Scale camera's offset from the cursor world point by factor.
-      // result = cursorWorld + (camera.position - cursorWorld) * factor
+
+      // Gentle exponential zoom. deltaY comes in many ranges depending
+      // on input device:
+      //   - mouse wheel: ±100 per tick
+      //   - trackpad two-finger: 1-20, hundreds of events per gesture
+      //   - pinch (ctrl+wheel on mac): 1-5
+      // exp(delta * 0.0015) gives a smooth continuous zoom across all
+      // of them. Clamp per-event to ±6% so a single event can't throw
+      // the camera; rapid scrolls still compound smoothly.
+      let factor = Math.exp(ev.deltaY * 0.0015);
+      factor = Math.max(0.94, Math.min(1.06, factor));
+
+      // Scale camera position relative to cursorWorld.
+      // newPos = cursorWorld + (camera.position - cursorWorld) * factor
       const newPos = camera.position.clone()
         .sub(cursorWorld).multiplyScalar(factor).add(cursorWorld);
-      camera.position.copy(newPos);
-      // Also nudge the orbit target toward the cursor so subsequent
-      // pans feel natural — but only a fraction, so we don't
-      // constantly drift the camera focus.
-      if (controlsObj && controlsObj.target) {
-        controlsObj.target.lerp(cursorWorld, 0.05);
-        if (typeof controlsObj.update === 'function') controlsObj.update();
+
+      // Avoid degenerate collapse: don't let camera get closer than
+      // 5 units from target.
+      if (newPos.distanceTo(target) > 5) {
+        camera.position.copy(newPos);
+      }
+
+      if (controlsObj && typeof controlsObj.update === 'function') {
+        controlsObj.update();
       }
     }, {passive: false});
   }
