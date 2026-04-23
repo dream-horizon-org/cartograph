@@ -1479,10 +1479,17 @@ function resolveLinkParticles(l) {
 // materials → our resolver reads the latest litEdgeIds/hoverLitEdgeIds.
 function refreshGraphVisuals() {
   if (!graphInstance) return;
-  graphInstance
-    .linkColor(l => resolveLinkColor(l))
-    .linkWidth(l => resolveLinkWidth(l))
-    .linkDirectionalParticles(l => resolveLinkParticles(l));
+  // Toggle accessors to null then re-set with a fresh closure. The
+  // null→fn transition GUARANTEES the library treats this as a
+  // structural change and rebuilds link materials. Just passing a
+  // new function reference wasn't enough in this build.
+  graphInstance.linkColor(null);
+  graphInstance.linkColor(l => resolveLinkColor(l));
+  graphInstance.linkWidth(null);
+  graphInstance.linkWidth(l => resolveLinkWidth(l));
+  graphInstance.linkDirectionalParticles(null);
+  graphInstance.linkDirectionalParticles(l => resolveLinkParticles(l));
+  console.log('[viz] refresh — lit=%d hover=%d', litEdgeIds.size, hoverLitEdgeIds.size);
 }
 
 // ---------- Light-of-sight BFS ----------
@@ -1503,14 +1510,15 @@ function refreshGraphVisuals() {
 // we treat these as equivalent incomings.
 
 function effectiveFlowIncomingsForEdge(edgeId) {
-  // Return [edgeId plus any catalog rows matching (to, type, identifier)]
-  // so the BFS can find flows keyed on either.
+  // Return [edgeId plus any catalog rows matching (target, type, identifier)]
+  // so the BFS can find flows keyed on either. Server uses target_id (not
+  // to_component_id) in the /api/graph response shape.
   const e = graphSnapshot.edgeById[edgeId];
-  if (!e || !e.to_component_id) return [edgeId];
+  if (!e || !e.target_id) return [edgeId];
   const out = [edgeId];
   for (const cat of graphSnapshot.edges) {
     if (cat.kind === 'catalog'
-        && cat.to_component_id === e.to_component_id
+        && cat.target_id === e.target_id
         && cat.edge_type === e.edge_type
         && cat.identifier === e.identifier) {
       out.push(cat.id);
@@ -1521,12 +1529,30 @@ function effectiveFlowIncomingsForEdge(edgeId) {
 
 function catalogEdgeFor(edge) {
   // If `edge` is a bound row, find its matching catalog; otherwise null.
-  if (!edge || !edge.to_component_id || edge.kind === 'catalog') return null;
+  if (!edge || !edge.target_id || edge.kind === 'catalog') return null;
   return graphSnapshot.edges.find(c =>
     c.kind === 'catalog'
-    && c.to_component_id === edge.to_component_id
+    && c.target_id === edge.target_id
     && c.edge_type === edge.edge_type
     && c.identifier === edge.identifier
+  );
+}
+
+function boundEdgesForIncoming(edgeId) {
+  // Reverse of effectiveFlowIncomingsForEdge: given a flow's
+  // incoming_edge_id (typically a catalog row), return all BOUND edges
+  // that bridge to it — i.e. the real callers represented by that
+  // catalog. Used by caller-side hover so hovering the caller half of
+  // R→S lights up Q→R (the bound edge whose flow fires R→S's feeder).
+  const e = graphSnapshot.edgeById[edgeId];
+  if (!e) return [];
+  if (e.kind === 'bound') return [e];
+  if (e.kind !== 'catalog' || !e.target_id) return [];
+  return graphSnapshot.edges.filter(c =>
+    c.kind === 'bound'
+    && c.target_id === e.target_id
+    && c.edge_type === e.edge_type
+    && c.identifier === e.identifier
   );
 }
 
@@ -1536,6 +1562,8 @@ function lightOfSight(link) {
   _losTimers = [];
   litEdgeIds = new Set();
   refreshGraphVisuals();
+  console.log('[LOS] click', {id: link.id, type: link.edge_type, ident: link.identifier,
+    junctionIn: !!link.isJunctionIn, junctionOut: !!link.isJunctionOut});
 
   // Resolve seed edges (real edge rows). Bundle-aware: clicking trunk
   // OR any contributor seeds the whole bundle in layer 0.
@@ -1569,8 +1597,8 @@ function lightOfSight(link) {
   }
 
   // Forward BFS starting from DESTINATION of each seed edge.
-  // For each edge e (acting as an incoming at dest=e.to_component_id):
-  //   find flows on e.to_component_id where incoming matches e (or its
+  // For each edge e (acting as an incoming at dest=e.target_id):
+  //   find flows on e.target_id where incoming matches e (or its
   //   catalog bridge). Each such flow's outgoing goes to the next layer.
   // Visited tracking:
   //   visitedPairs       : "component|incoming_edge_id" — skip if seen
@@ -1586,7 +1614,7 @@ function lightOfSight(link) {
   for (let depth = 1; depth < 100; depth++) {
     const nextOutgoingIds = new Set();
     for (const e of currentEdges) {
-      const destComponentId = e.to_component_id;
+      const destComponentId = e.target_id;
       if (!destComponentId) continue;
       // Catalog-bridged incoming set for this edge at the destination.
       const flowIncomings = effectiveFlowIncomingsForEdge(e.id);
@@ -2033,10 +2061,13 @@ function hoverZoneResolve(link, zone) {
         }
       }
     }
-    // Bound feeders glow in canvas; catalog feeders only listed in tooltip.
+    // Glow bound edges: either the feeder itself (if bound) or the
+    // bound edges bridging to a catalog feeder. A catalog is a shape,
+    // not a real caller — the user wants to SEE the real callers.
     for (const fid of feederIds) {
-      const fe = graphSnapshot.edgeById[fid];
-      if (fe && fe.kind === 'bound') edgeIds.add(fid);
+      for (const be of boundEdgesForIncoming(fid)) {
+        edgeIds.add(be.id);
+      }
     }
     const feederList = feederIds
       .map(id => graphSnapshot.edgeById[id])
