@@ -12,6 +12,122 @@ _EMBEDDING_TABLES = [
 ]
 
 
+def _migrate_edges_asymmetric(cur) -> None:
+    """Phase 3.9: edges schema redesign.
+
+    Idempotent. On a fresh DB the columns already exist as source_id /
+    target_id from the CREATE TABLE; on a Phase-3.9-already-migrated
+    DB the renamed columns + partial indexes are already there. This
+    helper detects which state we're in and does only what's needed.
+    """
+    # 1. Rename source_id → from_component_id if old name still around.
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name='edges'
+          AND column_name IN ('source_id','target_id',
+                              'from_component_id','to_component_id')
+    """)
+    cols = {r["column_name"] for r in cur.fetchall()}
+    if "source_id" in cols and "from_component_id" not in cols:
+        cur.execute("ALTER TABLE edges RENAME COLUMN source_id TO from_component_id")
+    if "target_id" in cols and "to_component_id" not in cols:
+        cur.execute("ALTER TABLE edges RENAME COLUMN target_id TO to_component_id")
+
+    # 2. Drop NOT NULL on both. Idempotent.
+    cur.execute("ALTER TABLE edges ALTER COLUMN from_component_id DROP NOT NULL")
+    cur.execute("ALTER TABLE edges ALTER COLUMN to_component_id DROP NOT NULL")
+
+    # 3. Drop the old global UNIQUE constraint if it survived the rename
+    # (Postgres carries auto-named constraints across renames). Both old
+    # and new constraint-name forms are tried because the constraint name
+    # depends on the column names at constraint-creation time.
+    for old_name in (
+        "edges_source_id_target_id_edge_type_identifier_key",
+        "edges_from_component_id_to_component_id_edge_type_identifier_key",
+    ):
+        cur.execute(f"ALTER TABLE edges DROP CONSTRAINT IF EXISTS {old_name}")
+
+    # 4. Drop the old self-loop CHECK if present (it referenced source_id).
+    # The constraint name is auto-generated; find + drop by definition.
+    # `%` doubled because psycopg treats single `%` as a placeholder marker
+    # even in unparameterised queries.
+    cur.execute("""
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'edges'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) ILIKE '%%source_id%%'
+    """)
+    for row in cur.fetchall():
+        cur.execute(f"ALTER TABLE edges DROP CONSTRAINT IF EXISTS {row['conname']}")
+
+    # 5. Add the three partial unique indexes (idempotent via IF NOT EXISTS).
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS edges_bound_unique
+          ON edges (from_component_id, to_component_id, edge_type, identifier)
+          WHERE from_component_id IS NOT NULL AND to_component_id IS NOT NULL
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS edges_catalog_unique
+          ON edges (to_component_id, edge_type, identifier)
+          WHERE from_component_id IS NULL
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS edges_dangling_unique
+          ON edges (from_component_id, edge_type, identifier)
+          WHERE to_component_id IS NULL
+    """)
+
+    # 6. Add the new CHECK constraints if they're missing.
+    cur.execute("""
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'edges_at_least_one_endpoint'
+          ) THEN
+            ALTER TABLE edges ADD CONSTRAINT edges_at_least_one_endpoint
+              CHECK (from_component_id IS NOT NULL OR to_component_id IS NOT NULL);
+          END IF;
+        END$$
+    """)
+    cur.execute("""
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'edges_no_self_loop_v2'
+          ) THEN
+            ALTER TABLE edges ADD CONSTRAINT edges_no_self_loop_v2
+              CHECK (from_component_id IS NULL
+                     OR to_component_id IS NULL
+                     OR from_component_id <> to_component_id);
+          END IF;
+        END$$
+    """)
+
+
+def _create_flows_table(cur) -> None:
+    """Phase 3.9: flows table — set-based link between incoming and
+    outgoing edges of a component, owned by the component's SME."""
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS flows (
+          id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          component_id      UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+          incoming_edge_id  UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+          outgoing_edge_id  UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+          confidence        FLOAT NOT NULL DEFAULT 1.0,
+          metadata          JSONB NOT NULL DEFAULT '{}',
+          discovered_by     TEXT NOT NULL,
+          created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+          UNIQUE (component_id, incoming_edge_id, outgoing_edge_id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_flows_component ON flows(component_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_flows_incoming ON flows(incoming_edge_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_flows_outgoing ON flows(outgoing_edge_id)")
+
+
 def _migrate_embedding_dims(cur, target_dim: int) -> None:
     """Flip embedding columns to target_dim if they're on a different dim.
 
@@ -99,27 +215,30 @@ def run_migrations() -> None:
                 )
             """)
 
+            # Phase 3.9 baseline shape: from_component_id / to_component_id
+            # both nullable. The CREATE TABLE here matches the post-3.9
+            # state directly so fresh installs don't need to dance through
+            # the rename. _migrate_edges_asymmetric still handles existing
+            # databases that started before 3.9.
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS edges (
-                    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    source_id       UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
-                    target_id       UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
-                    edge_type       TEXT NOT NULL CHECK (edge_type IN (
-                                        'calls','reads_from','writes_to','triggers',
-                                        'publishes_to','consumes_from','runs_on'
-                                    )),
-                    identifier      TEXT NOT NULL,
-                    source_attr_id  UUID REFERENCES attributions(id) ON DELETE SET NULL,
-                    target_attr_id  UUID REFERENCES attributions(id) ON DELETE SET NULL,
-                    evidence        JSONB NOT NULL DEFAULT '[]',
-                    confidence      FLOAT NOT NULL DEFAULT 1.0,
-                    metadata        JSONB NOT NULL DEFAULT '{}',
-                    embedding       vector(1536),
-                    discovered_by   TEXT NOT NULL,
-                    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    UNIQUE(source_id, target_id, edge_type, identifier),
-                    CHECK (source_id != target_id)
+                    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    from_component_id  UUID REFERENCES components(id) ON DELETE CASCADE,
+                    to_component_id    UUID REFERENCES components(id) ON DELETE CASCADE,
+                    edge_type          TEXT NOT NULL CHECK (edge_type IN (
+                                           'calls','reads_from','writes_to','triggers',
+                                           'publishes_to','consumes_from','runs_on'
+                                       )),
+                    identifier         TEXT NOT NULL,
+                    source_attr_id     UUID REFERENCES attributions(id) ON DELETE SET NULL,
+                    target_attr_id     UUID REFERENCES attributions(id) ON DELETE SET NULL,
+                    evidence           JSONB NOT NULL DEFAULT '[]',
+                    confidence         FLOAT NOT NULL DEFAULT 1.0,
+                    metadata           JSONB NOT NULL DEFAULT '{}',
+                    embedding          vector(1536),
+                    discovered_by      TEXT NOT NULL,
+                    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    last_seen_at       TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
             """)
 
@@ -404,6 +523,16 @@ def run_migrations() -> None:
                 "ALTER TABLE components ADD COLUMN IF NOT EXISTS source_slice JSONB"
             )
 
+            # Phase 3.9: asymmetric edge protocol.
+            # Rename source_id → from_component_id, target_id → to_component_id,
+            # both nullable. Catalog row: from IS NULL (callee owns).
+            # Bound row: both non-null (caller owns). Dangling outgoing:
+            # to IS NULL (caller owns). Replace global UNIQUE with three
+            # partial uniques. See docs/SCHEMA.md §edges and
+            # IMPLEMENTATION-PHASES.md Phase 3.9 for the full protocol.
+            _migrate_edges_asymmetric(cur)
+            _create_flows_table(cur)
+
             # Phase 3.7: switch embeddings from OpenAI text-embedding-3-small
             # (1536d) to local Ollama mxbai-embed-large (1024d). Runs on the
             # Apple Silicon GPU via Metal — no API key, no egress, faster.
@@ -495,8 +624,9 @@ def _create_indexes(cur) -> None:
         "CREATE INDEX IF NOT EXISTS idx_attr_embedding ON attributions USING hnsw (embedding vector_cosine_ops)",
 
         # Edges
-        "CREATE INDEX IF NOT EXISTS idx_edge_source ON edges(source_id)",
-        "CREATE INDEX IF NOT EXISTS idx_edge_target ON edges(target_id)",
+        # Phase 3.9: source_id/target_id renamed to from_component_id/to_component_id.
+        "CREATE INDEX IF NOT EXISTS idx_edge_source ON edges(from_component_id)",
+        "CREATE INDEX IF NOT EXISTS idx_edge_target ON edges(to_component_id)",
         "CREATE INDEX IF NOT EXISTS idx_edge_type ON edges(edge_type)",
         "CREATE INDEX IF NOT EXISTS idx_edge_identifier ON edges(identifier)",
         "CREATE INDEX IF NOT EXISTS idx_edge_source_attr ON edges(source_attr_id)",

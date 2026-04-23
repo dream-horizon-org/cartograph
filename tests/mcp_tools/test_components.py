@@ -243,8 +243,8 @@ def test_create_edge(agent_factory):
          "identifier": "GET /stats"},
     )
     assert edge["edge_type"] == "calls"
-    assert str(edge["source_id"]) == cid_a
-    assert str(edge["target_id"]) == cid_b
+    assert str(edge["from_component_id"]) == cid_a
+    assert str(edge["to_component_id"]) == cid_b
 
 
 def test_create_edge_self_loop_rejected(agent_factory):

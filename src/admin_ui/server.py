@@ -355,12 +355,22 @@ def create_app() -> FastAPI:
                GROUP BY c.id
                ORDER BY c.canonical_name"""
         )
+        # Phase 3.9: edges columns renamed. Phase 3.5/3.10 keep returning
+        # the source_id / target_id keys to the FE for compatibility
+        # (3d-force-graph needs them as link source/target). Catalog rows
+        # (from IS NULL) and dangling outgoings (to IS NULL) are excluded
+        # here — they get rendered via the 3.10 viz upgrades on a separate
+        # path. For 3.9 the basic view stays bound-edges-only.
         edges = execute(
-            """SELECT e.id, e.source_id, e.target_id, e.edge_type,
-                      e.identifier, e.confidence
+            """SELECT e.id,
+                      e.from_component_id AS source_id,
+                      e.to_component_id   AS target_id,
+                      e.edge_type, e.identifier, e.confidence
                FROM edges e
-               JOIN components cs ON cs.id = e.source_id AND cs.status != 'decommissioned'
-               JOIN components ct ON ct.id = e.target_id AND ct.status != 'decommissioned'"""
+               JOIN components cs ON cs.id = e.from_component_id AND cs.status != 'decommissioned'
+               JOIN components ct ON ct.id = e.to_component_id   AND ct.status != 'decommissioned'
+               WHERE e.from_component_id IS NOT NULL
+                 AND e.to_component_id IS NOT NULL"""
         )
         return {"nodes": nodes, "edges": edges}
 

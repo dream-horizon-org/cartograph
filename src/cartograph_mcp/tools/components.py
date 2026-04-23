@@ -323,13 +323,22 @@ def create_edge(agent_id: str, edge_data: dict) -> dict:
     vec = emb.vector_literal(emb.embed_text(
         emb.edge_embed_text(edge_type, identifier)
     ))
+    # Phase 3.9: columns renamed to from_component_id / to_component_id.
+    # `create_edge` keeps accepting source_id/target_id in edge_data for
+    # backward compat — values are written to the new columns. The newer
+    # asymmetric tools (upsert_edge_catalog, upsert_edge_outbound,
+    # bind_edge) target the same renamed schema. The catalog-aware
+    # partial unique index (edges_bound_unique) is the ON CONFLICT
+    # target since both endpoints are NOT NULL on this code path.
     row = execute_returning(
         """INSERT INTO edges
-           (source_id, target_id, edge_type, identifier, source_attr_id,
-            target_attr_id, evidence, confidence, metadata, embedding,
-            discovered_by, last_seen_at)
+           (from_component_id, to_component_id, edge_type, identifier,
+            source_attr_id, target_attr_id, evidence, confidence,
+            metadata, embedding, discovered_by, last_seen_at)
            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::vector, %s, now())
-           ON CONFLICT (source_id, target_id, edge_type, identifier) DO UPDATE
+           ON CONFLICT (from_component_id, to_component_id, edge_type, identifier)
+             WHERE from_component_id IS NOT NULL AND to_component_id IS NOT NULL
+           DO UPDATE
              SET evidence = EXCLUDED.evidence,
                  confidence = EXCLUDED.confidence,
                  metadata = EXCLUDED.metadata,
@@ -447,16 +456,23 @@ def get_attributions(agent_id: str, component_id: str) -> list[dict]:
 
 
 def get_edges(agent_id: str, component_id: str) -> dict:
+    """Phase 3.9 backward-compat shape: returns {outbound, inbound} where
+    outbound = rows with from_component_id=this AND to non-null,
+    inbound  = rows with to_component_id=this AND from non-null.
+    Catalog rows (from IS NULL) and dangling outgoings (to IS NULL) are
+    NOT surfaced here — use get_component_edges (Phase 3.9) for the
+    richer categorised view.
+    """
     _caller(agent_id)
     outbound = execute(
         """SELECT * FROM edges
-           WHERE source_id = %s
+           WHERE from_component_id = %s AND to_component_id IS NOT NULL
            ORDER BY edge_type, identifier""",
         (component_id,),
     )
     inbound = execute(
         """SELECT * FROM edges
-           WHERE target_id = %s
+           WHERE to_component_id = %s AND from_component_id IS NOT NULL
            ORDER BY edge_type, identifier""",
         (component_id,),
     )

@@ -26,7 +26,7 @@ def test_graph_returns_components_and_edges(client):
     c1 = _component("a", doc="# A\nThe A service.")
     c2 = _component("b")
     execute_mutate(
-        """INSERT INTO edges (source_id, target_id, edge_type, identifier, discovered_by)
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type, identifier, discovered_by)
            VALUES (%s, %s, 'calls', 'GET /x', 'sys')""",
         (c1["id"], c2["id"]),
     )
@@ -86,7 +86,7 @@ def test_graph_excludes_decommissioned(client):
     )
     # Edge between them must also be excluded (JOIN filters on status).
     execute_mutate(
-        """INSERT INTO edges (source_id, target_id, edge_type, identifier, discovered_by)
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type, identifier, discovered_by)
            VALUES (%s, %s, 'calls', 'x', 'sys')""",
         (c_active["id"], c_dead["id"]),
     )

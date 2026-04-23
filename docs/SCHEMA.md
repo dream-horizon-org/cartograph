@@ -113,45 +113,115 @@ CREATE INDEX idx_attr_embedding ON attributions USING hnsw (embedding vector_cos
 
 ### `edges`
 
-Dependencies between components.
+Dependencies between components. Asymmetric (Phase 3.9): a row can be
+a **catalog** entry (callee declares an exposed endpoint),
+a **bound** edge (caller bound to a specific callee endpoint), or a
+**dangling outgoing** (caller knows the identifier but the target
+component isn't pinned yet).
+
+Ownership: `from_component_id`'s SME owns the row when non-null;
+`to_component_id`'s SME owns the row when `from_component_id IS NULL`
+(catalog row). Filling `to` on a previously-dangling row does NOT
+shift ownership.
+
+Multi-source consolidation: edges are a holistic view (unlike
+attributions which are per-plane). When the same SME finds the same
+edge from multiple planes its component spans (code + telemetry +
+deploy), they accumulate evidence into ONE row's `metadata` +
+`confidence`. Never multiple rows.
 
 ```sql
 CREATE TABLE edges (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source_id       UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
-    target_id       UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
-    edge_type       TEXT NOT NULL CHECK (edge_type IN (
-                        'calls',                 -- HTTP/gRPC call
-                        'reads_from',            -- reads data from (DB, cache, queue)
-                        'writes_to',             -- writes data to
-                        'triggers',              -- event-based trigger (CloudWatch → Lambda)
-                        'publishes_to',          -- publishes messages to (SNS, Kafka, Slack)
-                        'consumes_from',         -- consumes messages from (SQS, Kafka)
-                        'runs_on'                -- runs on shared infrastructure (pod → EKS)
-                    )),
-    identifier      TEXT NOT NULL,               -- the specific call: "GET /scorecard", "SELECT * FROM matches"
-    source_attr_id  UUID REFERENCES attributions(id) ON DELETE SET NULL,  -- which attribution in source makes this call
-    target_attr_id  UUID REFERENCES attributions(id) ON DELETE SET NULL,  -- which attribution in target receives it
-    evidence        JSONB NOT NULL DEFAULT '[]', -- array of {plane, detail, config_key} objects
-    confidence      FLOAT NOT NULL DEFAULT 1.0,
-    metadata        JSONB NOT NULL DEFAULT '{}', -- throughput, latency, error rate from telemetry
-    embedding       vector(1536),                -- for fuzzy matching calls across components
-    discovered_by   TEXT NOT NULL,               -- agent_id
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- drift detection
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    from_component_id  UUID REFERENCES components(id) ON DELETE CASCADE,
+                                                   -- caller component. NULL = catalog row
+                                                   -- (callee declares exposed endpoint).
+    to_component_id    UUID REFERENCES components(id) ON DELETE CASCADE,
+                                                   -- callee component. NULL = dangling
+                                                   -- outgoing (caller knows identifier
+                                                   -- but target isn't resolved yet).
+    edge_type          TEXT NOT NULL CHECK (edge_type IN (
+                           'calls',                 -- HTTP/gRPC call
+                           'reads_from',            -- reads data from (DB, cache, queue)
+                           'writes_to',             -- writes data to
+                           'triggers',              -- event-based trigger (CloudWatch → Lambda)
+                           'publishes_to',          -- publishes messages to (SNS, Kafka, Slack)
+                           'consumes_from',         -- consumes messages from (SQS, Kafka)
+                           'runs_on'                -- runs on shared infrastructure (pod → EKS)
+                       )),
+    identifier         TEXT NOT NULL,               -- "GET /scorecard", "SELECT * FROM matches"
+    source_attr_id     UUID REFERENCES attributions(id) ON DELETE SET NULL,
+    target_attr_id     UUID REFERENCES attributions(id) ON DELETE SET NULL,
+    evidence           JSONB NOT NULL DEFAULT '[]',
+    confidence         FLOAT NOT NULL DEFAULT 1.0,
+    metadata           JSONB NOT NULL DEFAULT '{}', -- multi-source: per-plane evidence,
+                                                    -- timing, throughput from telemetry, etc.
+    embedding          vector(1024),                -- mxbai-embed-large dim
+    discovered_by      TEXT NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    UNIQUE(source_id, target_id, edge_type, identifier), -- one edge per specific call
-    CHECK (source_id != target_id)               -- no self-loops
+    CONSTRAINT edges_at_least_one_endpoint
+      CHECK (from_component_id IS NOT NULL OR to_component_id IS NOT NULL),
+    CONSTRAINT edges_no_self_loop_v2
+      CHECK (from_component_id IS NULL
+             OR to_component_id IS NULL
+             OR from_component_id <> to_component_id)
 );
 
-CREATE INDEX idx_edge_source ON edges(source_id);
-CREATE INDEX idx_edge_target ON edges(target_id);
+-- Three partial unique indexes — one per edge "kind". Each ensures
+-- idempotency within its own kind without cross-blocking.
+CREATE UNIQUE INDEX edges_bound_unique
+    ON edges (from_component_id, to_component_id, edge_type, identifier)
+    WHERE from_component_id IS NOT NULL AND to_component_id IS NOT NULL;
+CREATE UNIQUE INDEX edges_catalog_unique
+    ON edges (to_component_id, edge_type, identifier)
+    WHERE from_component_id IS NULL;
+CREATE UNIQUE INDEX edges_dangling_unique
+    ON edges (from_component_id, edge_type, identifier)
+    WHERE to_component_id IS NULL;
+
+CREATE INDEX idx_edge_source ON edges(from_component_id);
+CREATE INDEX idx_edge_target ON edges(to_component_id);
 CREATE INDEX idx_edge_type ON edges(edge_type);
 CREATE INDEX idx_edge_identifier ON edges(identifier);
 CREATE INDEX idx_edge_source_attr ON edges(source_attr_id);
 CREATE INDEX idx_edge_target_attr ON edges(target_attr_id);
 CREATE INDEX idx_edge_embedding ON edges USING hnsw (embedding vector_cosine_ops);
 ```
+
+### `flows`
+
+Phase 3.9. Set-based link between an incoming edge and an outgoing
+edge inside one component. Owned by the component's SME. Many-to-many
+(one incoming can fan out to multiple outgoings; multiple incomings
+can share an outgoing).
+
+```sql
+CREATE TABLE flows (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    component_id      UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+    incoming_edge_id  UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+    outgoing_edge_id  UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+    confidence        FLOAT NOT NULL DEFAULT 1.0,
+    metadata          JSONB NOT NULL DEFAULT '{}',  -- multi-source evidence: code-source,
+                                                     -- telemetry trace, etc.
+    discovered_by     TEXT NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    UNIQUE (component_id, incoming_edge_id, outgoing_edge_id)
+);
+
+CREATE INDEX idx_flows_component ON flows(component_id);
+CREATE INDEX idx_flows_incoming  ON flows(incoming_edge_id);
+CREATE INDEX idx_flows_outgoing  ON flows(outgoing_edge_id);
+```
+
+Tool-level invariants enforced in Python (cleaner errors than DB
+triggers): `incoming_edge.to_component_id = component_id`,
+`outgoing_edge.from_component_id = component_id`, caller owns
+`component_id` via RCA.
 
 ### `unresolved`
 
