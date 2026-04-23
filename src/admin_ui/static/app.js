@@ -982,11 +982,13 @@ async function initOrRefreshGraph() {
       // Junctions exist only to route edges visually — minimal data for
       // node accessors. name/type etc. are what they are so nodeLabel
       // stays meaningful if the user hovers one.
-      name: `${group.length} callers → ${group[0].edge_type} ${group[0].identifier}`,
+      name: `⌖ ${group.length} callers → ${group[0].edge_type} ${group[0].identifier}`,
       canonical: key,
       type: 'junction',
       planes: [],
-      color: '#475569',  // slate-600 — muted
+      // Light slate so the junction reads as scaffolding distinct from
+      // real components. Still visible against the dark bg.
+      color: '#94a3b8',  // slate-400
     });
     const sample = group[0];
     const outId = `__junction_out__${key}`;
@@ -1063,7 +1065,11 @@ async function initOrRefreshGraph() {
     graphInstance = ForceGraph3D()(canvas)
       .backgroundColor('#0a0a0a')
       .nodeResolution(32)
-      .nodeOpacity(n => n.isJunction ? 0.45 : 0.92)
+      // SCALAR opacity — 3d-force-graph treats nodeOpacity as a
+      // number, not an accessor. Earlier I passed a function which
+      // coerced to NaN/0 and rendered nodes invisible/black on the
+      // dark bg. Junction differentiation now via color + size only.
+      .nodeOpacity(0.9)
       .nodeLabel(n => n.isJunction
         ? `${n.name}`
         : `${n.name} (${n.type})`
@@ -1199,18 +1205,19 @@ function isLinkLit(link, set) {
 }
 
 function resolveLinkColor(l) {
-  if (isLinkLit(l, litEdgeIds))     return 'rgba(251, 191, 36, 0.95)';   // LOS amber
-  if (isLinkLit(l, hoverLitEdgeIds))return 'rgba(34, 211, 238, 0.85)';   // hover cyan
-  if (l.isJunctionOut)              return 'rgba(168, 168, 168, 0.55)';  // bundled trunk slightly visible
-  return 'rgba(168, 168, 168, 0.30)';
+  if (isLinkLit(l, litEdgeIds))      return 'rgba(251, 191, 36, 0.98)';   // LOS amber
+  if (isLinkLit(l, hoverLitEdgeIds)) return 'rgba(34, 211, 238, 0.9)';    // hover cyan
+  if (l.isJunctionOut)               return 'rgba(148, 163, 184, 0.75)';  // bundled trunk — slate-400 toned
+  if (l.isJunctionIn)                return 'rgba(148, 163, 184, 0.45)';  // contributors — softer
+  return 'rgba(168, 168, 168, 0.42)';                                     // regular bound edge
 }
 
 function resolveLinkWidth(l) {
-  if (isLinkLit(l, litEdgeIds))      return l.isJunctionOut ? 2.6 : 1.8;
-  if (isLinkLit(l, hoverLitEdgeIds)) return l.isJunctionOut ? 2.0 : 1.2;
-  // Junction-out trunks render slightly thicker by default to suggest
-  // they carry many callers.
-  return l.isJunctionOut ? 1.4 : 0.6;
+  if (isLinkLit(l, litEdgeIds))      return l.isJunctionOut ? 3.5 : 2.0;
+  if (isLinkLit(l, hoverLitEdgeIds)) return l.isJunctionOut ? 2.6 : 1.4;
+  // Junction-out trunks render meaningfully thicker by default to
+  // signal they carry N callers.
+  return l.isJunctionOut ? 2.2 : 0.8;
 }
 
 function resolveLinkParticles(l) {
@@ -1220,19 +1227,20 @@ function resolveLinkParticles(l) {
 
 // ---------- Visual refresh ----------
 //
-// 3d-force-graph memoises each link's computed material/geometry. Just
-// mutating litEdgeIds / hoverLitEdgeIds doesn't make the canvas repaint
-// in a new colour — we have to force the library to re-run its link
-// accessors. The reliable way is to re-call the accessor setter with
-// the same function: internally the library treats that as a change
-// and rebuilds. .refresh() alone is NOT sufficient for color/width/
-// particles on existing links.
+// 3d-force-graph's link accessor setters short-circuit when passed the
+// SAME function reference (identity check). So
+// `graphInstance.linkColor(graphInstance.linkColor())` is a no-op —
+// which is exactly what was breaking hover+LOS glow.
+//
+// Fix: wrap each accessor in a fresh arrow function every call. New
+// reference → library treats it as a real change → rebuilds link
+// materials → our resolver reads the latest litEdgeIds/hoverLitEdgeIds.
 function refreshGraphVisuals() {
   if (!graphInstance) return;
   graphInstance
-    .linkColor(graphInstance.linkColor())
-    .linkWidth(graphInstance.linkWidth())
-    .linkDirectionalParticles(graphInstance.linkDirectionalParticles());
+    .linkColor(l => resolveLinkColor(l))
+    .linkWidth(l => resolveLinkWidth(l))
+    .linkDirectionalParticles(l => resolveLinkParticles(l));
 }
 
 // ---------- Light-of-sight BFS ----------
