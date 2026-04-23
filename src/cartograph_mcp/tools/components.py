@@ -292,10 +292,11 @@ def create_edge(agent_id: str, edge_data: dict) -> dict:
     """
     _assert_sme(agent_id)
 
-    source_id = (edge_data.get("source_id") or "").strip()
-    target_id = (edge_data.get("target_id") or "").strip()
-    edge_type = (edge_data.get("edge_type") or "").strip()
-    identifier = (edge_data.get("identifier") or "").strip()
+    # Tolerate both str and UUID inputs from callers.
+    source_id = str(edge_data.get("source_id") or "").strip()
+    target_id = str(edge_data.get("target_id") or "").strip()
+    edge_type = str(edge_data.get("edge_type") or "").strip()
+    identifier = str(edge_data.get("identifier") or "").strip()
     source_attr_id = edge_data.get("source_attr_id")
     target_attr_id = edge_data.get("target_attr_id")
     evidence = edge_data.get("evidence") or []
@@ -389,9 +390,10 @@ def upsert_edge_catalog(agent_id: str, edge_data: dict) -> dict:
     Scope: caller must own to_component_id via RCA.
     """
     _assert_sme(agent_id)
-    to_component_id = (edge_data.get("to_component_id") or "").strip()
-    edge_type = (edge_data.get("edge_type") or "").strip()
-    identifier = (edge_data.get("identifier") or "").strip()
+    # Tolerate both str and UUID inputs from callers.
+    to_component_id = str(edge_data.get("to_component_id") or "").strip()
+    edge_type = str(edge_data.get("edge_type") or "").strip()
+    identifier = str(edge_data.get("identifier") or "").strip()
     metadata = edge_data.get("metadata") or {}
     confidence = float(edge_data.get("confidence", 1.0))
     target_attr_id = edge_data.get("target_attr_id")
@@ -458,11 +460,14 @@ def upsert_edge_outbound(agent_id: str, edge_data: dict) -> dict:
     Scope: caller must own from_component_id.
     """
     _assert_sme(agent_id)
-    from_component_id = (edge_data.get("from_component_id") or "").strip()
+    # Tolerate both str and UUID inputs from callers.
+    from_component_id = str(edge_data.get("from_component_id") or "").strip()
     to_raw = edge_data.get("to_component_id")
-    to_component_id = (to_raw.strip() if isinstance(to_raw, str) else None) or None
-    edge_type = (edge_data.get("edge_type") or "").strip()
-    identifier = (edge_data.get("identifier") or "").strip()
+    to_component_id = str(to_raw).strip() if to_raw is not None else None
+    if to_component_id == "":
+        to_component_id = None
+    edge_type = str(edge_data.get("edge_type") or "").strip()
+    identifier = str(edge_data.get("identifier") or "").strip()
     source_attr_id = edge_data.get("source_attr_id")
     target_attr_id = edge_data.get("target_attr_id")
     evidence = edge_data.get("evidence") or []
@@ -560,6 +565,8 @@ def bind_edge(agent_id: str, edge_id: str, to_component_id: str) -> dict:
     the row's owner).
     """
     _assert_sme(agent_id)
+    edge_id = str(edge_id or "").strip()
+    to_component_id = str(to_component_id or "").strip()
     if not edge_id:
         raise ValueError("edge_id is required")
     if not to_component_id:
@@ -571,14 +578,16 @@ def bind_edge(agent_id: str, edge_id: str, to_component_id: str) -> dict:
     )
     if edge is None:
         raise ValueError(f"Edge {edge_id} not found")
+    # Catalog row check first — a catalog row has from=NULL AND to=set,
+    # so the "already bound" message would be misleading.
+    if edge["from_component_id"] is None:
+        raise ValueError(
+            f"Edge {edge_id} is a catalog row (from IS NULL); cannot be bound."
+        )
     if edge["to_component_id"] is not None:
         raise ValueError(
             f"Edge {edge_id} is already bound to {edge['to_component_id']}; "
             "bind_edge only resolves dangling rows (to IS NULL)."
-        )
-    if edge["from_component_id"] is None:
-        raise ValueError(
-            f"Edge {edge_id} is a catalog row (from IS NULL); cannot be bound."
         )
     if not _sme_owns_component(agent_id, str(edge["from_component_id"])):
         raise ValueError(
@@ -638,6 +647,9 @@ def upsert_flow(
     Re-call accumulates metadata + max confidence.
     """
     _assert_sme(agent_id)
+    component_id = str(component_id or "").strip()
+    incoming_edge_id = str(incoming_edge_id or "").strip()
+    outgoing_edge_id = str(outgoing_edge_id or "").strip()
     if not component_id or not incoming_edge_id or not outgoing_edge_id:
         raise ValueError("component_id, incoming_edge_id, outgoing_edge_id required")
     if incoming_edge_id == outgoing_edge_id:

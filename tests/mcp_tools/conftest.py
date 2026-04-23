@@ -41,6 +41,7 @@ def clean_tables():
     execute_mutate("DELETE FROM consolidations")
     execute_mutate("DELETE FROM clarifications")
     execute_mutate("DELETE FROM unresolved")
+    execute_mutate("DELETE FROM flows")
     execute_mutate("DELETE FROM edges")
     execute_mutate("DELETE FROM attributions")
     execute_mutate("DELETE FROM resource_component_agents")
