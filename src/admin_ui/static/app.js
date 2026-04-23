@@ -976,10 +976,18 @@ function makeNodeMesh(node) {
       geom = new THREE.SphereGeometry(s, 32, 32);
       break;
   }
-  const mat = new THREE.MeshLambertMaterial({
-    color: node.color || '#cccccc',
+  // MeshStandardMaterial with emissive=color gives a self-lit glow
+  // without needing post-processing bloom. emissiveIntensity
+  // controls how "lit from within" the node reads.
+  const col = node.color || '#cccccc';
+  const mat = new THREE.MeshStandardMaterial({
+    color: col,
+    emissive: col,
+    emissiveIntensity: node.isJunction ? 0.5 : 0.9,
+    metalness: 0.1,
+    roughness: 0.45,
     transparent: true,
-    opacity: node.isJunction ? 0.5 : 0.94,
+    opacity: node.isJunction ? 0.65 : 0.96,
   });
   return new THREE.Mesh(geom, mat);
 }
