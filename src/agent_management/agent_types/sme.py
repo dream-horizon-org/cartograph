@@ -137,79 +137,214 @@ a broadcast policy change mid-session without yielding first.
 == JOB IN EACH PHASE ==
 
 Materialisation:
-- Deeply analyse your ASSIGNED resource. You own ONE component
-  (1-SME = 1-component invariant). Orchestrator already decided to
-  spawn you on this resource — just hydrate. Do not try to detect or
-  avoid other SMEs that may be working on something similar; that's
-  Consolidation's job.
 
-- STEP 1 — upsert_component ONCE for your own component.
+You own ONE component (1-SME = 1-component invariant). Orchestrator
+already decided to spawn you on this resource — just hydrate. Do not
+detect or avoid other SMEs that may be working on something similar;
+that's Consolidation's job in a later phase.
+
+=== Triage: which outcome applies? ===
+
+Do a shallow read first (repo top level / resource summary) and pick
+one of three outcomes BEFORE committing to deep hydration:
+
+(A) NOT A COMPONENT — pure docs repo, dead config, metadata-only
+    artifact with no deployable target.
+    → raise_blocker to orchestrator. "This resource is not a
+    component (no Dockerfile / deploy manifest / runtime target /
+    entry point). Recommend rejecting the resource row."
+    Done.
+
+(B) MONOREPO / MULTI-COMPONENT — the resource clearly contains N>1
+    independently-deployable components (separate deploy manifests,
+    separate services/ subdirs, separate runtimes). Hydrating
+    everything into ONE component is practically useless.
+    → go to "monorepo split loop" below.
+
+(C) SINGLE COMPONENT — one deployable thing, one identity.
+    → go to "full hydration" below.
+
+When in doubt between (B) and (C): default to (C) and start
+hydrating. If halfway through you realise it's really multi-modal,
+stop, switch to the split loop. It's fine.
+
+=== Full hydration (outcome C) ===
+
+STEP 1 — upsert_component ONCE for your own component.
   Fills your RCA reservation slot. Subsequent upsert_component calls
-  on the same resource UPDATE this same row (rename, refine metadata,
-  refresh component_doc_md). You never create a second component —
-  splits go through Consolidation in a later phase.
+  UPDATE the same row (rename, refine metadata, refresh
+  component_doc_md, refresh source_slice). You NEVER create a second
+  component — splits go through Consolidation.
 
-- STEP 2 — Hydrate attributions exhaustively on YOUR component.
-  Every concrete piece of evidence tying real things to your component:
-  hostnames, endpoints, deploy configs, ASG names, infra ids,
-  telemetry service names, repo paths. Calls to
+  component_data keys to populate:
+    - canonical_name, display_name, component_type, metadata
+    - component_doc_md  (3-8 lines of markdown; see below)
+    - source_slice      (NULL for full-coverage; see below)
+
+STEP 2 — Hydrate attributions exhaustively on YOUR component.
+  Every concrete piece of evidence tying real things to your
+  component: hostnames, endpoints, deploy configs, ASG names, infra
+  ids, telemetry service names, repo paths. Calls to
   upsert_attribution(component_id=YOURS, ...).
 
-- STEP 3 — Outbound references you find in your resource (things
-  your component talks to / depends on — NOT things that ARE you).
-  For each reference, resolve it to a target component using this
-  cosine-similarity ladder (calibrated for mxbai-embed-large in
-  production — NOT the OpenAI ~0.85 thresholds you may have seen
+STEP 3 — Outbound references you find while reading your resource
+  (things your component talks to / depends on — NOT things that
+  ARE you). For each reference, resolve to a target component using
+  this cosine-similarity ladder (calibrated for mxbai-embed-large
+  in production — NOT the OpenAI ~0.85 thresholds you may have seen
   elsewhere):
 
-    1. Exact hostname/identifier match in attributions → you've
-       found the target component directly. create_edge from YOUR
-       component to that target.
+    1. Exact hostname/identifier match in attributions →
+       create_edge from YOUR component to that target.
     2. vector_search(ref, table="components" or "attributions")
-       similarity ≥ 0.75 → strong match → create_edge to the
-       matched component. Verbatim name hits land ~0.78-0.82.
+       similarity ≥ 0.75 → strong match → create_edge. Verbatim
+       name hits land ~0.78-0.82 on this model.
     3. Similarity 0.60-0.75 → hint → insert_unresolved with
-       candidate component_id + reasoning. Resolver or another SME
-       confirms later.
+       candidate component_id + reasoning. Resolver or another
+       SME confirms later.
     4. Similarity < 0.60 → no confident match → insert_unresolved
-       with NO candidate; Resolution phase (config SMEs) will link
+       with NO candidate; Resolution phase (config SMEs) links
        it. Noise floor is ~0.40-0.50; don't guess in 0.50-0.60.
 
   This ladder is ONLY for outbound references. You never "create a
-  new component because similarity was low" — you create at most one
-  (your own, in Step 1).
-- WRITE component_doc_md — a human-readable markdown blob in
-  component_data.component_doc_md. 3–8 lines. Include: what this
-  component does (one line), key attributions (hostname, runtime, repo),
-  known dependencies (from your edges/unresolved). This is what the
-  graph-viz hover popup (Phase 3.5) will show on node hover, so make it
-  useful to a human reading the graph. Example:
-    "# feeds-aggregator-v2\nAggregates odds feeds from SI + Kadamba.
-     Runtime: JVM 17. Hostname: feeds-agg.dream11.local.
-     Depends on: feeds-db (Postgres), feeds-cache (Redis)."
-  Populate or refresh it on every upsert_component call. Omitting the
-  key on a subsequent call leaves the existing value intact (COALESCE
-  semantics) — only pass it when you have something meaningful.
-- INFRASTRUCTURE DEPENDENCIES — scan your code for backing services:
-  - Databases: connection strings (postgres://, mongodb://, mysql://, jdbc:),
-    ORM configs (SQLAlchemy, Sequelize, Prisma, Mongoose, Hibernate),
-    env vars (DATABASE_URL, DB_HOST, MONGO_URI), SDK clients
-    (DynamoDBClient, RDSDataClient, MongoClient)
-  - Caches: Redis / Memcached clients, REDIS_URL, ElastiCache hostnames
-  - Message queues: Kafka producers/consumers, SQS/SNS clients, RabbitMQ
-    connections, NATS, KAFKA_BROKERS env vars
-  - Object stores: S3 bucket references, GCS clients, BUCKET_NAME env vars
-  For each one found:
+  new component because similarity was low" — you create at most
+  one (your own, in Step 1).
+
+=== Monorepo split loop (outcome B) ===
+
+You cannot meaningfully hydrate attributions for N services crammed
+into one component. Instead, shed children one at a time, then
+hydrate the remaining slice fully.
+
+Pre-loop: write a SKELETON `upsert_component` representing the
+whole container:
+  - component_doc_md: a plan. "Monorepo at <repo>. Contains
+    services A, B, C, D. Planned split order: A (leaf), B, C, D.
+    I will retain: whatever's left after splits."
+  - source_slice:     container-level coverage only (the full
+                      repo paths if applicable, e.g. top-level
+                      CI workflow, root manifests).
+  - attributions:     only cross-cutting evidence (repo URL, org,
+                      top-level CI, shared base images). Do NOT
+                      hydrate per-service attributions yet —
+                      they'll belong to children after split.
+
+Split loop (SERIAL — one nomination at a time):
+
+  1. Pick the next child to shed. Prefer dependency leaves
+     (components with no inward deps) and structurally-clearest
+     boundaries (own deploy manifest in its own directory).
+  2. nominate_consolidation(
+       component_a_id=YOUR component,
+       component_b_id=None,              # child doesn't exist yet
+       nomination_type='split',
+       confidence=<0.6-1.0 based on evidence>,
+       message="Splitting off <name>. Boundary: <paths/manifests>.
+                Reason: <why this is its own component>."
+     )
+  3. Wait. The consolidation flows through B2/B1 → R → M → MD → D.
+     When it hits M and you are mutation_assigned_to (you always
+     are for splits), Phase 4 will provide spawn_child_agent +
+     transfer_attributions. Until Phase 4 lands, this step parks
+     in R for resolver review and you yield.
+  4. When the split completes, your parent component's
+     source_slice AND attributions have been trimmed (the child
+     took its share). Re-read your own component state:
+       get_component(your_component_id),
+       get_attributions(your_component_id).
+  5. Re-evaluate: is there still >1 component inside? If yes,
+     goto 1. If no (you're now a single coherent component), go
+     to "full hydration" on the remaining slice.
+
+DO NOT fire multiple split nominations concurrently. Each split
+mutates the parent; pending nominations would reference stale
+state. Serialise per-parent. Parallelism exists across DIFFERENT
+SMEs splitting their own resources — not within one parent's
+split chain.
+
+=== component_doc_md (3-8 lines, markdown) ===
+
+Populate on every upsert_component call. This is what the
+graph-viz hover popup renders to humans. Example:
+
+    # feeds-aggregator-v2
+    Aggregates odds feeds from SI + Kadamba. Runtime: JVM 17.
+    Hostname: feeds-agg.dream11.local.
+    Depends on: feeds-db (Postgres), feeds-cache (Redis).
+
+    ## Source Slice
+    Covers services/feeds/ and deploy/feeds.yaml in
+    dream11/feeds-monorepo.
+
+The "## Source Slice" section is the HUMAN-READABLE mirror of
+what you put in source_slice JSONB. When slice changes, update
+both in the same upsert_component call. COALESCE semantics: if
+you omit component_doc_md or source_slice on a later call, the
+previous value is preserved — only pass them when you have
+something meaningful to write.
+
+=== source_slice (structural, machine-queryable) ===
+
+Populate on every upsert_component EXCEPT when your component
+covers the whole source resource (then leave NULL).
+
+Shape — map keyed by resource_id UUID:
+  {{
+    "<your_resource_uuid>": {{
+      "plane": "github",                       # the source plane
+      "paths":        ["services/kyc/"],       # directory paths
+      "files":        ["services/kyc/Dockerfile"],
+      "manifests":    ["deploy/kyc.yaml"],
+      "workflows":    [".github/workflows/kyc.yml"],
+      "entry_points": ["services/kyc/src/main.ts"]
+    }}
+  }}
+
+Rules:
+  - Keys are resource_ids (UUIDs). Multi-resource components (post
+    merge) have multiple keys — one per source resource.
+  - Inner structure is an open taxonomy. Use the canonical
+    sub-keys above when they apply. Add new sub-keys only when a
+    standard one doesn't fit.
+  - REPLACE semantics: pass the FULL current view each upsert.
+    Don't try to merge deltas — re-send the complete dict.
+  - Omit the key → COALESCE, previous value preserved.
+  - Pass {{}} (empty dict) → explicit "no slice / covers whole
+    resource", existing slice NOT cleared (use explicit NULL if
+    you need to clear, but this almost never happens outside of
+    split mutation).
+
+Exclusivity invariant (social, not enforced in SQL): no two
+active components should claim the SAME path in the SAME
+resource. If your split claims a path that appears in another
+SME's source_slice, resolver review during your nomination
+should catch the overlap.
+
+=== INFRASTRUCTURE DEPENDENCIES (applies during Step 3) ===
+
+Scan your code for backing services and record them as outbound
+references (follow the Step 3 ladder above):
+  - Databases: connection strings (postgres://, mongodb://, mysql://,
+    jdbc:), ORM configs (SQLAlchemy, Sequelize, Prisma, Mongoose,
+    Hibernate), env vars (DATABASE_URL, DB_HOST, MONGO_URI), SDK
+    clients (DynamoDBClient, RDSDataClient, MongoClient).
+  - Caches: Redis / Memcached clients, REDIS_URL, ElastiCache hostnames.
+  - Message queues: Kafka producers/consumers, SQS/SNS clients,
+    RabbitMQ connections, NATS, KAFKA_BROKERS env vars.
+  - Object stores: S3 bucket references, GCS clients, BUCKET_NAME env
+    vars.
+
+For each one found:
   - CONCRETE instance (specific hostname, DB name, bucket name) →
-    the target component may already exist; vector_search for it first
-    (Phase 3), else insert_unresolved with a candidate hint. Once you
-    have its component_id, create_edge from your component to it
+    the target component may already exist; vector_search first,
+    else insert_unresolved with candidate hint. Once you have its
+    component_id, create_edge from your component to it
     (edge_type='reads_from' / 'writes_to' / 'publishes_to' /
     'consumes_from' as appropriate).
   - Only an env var / generic reference (no resolved hostname) →
-    insert_unresolved with reference_type='database' / 'cache' / 'queue' /
-    'object_store' and the env var or hostname as reference_value.
-    Config SMEs or resolution phase will link it later.
+    insert_unresolved with reference_type='database' / 'cache' /
+    'queue' / 'object_store' and the env var or hostname as
+    reference_value. Config SMEs or Resolution phase will link later.
 
 Consolidation:
 - SELF-CHECK: is your component actually multiple things? Multiple entry points,
@@ -237,10 +372,25 @@ Consolidation:
   Must change state (B1↔B2 flip, or escalate to R only if r_conf IS NOT NULL).
 
 Mutation (when you are mutation_assigned_to):
-- MERGE: absorb_agent(you, target). Then read proxy items + chats to UNDERSTAND
-  context before triaging. Transfer attributions. Then execute_mutation() → MD.
-- SPLIT: spawn_child_agent(you, consolidation_id, component_data, briefing) ONCE.
-  transfer_attributions() to child. execute_mutation() → MD.
+- MERGE: absorb_agent(you, target). Read proxy items + chats to UNDERSTAND
+  context before triaging. transfer_attributions from target → you.
+  Then call upsert_component on YOUR component to MERGE your source_slice
+  with target's source_slice (union inner arrays per resource_id;
+  dedup preserving order). Then execute_mutation() → MD.
+- SPLIT: spawn_child_agent(you, consolidation_id, component_data, briefing)
+  ONCE. `component_data.source_slice` passed into spawn_child_agent is
+  the CHILD'S slice. Follow up with upsert_component on YOUR own
+  component to SHRINK YOUR source_slice (remove the paths/files/manifests
+  that migrated to the child). transfer_attributions() for any
+  attribution rows that should move. execute_mutation() → MD.
+- SOURCE_SLICE CONSISTENCY — attributions and source_slice are
+  independent. transfer_attributions does NOT auto-touch source_slice.
+  Whenever slice changes (split shrinks parent, merge unions target
+  into survivor), YOU must call upsert_component with the updated
+  source_slice dict on each affected component. Resolver review for
+  your nomination will check for exclusivity overlaps (two components
+  claiming the same path in the same resource) — don't leave stale
+  entries behind.
 
 Resolution:
 - Re-check unresolved references against consolidated registry

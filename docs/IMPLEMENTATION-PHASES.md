@@ -1,7 +1,7 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-22):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 ✅ (graph viz with 3d-force-graph) · **Phase 3.7 ✅** (local embeddings via Ollama + Metal, 1024d).
-- **58 MCP tools** registered · **257 tests** passing.
+**Status (2026-04-23):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 ✅ (graph viz with 3d-force-graph) · Phase 3.7 ✅ (local embeddings via Ollama + Metal, 1024d) · **Phase 3.8 ✅** (`components.source_slice` for monorepo splits + SME materialisation flow rewrite).
+- **58 MCP tools** registered · **265 tests** passing.
 - Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 
 ---
@@ -648,6 +648,113 @@ backfilled (2 components, 2 attributions, 1 unresolved).
 
 ---
 
+## Phase 3.8: `source_slice` + SME materialisation flow rewrite ✅
+
+Two motivations:
+
+1. **Monorepos are real.** A resource representing a monorepo can
+   contain N>1 deployable components. Hydrating everything into one
+   component is useless — humans reading the graph want per-service
+   nodes, and Phase 4's split machinery needs a way to describe which
+   parts of the source a component covers.
+2. **The prior SME materialisation prompt was wrong on two axes.**
+   It (a) told SMEs to "dedup check before upsert_component" which
+   steps on Consolidation's job and races with other SMEs; (b) said
+   "for each potential component, create new if similarity was low"
+   which contradicts the 1-SME = 1-component invariant and would
+   cause an SME to create multiple components from one resource.
+
+### Schema
+
+`components.source_slice JSONB` (nullable). Map keyed by `resource_id`
+UUID; inner dict carries `plane` + typed sub-arrays (`paths`, `files`,
+`manifests`, `workflows`, `entry_points`, `k8s_workloads`, open taxonomy
+for additions). NULL = component covers its whole source resource.
+Multi-resource components (post-merge) carry multiple keys.
+
+See SCHEMA.md §components for the full shape + exclusivity invariant.
+
+### `upsert_component` semantics
+
+- Accept optional `component_data.source_slice` dict.
+- Structural validation: must be a dict if present.
+- REPLACE-on-provide (caller passes FULL current view).
+- COALESCE-preserve on omit (previous slice intact).
+
+Mirrors `component_doc_md`'s semantics — caller pattern is identical.
+
+### SME materialisation flow (rewritten)
+
+Three outcomes (was: one monolithic "for each potential component"
+loop):
+
+- **(A) Not a component** — shallow check reveals no deployable →
+  `raise_blocker` to orchestrator.
+- **(B) Monorepo** — multi-component resource. Write a SKELETON
+  component (doc = split plan, source_slice = container-level
+  coverage, minimal cross-cutting attributions). Enter split loop:
+  nominate one split at a time (serial — each split mutates the
+  parent, concurrent nominations would race against a moving target),
+  wait for D, re-evaluate, repeat until the remaining slice is one
+  coherent component, then hydrate fully.
+- **(C) Single component** — normal flow: upsert_component once,
+  hydrate attributions exhaustively, resolve outbound refs via the
+  cosine ladder.
+
+The cosine ladder stays in Step 3 (outbound refs only, never for the
+SME's own component).
+
+### Phase 4 mutation contract (documented; implemented when Phase 4 lands)
+
+- `spawn_child_agent` (split): inside the mutation transaction, copy
+  child's share out of parent's `source_slice` into child's
+  `source_slice`, remove from parent. Atomic.
+- `absorb_agent` (merge): merge target's `source_slice` into
+  surviving's — union inner arrays per `resource_id`, dedup preserving
+  first-seen order. Decommissioned target's slice stays as frozen
+  tombstone.
+- `transfer_attributions`: deliberately does NOT auto-touch
+  `source_slice` — attributions are evidence, slice is structural.
+  The mutation_assigned_to SME must call `upsert_component`
+  explicitly on both sides to update slice. This is called out in
+  the SME mutation prompt.
+
+Exclusivity invariant ("no two active components share
+(resource_id, path)") is NOT SQL-enforced — JSONB unique constraints
+on inner arrays aren't practical. Enforced socially via resolver
+review during split. Future admin-UI drift panel will surface
+overlaps.
+
+### Graph viz (Phase 3.5 extended)
+
+- `/api/graph` returns `source_slice` per node.
+- Frontend hover popup renders a "Source slice" section beneath the
+  markdown doc: one block per `resource_id` with plane-coloured
+  header + typed sub-rows (paths/files/manifests/workflows/etc.).
+- Cache-bust `?v=16`.
+
+### Tests (12 new)
+
+- `tests/mcp_tools/test_source_slice.py` (7): set on create, replace
+  on update, COALESCE on omit, nullable default, non-dict refused,
+  multi-resource shape, get_component round-trip.
+- `tests/admin_ui/test_graph_endpoint.py` extended: `source_slice`
+  flows through the graph API including null-case.
+- Plus `tests/test_agent_types.py` exercises the SME prompt string
+  formatting (caught a brace-escape bug in the updated JSON example).
+
+265 tests total passing.
+
+### Caught-while-writing
+
+The SME prompt's JSON example used single braces `{...}` which
+Python's `.format()` call in `build_config` treats as placeholders —
+caused a `KeyError` on SME spawn. Fixed by doubling braces in the
+literal JSON example. Lesson: any `{` / `}` inside a
+`.format()`-targeted string literal must be `{{` / `}}`.
+
+---
+
 ## Phase 4: Mutation + Resolution + Edges
 
 Executing approved merges/splits, resolving references, building the edge graph.
@@ -667,9 +774,45 @@ Executing approved merges/splits, resolving references, building the edge graph.
   - SET consolidation.child_agent_id = new agent (prevent duplicate spawns)
   - Validate: agent is mutation_assigned_to; consolidation.child_agent_id IS NULL
   - Auto-embed new component
-- `transfer_attributions(from_component_id, to_component_id, attribution_ids[])` — UPDATE attributions SET component_id=to WHERE id IN (...). Re-embed BOTH components. Validate: agent owns from_component.
+- `transfer_attributions(from_component_id, to_component_id, attribution_ids[])` — UPDATE attributions SET component_id=to WHERE id IN (...). Re-embed BOTH components. Validate: agent owns from_component. Does NOT auto-touch `source_slice` — attributions are evidence, slice is structural. The mutation_assigned_to agent must call `upsert_component` explicitly on both sides to keep `source_slice` consistent.
 - `get_proxy_items(agent_id)` — SELECT * FROM proxy_items WHERE surviving_agent_id=agent_id. Returns all inherited items with type, item_id, status.
 - `get_proxy_chats(agent_id, proxy_agent_id, page, limit)` — SELECT from communications WHERE (from_agent=proxy_agent_id OR to_agent=proxy_agent_id) AND type='chat', paginated. Validate: proxy_agent_id is a decommissioned agent absorbed by agent_id (check proxy_items).
+
+### `source_slice` consistency contract (Phase 3.8 → implemented in Phase 4)
+
+`components.source_slice` is a structural JSONB field describing which
+parts of which source resource(s) a component covers. Three mutation
+paths touch it — they MUST keep the invariant "no two active components
+claim the same (resource_id, path) pair":
+
+- **`spawn_child_agent` (split)** — inside the same transaction:
+  - Copy the child's share out of the parent's `source_slice` into the
+    new component's `source_slice`.
+  - Remove those entries from the parent's `source_slice`.
+  - Callers pass the child's intended slice in `component_data.source_slice`;
+    the mutation call must also accept (or compute) the updated parent
+    slice and apply both writes atomically.
+- **`absorb_agent` (merge)** — in the mutation transaction:
+  - MERGE target's `source_slice` into the surviving component's.
+  - Per `resource_id` key: union the inner arrays (dedup preserving
+    order of first appearance).
+  - Decommissioned target's `source_slice` stays frozen as a tombstone
+    (not deleted).
+- **`transfer_attributions`** — does NOT auto-touch `source_slice`.
+  Deliberately decoupled: attributions can move independently of slice
+  (e.g. a hostname attribution moves without changing which paths the
+  component owns). The SME calling `transfer_attributions` is responsible
+  for a follow-up `upsert_component` on both sides if slice changes too.
+
+Social invariants (NOT SQL-enforced, caught at resolver-review time):
+- Exclusivity: no two active components share (resource_id, path).
+- Totality: union of all active components' slices for a given
+  resource_id should cover the parts of the resource SMEs intend to
+  represent. Uncovered parts indicate missing components; overlapping
+  parts indicate a missed consolidation.
+- Phase 4 resolver review for splits should run a lightweight check
+  via the admin-UI drift panel (future work) or by eyeballing the
+  consolidation thread.
 
 ### Trigger Manager Additions
 - Scan consolidations for mutation: `WHERE mutation_assigned_to=agent_id AND status='M'`

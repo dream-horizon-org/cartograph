@@ -911,6 +911,7 @@ async function initOrRefreshGraph() {
       name: n.display_name || n.canonical_name,
       canonical: n.canonical_name,
       doc: n.component_doc_md,
+      slice: n.source_slice,
       type: n.component_type,
       planes: n.planes,
       color: nodeColor(n.planes),
@@ -958,6 +959,7 @@ function showGraphHoverDoc(node) {
     ? node.planes.map(p => `<span class="plane-pill" style="background:${PLANE_COLORS[p] || NO_PLANE_COLOR}22;color:${PLANE_COLORS[p] || NO_PLANE_COLOR}">${p}</span>`).join('')
     : '<span class="plane-pill">no attributions</span>';
   const doc = node.doc ? renderMarkdown(node.doc) : '<p class="empty">No doc written yet — SME will populate on next materialisation.</p>';
+  const sliceHtml = renderSourceSlice(node.slice);
   $doc.innerHTML = `
     <div class="graph-node-head">
       <b>${escapeHtml(node.name)}</b>
@@ -967,6 +969,44 @@ function showGraphHoverDoc(node) {
     </div>
     <hr>
     ${doc}
+    ${sliceHtml}
+  `;
+}
+
+function renderSourceSlice(slice) {
+  // slice is {resource_uuid: {plane, paths, files, manifests, workflows, ...}}
+  // or null when the component covers its whole source resource.
+  if (!slice || typeof slice !== 'object' || Object.keys(slice).length === 0) {
+    return '';
+  }
+  const entries = Object.entries(slice).map(([resourceId, info]) => {
+    const plane = info?.plane || 'unknown';
+    const planeColor = PLANE_COLORS[plane] || NO_PLANE_COLOR;
+    // known typed sub-keys we render first; anything else surfaces under "other"
+    const KNOWN = ['paths','files','manifests','workflows','entry_points','k8s_workloads'];
+    const rowsHtml = Object.entries(info || {})
+      .filter(([k, v]) => k !== 'plane' && Array.isArray(v) && v.length)
+      .sort((a, b) => (KNOWN.indexOf(a[0]) - KNOWN.indexOf(b[0])))
+      .map(([k, v]) => `
+        <div class="slice-row">
+          <span class="slice-k">${escapeHtml(k)}</span>
+          <span class="slice-v">${v.map(s => `<code>${escapeHtml(String(s))}</code>`).join(' ')}</span>
+        </div>
+      `).join('');
+    return `
+      <div class="slice-block">
+        <div class="slice-head">
+          <span class="plane-pill" style="background:${planeColor}22;color:${planeColor}">${plane}</span>
+          <code class="slice-resource">${escapeHtml(resourceId.slice(0, 8))}…</code>
+        </div>
+        ${rowsHtml || '<p class="empty">(empty slice)</p>'}
+      </div>
+    `;
+  }).join('');
+  return `
+    <hr>
+    <h3>Source slice</h3>
+    ${entries}
   `;
 }
 

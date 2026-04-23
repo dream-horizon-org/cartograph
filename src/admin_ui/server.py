@@ -344,6 +344,7 @@ def create_app() -> FastAPI:
         nodes = execute(
             """SELECT c.id, c.canonical_name, c.display_name,
                       c.component_type, c.status, c.component_doc_md,
+                      c.source_slice,
                       COALESCE(
                         ARRAY_AGG(DISTINCT a.plane) FILTER (WHERE a.plane IS NOT NULL),
                         ARRAY[]::text[]

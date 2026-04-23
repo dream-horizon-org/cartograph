@@ -3,13 +3,15 @@
 from shared.db import execute_mutate, execute_returning
 
 
-def _component(canonical, component_type="application", doc=None):
+def _component(canonical, component_type="application", doc=None, source_slice=None):
+    import json
     return execute_returning(
         """INSERT INTO components (canonical_name, display_name, component_type,
-                                   component_doc_md)
-           VALUES (%s, %s, %s, %s)
+                                   component_doc_md, source_slice)
+           VALUES (%s, %s, %s, %s, %s::jsonb)
            RETURNING *""",
-        (canonical, canonical, component_type, doc),
+        (canonical, canonical, component_type, doc,
+         json.dumps(source_slice) if source_slice is not None else None),
     )
 
 
@@ -52,6 +54,27 @@ def test_graph_aggregates_planes_per_component(client):
     assert len(data["nodes"]) == 1
     planes = set(data["nodes"][0]["planes"])
     assert planes == {"github", "deploy", "cloud"}
+
+
+def test_graph_returns_source_slice(client):
+    sl = {
+        "00000000-0000-0000-0000-000000000001": {
+            "plane": "github",
+            "paths": ["services/kyc/"],
+            "manifests": ["deploy/kyc.yaml"],
+        }
+    }
+    c = _component("o/kyc", source_slice=sl)
+    r = client.get("/api/graph")
+    data = r.json()
+    node = next(n for n in data["nodes"] if n["canonical_name"] == "o/kyc")
+    assert node["source_slice"] == sl
+    # Non-slice components still have source_slice key but None-valued.
+    c2 = _component("o/whole")
+    r = client.get("/api/graph")
+    data = r.json()
+    node2 = next(n for n in data["nodes"] if n["canonical_name"] == "o/whole")
+    assert node2["source_slice"] is None
 
 
 def test_graph_excludes_decommissioned(client):

@@ -394,6 +394,16 @@ def run_migrations() -> None:
                 "ALTER TABLE components ADD COLUMN IF NOT EXISTS component_doc_md TEXT"
             )
 
+            # Phase 3.8: structural slice description — which parts of
+            # which source resource(s) this component covers. Nullable
+            # (single-resource full-component components have no slice).
+            # Shape documented in SCHEMA.md §components; keyed by
+            # resource_id so merge mutations (multi-resource components)
+            # are naturally representable.
+            cur.execute(
+                "ALTER TABLE components ADD COLUMN IF NOT EXISTS source_slice JSONB"
+            )
+
             # Phase 3.7: switch embeddings from OpenAI text-embedding-3-small
             # (1536d) to local Ollama mxbai-embed-large (1024d). Runs on the
             # Apple Silicon GPU via Metal — no API key, no egress, faster.

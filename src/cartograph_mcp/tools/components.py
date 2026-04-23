@@ -91,6 +91,14 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
     confidence = float(component_data.get("confidence", 1.0))
     metadata = component_data.get("metadata") or {}
     component_doc_md = component_data.get("component_doc_md")
+    # source_slice: structural description of which parts of which source
+    # resource(s) this component covers. REPLACE-on-provide semantics
+    # (caller must pass the full current view); COALESCE-preserve on omit.
+    source_slice = component_data.get("source_slice")
+    if source_slice is not None and not isinstance(source_slice, dict):
+        raise ValueError(
+            "source_slice must be a dict keyed by resource_id (see SCHEMA.md)"
+        )
 
     if not canonical_name:
         raise ValueError("canonical_name is required")
@@ -120,6 +128,13 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
         (agent_id,),
     )
     if owned is not None:
+        # source_slice: wholesale REPLACE if provided, COALESCE-preserve
+        # if omitted. Contract documented in SCHEMA.md — callers pass the
+        # FULL current slice view each time, not a delta. Phase 4 merge/
+        # split mutations must also explicitly call upsert_component to
+        # update both sides' source_slice; transfer_attributions does NOT
+        # auto-touch it (attributions are evidence, slice is structural).
+        slice_json = json.dumps(source_slice) if source_slice is not None else None
         row = execute_returning(
             """UPDATE components
                SET canonical_name = %s,
@@ -128,6 +143,7 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
                    confidence = %s,
                    metadata = %s::jsonb,
                    component_doc_md = COALESCE(%s, component_doc_md),
+                   source_slice = COALESCE(%s::jsonb, source_slice),
                    embedding = %s::vector,
                    scanned_at = now(),
                    updated_at = now()
@@ -135,7 +151,7 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
                RETURNING *""",
             (
                 canonical_name, display_name, component_type, confidence,
-                json.dumps(metadata), component_doc_md, vec,
+                json.dumps(metadata), component_doc_md, slice_json, vec,
                 owned["component_id"],
             ),
         )
@@ -174,15 +190,16 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
             "different name or raise a merge nomination in Phase 3."
         )
 
+    slice_json = json.dumps(source_slice) if source_slice is not None else None
     new_component = execute_returning(
         """INSERT INTO components
            (canonical_name, display_name, component_type, confidence, metadata,
-            component_doc_md, embedding, scanned_at)
-           VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s::vector, now())
+            component_doc_md, source_slice, embedding, scanned_at)
+           VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::vector, now())
            RETURNING *""",
         (
             canonical_name, display_name, component_type, confidence,
-            json.dumps(metadata), component_doc_md, vec,
+            json.dumps(metadata), component_doc_md, slice_json, vec,
         ),
     )
     execute_mutate(

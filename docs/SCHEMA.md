@@ -44,6 +44,26 @@ CREATE TABLE components (
     split_briefing  TEXT,                        -- briefing doc from parent explaining what this component is
     component_doc_md TEXT,                       -- SME-authored markdown component doc (Phase 3).
                                                  -- Rendered in graph-viz hover popup (Phase 3.5).
+    source_slice   JSONB,                        -- Structural description of what this component
+                                                 -- covers within its source resource(s). Nullable
+                                                 -- (single-resource whole-component = NULL).
+                                                 -- Shape (map keyed by resource_id UUID):
+                                                 -- {
+                                                 --   "<resource_uuid>": {
+                                                 --     "plane": "github"|"deploy"|"cloud"|...,
+                                                 --     "paths":        [...],   -- directory paths
+                                                 --     "files":        [...],   -- specific files
+                                                 --     "manifests":    [...],   -- deploy configs
+                                                 --     "workflows":    [...],   -- CI workflow files
+                                                 --     "entry_points": [...],   -- main.go / app.ts / etc.
+                                                 --     "k8s_workloads": [...],  -- cloud plane
+                                                 --     ...                     -- open taxonomy
+                                                 --   }, ...
+                                                 -- }
+                                                 -- Exclusivity invariant (social, not enforced in
+                                                 -- SQL): no two active components should claim the
+                                                 -- same path within the same resource. Resolver
+                                                 -- review catches overlaps during split approval.
     scanned_at      TIMESTAMPTZ,                -- last time an SME analysed this
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()

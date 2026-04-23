@@ -151,6 +151,28 @@ body {
   width: 100%; height: 100%; background: #0d1117;
 }
 
+/* Source slice rendering in graph hover popup */
+.slice-block {
+  background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+  padding: 6px 8px; margin-top: 6px;
+}
+.slice-head {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+}
+.slice-resource { color: #8b949e; font-size: 10px; }
+.slice-row {
+  display: flex; gap: 6px; font-size: 11px; margin: 2px 0;
+  align-items: flex-start;
+}
+.slice-k {
+  color: #8b949e; min-width: 80px; text-transform: uppercase;
+  letter-spacing: 0.4px; font-size: 10px; padding-top: 1px;
+}
+.slice-v code {
+  display: inline-block; background: #161b22; color: #c9d1d9;
+  padding: 0 4px; margin: 0 3px 3px 0; border-radius: 2px; font-size: 11px;
+}
+
 #sidebar {
   background: #161b22;
   border-right: 1px solid #30363d;
