@@ -856,14 +856,15 @@ async function _postWake(body) {
 // in — HSL blend when multiple. Hovering or clicking a node shows its
 // component_doc_md (markdown) in the sidebar.
 
+// Polished palette — Tailwind 400-range, cohesive on a dark background.
 const PLANE_COLORS = {
-  github:    '#3fb950',
-  deploy:    '#58a6ff',
-  cloud:     '#f85149',
-  telemetry: '#d2a8ff',
-  config:    '#d29922',
+  github:    '#4ade80',  // emerald
+  deploy:    '#60a5fa',  // sky
+  cloud:     '#fb7185',  // rose
+  telemetry: '#c084fc',  // violet
+  config:    '#fbbf24',  // amber
 };
-const NO_PLANE_COLOR = '#8b949e';
+const NO_PLANE_COLOR = '#71717a';  // zinc
 
 let graphInstance = null;
 let graphLoadedOnce = false;
@@ -927,16 +928,24 @@ async function initOrRefreshGraph() {
   const canvas = document.getElementById('graph-canvas');
   if (!graphInstance) {
     graphInstance = ForceGraph3D()(canvas)
-      .backgroundColor('#0d1117')
+      .backgroundColor('#0a0a0a')
+      // Smooth high-segment spheres — default 8 segments looked faceted /
+      // playschool. Bumping to 32 gets us proper round nodes.
+      .nodeResolution(32)
+      .nodeOpacity(0.92)
       .nodeLabel(n => `${n.name} (${n.type})`)
       .nodeColor(n => n.color)
-      .nodeVal(n => 5 + (n.planes?.length || 0) * 2)
-      .linkColor(() => 'rgba(201, 209, 217, 0.4)')
+      .nodeVal(n => 4 + (n.planes?.length || 0) * 1.5)
+      .linkColor(() => 'rgba(168, 168, 168, 0.32)')
+      .linkWidth(0.6)
+      .linkOpacity(0.55)
       .linkDirectionalArrowLength(3)
       .linkDirectionalArrowRelPos(1)
       .linkLabel(l => `${l.edge_type}: ${l.identifier}`)
-      .onNodeHover(n => showGraphHoverDoc(n))
-      .onNodeClick(n => showGraphHoverDoc(n));
+      // Hover only shows the lightweight nodeLabel tooltip the library
+      // renders. Sidebar detail is reserved for explicit clicks so the
+      // user isn't bombarded as the cursor drifts across nodes.
+      .onNodeClick(n => showGraphNodeDetail(n));
   }
   graphInstance.graphData(gData);
 
@@ -949,10 +958,10 @@ async function initOrRefreshGraph() {
   }
 }
 
-function showGraphHoverDoc(node) {
+function showGraphNodeDetail(node) {
   const $doc = document.getElementById('graph-hover-doc');
   if (!node) {
-    $doc.innerHTML = '<p class="empty">Hover or click a component in the graph to see its doc.</p>';
+    $doc.innerHTML = '<p class="empty">Click a component in the graph to inspect it.</p>';
     return;
   }
   const planes = (node.planes || []).length
