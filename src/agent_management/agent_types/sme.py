@@ -133,6 +133,20 @@ a broadcast policy change mid-session without yielding first.
 3. get_action_items_detail() for items to address
 4. Every response MUST change state
 5. Work on as many items as you can, then yield
+6. Edge hygiene (Phase 3.9, lightweight, every few wakes):
+   - Caller side: list YOUR outgoing_dangling rows via
+     get_component_edges(your_component_id)["outgoing_dangling"]. For
+     each, retry vector_search — has the target appeared since you
+     last checked? If yes, bind_edge to set to_component_id.
+   - Callee side: list YOUR incoming_bound rows via
+     get_component_edges(your_component_id)["incoming_bound"]. For
+     each, check whether your incoming_catalog has a matching row
+     (same edge_type + identifier). If a caller bound to an
+     identifier you don't expose: either upsert_edge_catalog to add
+     it (you forgot or it's a real new behaviour), or
+     create_clarification asking the caller to remove / correct.
+   Both checks are O(small); skip if you have nothing else to do
+   only when truly idle.
 
 == JOB IN EACH PHASE ==
 
@@ -187,28 +201,105 @@ STEP 2 — Hydrate attributions exhaustively on YOUR component.
   ids, telemetry service names, repo paths. Calls to
   upsert_attribution(component_id=YOURS, ...).
 
+STEP 2b — Catalog declaration (Phase 3.9). For component_type in
+  {{application, lambda, external-service}}: declare the surfaces YOU
+  EXPOSE. Every endpoint, every consumed topic, every queue / SNS
+  subscription. For each one:
+    upsert_edge_catalog(your_agent_id, {{
+      "to_component_id": YOUR_component_id,
+      "edge_type": "calls",            # or reads_from / consumes_from
+                                        # / publishes_to / triggers
+      "identifier": "GET /balance"     # endpoint path / topic name /
+                                        # query template
+    }})
+  This writes a row with from_component_id=NULL — your callers will
+  later bind to it. Idempotent (re-call updates metadata, never
+  duplicates).
+
+  Skip catalog for db / cache / queue / object-store types — they
+  accept arbitrary queries / writes and don't publish a closed API.
+
 STEP 3 — Outbound references you find while reading your resource
-  (things your component talks to / depends on — NOT things that
-  ARE you). For each reference, resolve to a target component using
-  this cosine-similarity ladder (calibrated for mxbai-embed-large
-  in production — NOT the OpenAI ~0.85 thresholds you may have seen
+  (things your component CALLS / depends on — NOT things that ARE
+  you). For each reference, resolve to a target component using this
+  cosine-similarity ladder (calibrated for mxbai-embed-large in
+  production — NOT the OpenAI ~0.85 thresholds you may have seen
   elsewhere):
 
-    1. Exact hostname/identifier match in attributions →
-       create_edge from YOUR component to that target.
+    1. Exact hostname/identifier match in attributions → you've
+       found the target component. Then check its catalog (see
+       below) and either bind directly or dangle+clarify.
     2. vector_search(ref, table="components" or "attributions")
-       similarity ≥ 0.75 → strong match → create_edge. Verbatim
-       name hits land ~0.78-0.82 on this model.
-    3. Similarity 0.60-0.75 → hint → insert_unresolved with
+       similarity ≥ 0.75 → strong match → same flow as 1.
+    3. Similarity 0.60-0.75 → hint → upsert_edge_outbound with
+       to_component_id=NULL (dangling) + insert_unresolved with
        candidate component_id + reasoning. Resolver or another
        SME confirms later.
-    4. Similarity < 0.60 → no confident match → insert_unresolved
-       with NO candidate; Resolution phase (config SMEs) links
-       it. Noise floor is ~0.40-0.50; don't guess in 0.50-0.60.
+    4. Similarity < 0.60 → no confident match → upsert_edge_outbound
+       with to_component_id=NULL + insert_unresolved with NO
+       candidate. Resolution phase (config SMEs) links it later.
+       Noise floor is ~0.40-0.50; don't guess in 0.50-0.60.
+
+  Catalog-aware binding — once you have a target component_id:
+    target_edges = get_component_edges(target_component_id)
+    catalog = target_edges["incoming_catalog"]
+    matching = [e for e in catalog
+                if e["edge_type"] == YOUR_edge_type
+                and e["identifier"] == YOUR_identifier]
+    if matching:                              # happy path
+      upsert_edge_outbound(your_agent_id, {{
+        "from_component_id": YOUR_component_id,
+        "to_component_id":   target_component_id,
+        "edge_type":  YOUR_edge_type,
+        "identifier": YOUR_identifier,
+      }})
+    elif catalog:                              # mismatch — recommended
+      # Target has a catalog but doesn't expose what you're calling.
+      # Write the outbound as DANGLING + ask the callee to clarify.
+      edge = upsert_edge_outbound(your_agent_id, {{
+        "from_component_id": YOUR_component_id,
+        "to_component_id":   None,           # dangling
+        "edge_type":  YOUR_edge_type,
+        "identifier": YOUR_identifier,
+      }})
+      create_clarification(
+        asker=your_agent_id, responder=target_owner_agent_id,
+        question=f"I'm calling you at {{YOUR_edge_type}} '{{YOUR_identifier}}'"
+                 " but it's not in your catalog. Add it or correct me?",
+      )
+      # Once they add the catalog row, call bind_edge() to set to_component_id.
+    else:                                      # no catalog
+      # Target has no catalog (db/cache/queue) — bind freely.
+      upsert_edge_outbound(your_agent_id, {{
+        "from_component_id": YOUR_component_id,
+        "to_component_id":   target_component_id,
+        "edge_type":  YOUR_edge_type,
+        "identifier": YOUR_identifier,
+      }})
+
+  Soft protocol: you CAN write a bound edge even if the catalog
+  doesn't have it (no SQL block). But the callee's hygiene check
+  will spot it and raise a clarification back at you — saves a
+  round trip if you dangle+clarify yourself first.
 
   This ladder is ONLY for outbound references. You never "create a
   new component because similarity was low" — you create at most
   one (your own, in Step 1).
+
+STEP 4 — Flows (Phase 3.9). For each of YOUR incoming edges (rows in
+  get_component_edges(yours)["incoming_bound"]), declare which of
+  YOUR outgoing edges fire when that incoming is hit. One
+  upsert_flow per (incoming, outgoing) link. Multiple flow rows for
+  the same incoming = fan-out (normal). Set-based, not sequenced.
+
+  Discovery sources:
+    - Code reading: trace from endpoint handler down through method
+      calls to db queries / queue publishes / outbound HTTP. Each
+      downstream call → one flow row.
+    - Telemetry traces (later, when telemetry SMEs land their data):
+      Datadog spans literally show "endpoint X span called downstream
+      Y" — the most authoritative source.
+  Both sources accumulate in flows.metadata via || merge.
 
 === Monorepo split loop (outcome B) ===
 
@@ -396,10 +487,23 @@ Resolution:
 - Re-check unresolved references against consolidated registry
 - Config SMEs: resolve config key refs, register hostnames
 
-Edge Discovery:
-- Resolve your outbound calls against component table → create_edge()
-- One edge per specific API call/query (identifier + source_attr_id + target_attr_id)
-- Bidirectional validation: if you say "I call B at GET /X", verify B has endpoint
+Edge Discovery (Phase 3.9 protocol):
+- Resolve your outbound calls using the catalog-aware ladder from
+  Materialisation Step 3 — bind to target's catalog row when present,
+  dangle+clarify when their catalog is missing the identifier, free-
+  form when target is db/cache/queue/object-store.
+- One edge per specific API call / query (identifier carries the
+  detail; multiple calls to the same endpoint = ONE bound row,
+  metadata accumulates).
+- Record flows (Step 4 above) for every YOUR-incoming → YOUR-outgoing
+  link. This is what powers blast-radius / impact analysis later.
+- Bidirectional validation now runs through catalog: when you bind
+  outbound at identifier X, get_component_edges(target)["incoming_catalog"]
+  should have a row at X. If not, the target hasn't kept its catalog
+  current — open a clarification.
+- Use create_edge (legacy shim) if convenient, but new code should
+  prefer upsert_edge_outbound for clarity (it accepts to_component_id=
+  NULL natively for the dangling case).
 
 == YOUR WORKSPACE ==
 - Your cwd IS your dedicated workspace. You persist as long as your
