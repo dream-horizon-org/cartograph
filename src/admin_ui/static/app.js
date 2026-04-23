@@ -876,8 +876,14 @@ let graphSnapshot = {nodes: [], edges: [], flows: [], nodeById: {}, edgeById: {}
 // tabs to keep scrolled state clean.
 let activeDetailNodeId = null;
 let activeDetailTab = 'doc';
-// Light-of-sight highlighting state — set of edge ids to light up.
+// Two independent highlight sets:
+//  litEdgeIds:       click-driven light-of-sight (amber + particles).
+//                    Persists until user clicks empty space or another edge.
+//  hoverLitEdgeIds:  current hover zone's corresponding edges (cyan).
+//                    Transient — clears when mouse leaves the link.
+// A link lit by BOTH renders as amber (LOS takes precedence visually).
 let litEdgeIds = new Set();
+let hoverLitEdgeIds = new Set();
 
 function blendColors(hexColors) {
   // Average RGB components. For 1 color, returns it unchanged; for N,
@@ -950,17 +956,28 @@ async function initOrRefreshGraph() {
   // them as stubs, but that adds visual noise up front).
   const boundEdges = data.edges.filter(e => e.kind === 'bound');
 
-  const gData = {
-    nodes: transformedNodes,
-    links: boundEdges.map(e => ({
+  // Compute per-link curvature so parallel edges (same source+target
+  // pair, multiple edge_type / identifier combos) fan out instead of
+  // stacking on top of each other. Alternating magnitudes around 0
+  // keep the layout symmetric.
+  const pairOrder = {};  // unordered "src|tgt" → running index
+  const links = boundEdges.map(e => {
+    const key = [e.source_id, e.target_id].sort().join('|');
+    const i = (pairOrder[key] = (pairOrder[key] ?? -1) + 1);
+    // 0, 0.25, -0.25, 0.5, -0.5, ... — spreads the fan
+    const curvature = i === 0 ? 0 : (i % 2 === 1 ? 1 : -1) * (0.25 * Math.ceil(i / 2));
+    return {
       id: e.id,
       source: e.source_id,
       target: e.target_id,
       edge_type: e.edge_type,
       identifier: e.identifier,
       confidence: e.confidence,
-    })),
-  };
+      curvature,
+    };
+  });
+
+  const gData = {nodes: transformedNodes, links};
 
   const canvas = document.getElementById('graph-canvas');
   if (!graphInstance) {
@@ -971,20 +988,41 @@ async function initOrRefreshGraph() {
       .nodeLabel(n => `${n.name} (${n.type})`)
       .nodeColor(n => n.color)
       .nodeVal(n => 4 + (n.planes?.length || 0) * 1.5)
-      .linkColor(l => litEdgeIds.has(l.id)
-        ? 'rgba(251, 191, 36, 0.95)'  // amber when lit
-        : 'rgba(168, 168, 168, 0.32)'
-      )
-      .linkWidth(l => litEdgeIds.has(l.id) ? 1.6 : 0.6)
-      .linkOpacity(0.55)
+      // Curvature makes parallel edges fan out instead of overlapping.
+      .linkCurvature(l => l.curvature || 0)
+      .linkColor(l => {
+        if (litEdgeIds.has(l.id)) return 'rgba(251, 191, 36, 0.95)';    // LOS amber
+        if (hoverLitEdgeIds.has(l.id)) return 'rgba(34, 211, 238, 0.8)'; // hover cyan
+        return 'rgba(168, 168, 168, 0.32)';
+      })
+      .linkWidth(l => {
+        if (litEdgeIds.has(l.id)) return 1.8;
+        if (hoverLitEdgeIds.has(l.id)) return 1.2;
+        return 0.6;
+      })
+      .linkOpacity(0.6)
       .linkDirectionalArrowLength(3)
       .linkDirectionalArrowRelPos(1)
       .linkDirectionalParticles(l => litEdgeIds.has(l.id) ? 4 : 0)
       .linkDirectionalParticleSpeed(0.008)
-      .linkDirectionalParticleWidth(2)
+      .linkDirectionalParticleWidth(2.5)
+      .linkDirectionalParticleColor(() => '#fbbf24')
       .linkLabel(l => edgeHoverLabel(l))
-      .onNodeClick(n => showGraphNodeDetail(n))
-      .onLinkClick(l => lightOfSight(l.id));
+      .onNodeClick(n => {
+        showGraphNodeDetail(n);
+        // Clicking a node keeps LOS active (user asked for this) —
+        // only clear hover set so the cyan glow from the last edge
+        // hover doesn't linger weirdly.
+        hoverLitEdgeIds = new Set();
+        refreshGraphVisuals();
+      })
+      .onLinkClick(l => lightOfSight(l.id))
+      .onBackgroundClick(() => {
+        // Empty-space click clears both sets.
+        litEdgeIds = new Set();
+        hoverLitEdgeIds = new Set();
+        refreshGraphVisuals();
+      });
   }
   graphInstance.graphData(gData);
 
@@ -1042,12 +1080,35 @@ function edgeHoverLabel(link) {
   return `${link.edge_type}: ${link.identifier} (click for light-of-sight)`;
 }
 
+// ---------- Visual refresh ----------
+//
+// 3d-force-graph memoises accessor results per link until data changes
+// identity. Just re-setting litEdgeIds doesn't retrigger linkColor /
+// linkWidth / linkDirectionalParticles. .refresh() or reassigning the
+// accessor via its setter forces a re-render. We use .refresh() since
+// it's cheap and well-documented in the library.
+function refreshGraphVisuals() {
+  if (!graphInstance) return;
+  // .refresh() re-renders without touching the data. If the version in
+  // use doesn't expose it, fall back to re-setting accessors which
+  // forces internal invalidation.
+  if (typeof graphInstance.refresh === 'function') {
+    graphInstance.refresh();
+  } else {
+    graphInstance
+      .linkColor(graphInstance.linkColor())
+      .linkWidth(graphInstance.linkWidth())
+      .linkDirectionalParticles(graphInstance.linkDirectionalParticles());
+  }
+}
+
 // ---------- Light-of-sight BFS ----------
 //
 // Click an edge → BFS outward through bindings + flows, lighting every
-// reachable edge. Forward (from this outgoing to downstream) and
-// backward (to the incoming(s) that trigger this outgoing). Capped at
-// depth ~8 to keep pathological graphs sane.
+// reachable edge. Forward (follow this outgoing's downstream flows) and
+// backward (incoming(s) whose flows fire this outgoing). Capped at
+// depth 8. Persists until user clicks empty space, another edge, or
+// a node (in which case hover-glow clears but LOS stays).
 
 function lightOfSight(startEdgeId) {
   const cap = 8;
@@ -1056,31 +1117,39 @@ function lightOfSight(startEdgeId) {
   while (frontier.length) {
     const {edgeId, depth} = frontier.shift();
     if (depth >= cap) continue;
-    const edge = graphSnapshot.edgeById[edgeId];
-    if (!edge) continue;
-    // Forward: find flows where this edge is the incoming; enqueue their outgoings.
     for (const f of graphSnapshot.flows) {
+      // Forward: this edge is the incoming of some flow → light its outgoing.
       if (f.incoming_edge_id === edgeId && !visited.has(f.outgoing_edge_id)) {
         visited.add(f.outgoing_edge_id);
         frontier.push({edgeId: f.outgoing_edge_id, depth: depth + 1});
       }
-      // Backward: if this edge is an outgoing on some flow, enqueue the incoming.
+      // Backward: this edge is the outgoing of some flow → light the incoming.
       if (f.outgoing_edge_id === edgeId && !visited.has(f.incoming_edge_id)) {
         visited.add(f.incoming_edge_id);
         frontier.push({edgeId: f.incoming_edge_id, depth: depth + 1});
       }
     }
+    // Also include bound sibling edges converging on the same catalog
+    // endpoint — when you click an edge that enters a catalog surface,
+    // it's useful to see who else calls that same endpoint. We detect
+    // this by matching (to, type, identifier) on the clicked edge.
+    const e = graphSnapshot.edgeById[edgeId];
+    if (e && e.to_component_id) {
+      for (const sib of graphSnapshot.edges) {
+        if (sib.id !== edgeId
+            && sib.kind === 'bound'
+            && sib.to_component_id === e.to_component_id
+            && sib.edge_type === e.edge_type
+            && sib.identifier === e.identifier
+            && !visited.has(sib.id)) {
+          visited.add(sib.id);
+          frontier.push({edgeId: sib.id, depth: depth + 1});
+        }
+      }
+    }
   }
   litEdgeIds = visited;
-  // Force link style refresh — redraw using the same data.
-  const current = graphInstance.graphData();
-  graphInstance.graphData(current);
-  // Auto-clear after 5s.
-  setTimeout(() => {
-    litEdgeIds = new Set();
-    const cur = graphInstance.graphData();
-    graphInstance.graphData(cur);
-  }, 5000);
+  refreshGraphVisuals();
 }
 
 function showGraphNodeDetail(node) {
@@ -1324,11 +1393,16 @@ function wireEdgeHoverZones() {
     }
   });
 
-  // mousemove over the canvas → update tooltip with zone-specific view.
+  // mousemove over the canvas → update tooltip AND hover-glow set with
+  // zone-specific view.
   canvas.addEventListener('mousemove', e => {
     const tt = ensureHoverTooltip();
     if (!lastHoveredLink) {
       tt.style.display = 'none';
+      if (hoverLitEdgeIds.size > 0) {
+        hoverLitEdgeIds = new Set();
+        refreshGraphVisuals();
+      }
       return;
     }
     const rect = canvas.getBoundingClientRect();
@@ -1338,21 +1412,39 @@ function wireEdgeHoverZones() {
       tt.style.display = 'none';
       return;
     }
+    // Compute which corresponding edges should glow + render the
+    // tooltip from the same data. Both use the same resolver so the
+    // tooltip and the canvas never drift out of sync.
+    const {tooltipHtml, edgeIds} = hoverZoneResolve(lastHoveredLink, zone);
     lastZone = zone;
-    tt.innerHTML = renderEdgeZoneTooltip(lastHoveredLink, zone);
+    tt.innerHTML = tooltipHtml;
     tt.style.display = 'block';
     tt.style.left = (e.clientX + 12) + 'px';
     tt.style.top  = (e.clientY + 12) + 'px';
+    // Update hover-glow set only if it actually changed — avoids
+    // redraw thrashing every mousemove frame.
+    const newSet = new Set(edgeIds);
+    if (newSet.size !== hoverLitEdgeIds.size
+        || [...newSet].some(id => !hoverLitEdgeIds.has(id))) {
+      hoverLitEdgeIds = newSet;
+      refreshGraphVisuals();
+    }
   });
 
   canvas.addEventListener('mouseleave', () => {
     ensureHoverTooltip().style.display = 'none';
+    if (hoverLitEdgeIds.size > 0) {
+      hoverLitEdgeIds = new Set();
+      refreshGraphVisuals();
+    }
   });
 }
 
-function renderEdgeZoneTooltip(link, zone) {
-  // The hovered link is a BOUND edge (we only render bound in the 3d
-  // graph). For each zone we show a different piece of context.
+function hoverZoneResolve(link, zone) {
+  // Given a hovered link + zone, return {tooltipHtml, edgeIds}.
+  // edgeIds is the set of edges that should glow cyan in the canvas.
+  // The tooltip and the glow are derived from the same computation so
+  // the viz and the explanation never drift.
   const srcNode = graphSnapshot.nodeById[link.source?.id || link.source];
   const tgtNode = graphSnapshot.nodeById[link.target?.id || link.target];
   const header = `
@@ -1365,37 +1457,80 @@ function renderEdgeZoneTooltip(link, zone) {
     </div>
   `;
 
+  const edgeIds = new Set([link.id]);
+
   if (zone === 'source') {
-    // Caller-internal: which of SOURCE's incoming edges trigger this outgoing?
-    const feeders = graphSnapshot.flows
+    // CALLER view: source's incoming edges whose flows include this outgoing.
+    // Those incoming edges are catalog rows on the source (or inbound
+    // bound edges into it). Light up sibling BOUND outgoings on this
+    // source that share the same incoming — i.e. the other things the
+    // source does as part of the same request.
+    const feederIds = graphSnapshot.flows
       .filter(f => f.component_id === (srcNode?.id) && f.outgoing_edge_id === link.id)
-      .map(f => graphSnapshot.edgeById[f.incoming_edge_id])
-      .filter(Boolean);
-    const body = feeders.length
-      ? feeders.map(fe => `<li>${escapeHtml(fe.edge_type)} <code>${escapeHtml(fe.identifier)}</code></li>`).join('')
-      : '<li><em>no flow recorded from source incoming edges</em></li>';
-    return `
-      ${header}
-      <div class="tt-zone">CALLER view — incoming edges of <b>${escapeHtml(srcNode?.name || '?')}</b> whose flows fire this outgoing</div>
-      <ul class="tt-list">${body}</ul>
-    `;
+      .map(f => f.incoming_edge_id);
+    // Sibling outgoings of source triggered by the same incomings.
+    const siblingOutgoingIds = new Set();
+    for (const fid of feederIds) {
+      for (const f of graphSnapshot.flows) {
+        if (f.component_id === (srcNode?.id)
+            && f.incoming_edge_id === fid
+            && f.outgoing_edge_id !== link.id) {
+          siblingOutgoingIds.add(f.outgoing_edge_id);
+        }
+      }
+    }
+    // Glow the sibling outgoings (catalog rows aren't rendered, so the
+    // incoming edges themselves don't glow — but the siblings visualise
+    // the "this request also does X and Y" idea).
+    siblingOutgoingIds.forEach(id => edgeIds.add(id));
+
+    const feederEdges = feederIds.map(id => graphSnapshot.edgeById[id]).filter(Boolean);
+    const siblings = [...siblingOutgoingIds].map(id => graphSnapshot.edgeById[id]).filter(Boolean);
+    const feederBody = feederEdges.length
+      ? feederEdges.map(fe => `<li>${escapeHtml(fe.edge_type)} <code>${escapeHtml(fe.identifier)}</code></li>`).join('')
+      : '<li><em>no catalog incoming feeds this outgoing</em></li>';
+    const siblingBody = siblings.length
+      ? `<div class="tt-zone">Sibling outgoings lit on the canvas:</div><ul class="tt-list">${siblings.map(s => {
+          const tgt = graphSnapshot.nodeById[s.target_id];
+          return `<li>${escapeHtml(s.edge_type)} <code>${escapeHtml(s.identifier)}</code> → ${escapeHtml(tgt?.name || '?')}</li>`;
+        }).join('')}</ul>`
+      : '';
+    return {
+      tooltipHtml: `
+        ${header}
+        <div class="tt-zone">CALLER view — incoming endpoints of <b>${escapeHtml(srcNode?.name || '?')}</b> feeding this outgoing</div>
+        <ul class="tt-list">${feederBody}</ul>
+        ${siblingBody}
+      `,
+      edgeIds: [...edgeIds],
+    };
   }
+
   if (zone === 'target') {
-    // Callee-internal: which of TARGET's outgoing edges fire when this incoming hits?
-    const downstream = graphSnapshot.flows
+    // CALLEE view: target's outgoing edges in the flow triggered by this incoming.
+    const downstreamIds = graphSnapshot.flows
       .filter(f => f.component_id === (tgtNode?.id) && f.incoming_edge_id === link.id)
-      .map(f => graphSnapshot.edgeById[f.outgoing_edge_id])
-      .filter(Boolean);
+      .map(f => f.outgoing_edge_id);
+    downstreamIds.forEach(id => edgeIds.add(id));
+    const downstream = downstreamIds.map(id => graphSnapshot.edgeById[id]).filter(Boolean);
     const body = downstream.length
-      ? downstream.map(de => `<li>${escapeHtml(de.edge_type)} <code>${escapeHtml(de.identifier)}</code></li>`).join('')
-      : '<li><em>no flow recorded from this incoming edge</em></li>';
-    return `
-      ${header}
-      <div class="tt-zone">CALLEE view — outgoing edges of <b>${escapeHtml(tgtNode?.name || '?')}</b> triggered by this incoming</div>
-      <ul class="tt-list">${body}</ul>
-    `;
+      ? downstream.map(de => {
+          const tgt = de.target_id ? graphSnapshot.nodeById[de.target_id] : null;
+          return `<li>${escapeHtml(de.edge_type)} <code>${escapeHtml(de.identifier)}</code> → ${escapeHtml(tgt?.name || 'dangling')}</li>`;
+        }).join('')
+      : '<li><em>no flow recorded from this incoming</em></li>';
+    return {
+      tooltipHtml: `
+        ${header}
+        <div class="tt-zone">CALLEE view — outgoings of <b>${escapeHtml(tgtNode?.name || '?')}</b> fired by this incoming</div>
+        <ul class="tt-list">${body}</ul>
+      `,
+      edgeIds: [...edgeIds],
+    };
   }
-  // Midpoint: convergence at the target endpoint. Who else calls it?
+
+  // MIDPOINT — convergence. Other bound edges hitting the same
+  // (target, edge_type, identifier) endpoint.
   const siblings = graphSnapshot.edges.filter(e =>
     e.kind === 'bound'
     && e.target_id === (tgtNode?.id)
@@ -1403,17 +1538,21 @@ function renderEdgeZoneTooltip(link, zone) {
     && e.identifier === link.identifier
     && e.id !== link.id
   );
+  siblings.forEach(s => edgeIds.add(s.id));
   const body = siblings.length
     ? siblings.map(s => {
         const src = graphSnapshot.nodeById[s.source_id];
         return `<li>from ${escapeHtml(src?.name || s.source_id.slice(0, 8))}</li>`;
       }).join('')
     : '<li><em>only you call this endpoint</em></li>';
-  return `
-    ${header}
-    <div class="tt-zone">CONVERGENCE — others calling the same <code>${escapeHtml(tgtNode?.name)}</code> endpoint</div>
-    <ul class="tt-list">${body}</ul>
-  `;
+  return {
+    tooltipHtml: `
+      ${header}
+      <div class="tt-zone">CONVERGENCE — others calling <code>${escapeHtml(link.edge_type)} ${escapeHtml(link.identifier)}</code> on <b>${escapeHtml(tgtNode?.name || '?')}</b></div>
+      <ul class="tt-list">${body}</ul>
+    `,
+    edgeIds: [...edgeIds],
+  };
 }
 
 // The graph instance is created inside initOrRefreshGraph. Attach the

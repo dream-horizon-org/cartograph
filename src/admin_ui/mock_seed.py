@@ -78,6 +78,43 @@ COMPONENTS = [
         "planes":    ["cloud"],
         "doc":       "# Notifications Lambda\nFan-out SMS/email/push. Event-triggered from SNS.",
     },
+    # Extra callers that converge on payments-svc GET /balance so the
+    # midpoint convergence tooltip has interesting fan-in to show.
+    {
+        "canonical": "mock/search-svc",
+        "display":   "Search Service",
+        "type":      "application",
+        "planes":    ["github", "cloud"],
+        "doc":       "# Search Service\nPrefix + fuzzy match over catalog. Runtime: Rust. Hostname: search.mock.local.",
+    },
+    {
+        "canonical": "mock/match-svc",
+        "display":   "Match Service",
+        "type":      "application",
+        "planes":    ["github", "deploy", "cloud", "telemetry"],
+        "doc":       "# Match Service\nLive match orchestration. Runtime: Go. Hostname: match.mock.local.",
+    },
+    {
+        "canonical": "mock/user-svc",
+        "display":   "User Service",
+        "type":      "application",
+        "planes":    ["github", "deploy", "cloud"],
+        "doc":       "# User Service\nProfile + preferences. Runtime: Node 22.",
+    },
+    {
+        "canonical": "mock/analytics-svc",
+        "display":   "Analytics Service",
+        "type":      "application",
+        "planes":    ["github", "cloud", "telemetry"],
+        "doc":       "# Analytics Service\nEvent ingestion → warehouse. Runtime: Python 3.12.",
+    },
+    {
+        "canonical": "mock/audit-svc",
+        "display":   "Audit Service",
+        "type":      "application",
+        "planes":    ["github", "cloud"],
+        "doc":       "# Audit Service\nCompliance log stream. Runtime: Go.",
+    },
 ]
 
 
@@ -150,11 +187,12 @@ def seed_edges(ids: dict[str, str]) -> dict[str, str]:
         edges[f"catalog::{canonical}::{ident}"] = str(row["id"])
 
     # --- bound edges ---
-    # feeds-api calls several places
+    # feeds-api calls several places. Note multiple parallel edges on the
+    # same (source, target) pair — the FE curves them to fan out.
     bound_defs = [
         ("mock/feeds-api",    "mock/feeds-db",    "reads_from",   "SELECT * FROM matches"),
         ("mock/feeds-api",    "mock/feeds-cache", "reads_from",   "GET live:scores"),
-        ("mock/feeds-api",    "mock/feeds-cache", "writes_to",   "SET live:scores"),
+        ("mock/feeds-api",    "mock/feeds-cache", "writes_to",    "SET live:scores"),
         ("mock/feeds-api",    "mock/auth-svc",    "calls",        "POST /verify"),
         ("mock/feeds-api",    "mock/payments-svc","calls",        "GET /balance"),
         # kyc → auth + payments
@@ -165,6 +203,23 @@ def seed_edges(ids: dict[str, str]) -> dict[str, str]:
         ("mock/payments-svc", "mock/notify-svc",  "triggers",     "payment.completed"),
         # notify-svc writes back
         ("mock/notify-svc",   "mock/feeds-db",    "reads_from",   "SELECT user"),
+        # Convergence demo — 6 services all call payments-svc's GET /balance
+        # endpoint so the midpoint convergence tooltip + glow has fan-in.
+        ("mock/search-svc",   "mock/payments-svc","calls",        "GET /balance"),
+        ("mock/match-svc",    "mock/payments-svc","calls",        "GET /balance"),
+        ("mock/user-svc",     "mock/payments-svc","calls",        "GET /balance"),
+        ("mock/analytics-svc","mock/payments-svc","calls",        "GET /balance"),
+        ("mock/audit-svc",    "mock/payments-svc","calls",        "GET /balance"),
+        # Plus a second convergence (smaller): 3 services call POST /verify on auth
+        ("mock/user-svc",     "mock/auth-svc",    "calls",        "POST /verify"),
+        ("mock/match-svc",    "mock/auth-svc",    "calls",        "POST /verify"),
+        # Extra outbound edges so the new components have interesting outlets too
+        ("mock/search-svc",   "mock/feeds-db",    "reads_from",   "SELECT * FROM catalog"),
+        ("mock/match-svc",    "mock/feeds-cache", "reads_from",   "GET live:match:*"),
+        ("mock/match-svc",    "mock/notify-svc",  "triggers",     "match.score.update"),
+        ("mock/user-svc",     "mock/feeds-db",    "reads_from",   "SELECT * FROM users"),
+        ("mock/analytics-svc","mock/feeds-db",    "reads_from",   "SELECT * FROM events"),
+        ("mock/audit-svc",    "mock/feeds-db",    "writes_to",    "INSERT audit_log"),
     ]
     for from_c, to_c, etype, ident in bound_defs:
         row = execute_returning(
@@ -252,6 +307,14 @@ def seed_flows(ids: dict[str, str], edges: dict[str, str]) -> int:
         ("mock/payments-svc",
          f"catalog::mock/payments-svc::POST /charge",
          "bound::mock/payments-svc->mock/notify-svc::payment.completed"),
+        # match-svc: multiple outgoings per incoming for CALLER-zone demo.
+        # We don't have catalog rows for match/search/user, so we fake
+        # an "inbound bound" as the incoming anchor by reusing one of
+        # their own outgoings as a proxy — but actually the code-correct
+        # model is: they don't have catalogs (not applications exposing
+        # a fixed API). We skip explicit flows for them — their hover
+        # zones still light up via the sibling-outgoing-on-shared-incoming
+        # path and via convergence.
     ]
     n = 0
     for component_canonical, in_key, out_key in flow_defs:
