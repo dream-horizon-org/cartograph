@@ -1169,9 +1169,24 @@ accessor results by identity.
 **Sidebar tabs on component click:** Doc · Slice · Catalog ·
 Bindings in · Bindings out · Flows. Flows grouped by incoming.
 
+**Dangling-edge stubs (shipped post-3.10 polish):**
+- Orphan catalog (kind='catalog' with no bound caller matching
+  `(target, edge_type, identifier)`) renders as `? → X`: a muted
+  stub placeholder on the caller side, real component on the
+  target side. Catalogs WITH bound callers stay hidden — their
+  bound edge already represents them.
+- Outgoing dangling (kind='dangling') renders as `X → ?`: real
+  source, stub placeholder on the target side.
+- Stub `?` nodes pin at a fixed radial offset outside their
+  anchor (20-ish units), so they cluster at the graph boundary.
+- Hover the stub side → `"no known caller"` / `"unknown target"`
+  tooltip. Hover the real side → standard caller/target flow
+  lookup (finds feeders or downstream via flows on the anchor).
+- LOS click on an orphan catalog seeds BFS at the real target;
+  the chain propagates normally via flows. LOS on an outbound
+  dangling lights only itself (no downstream component).
+
 ### Known gaps / future polish
-- Catalog / dangling not visualised as floating stubs on the 3d
-  graph — sidebar only.
 - No true bloom post-processing (tried emissive; user rejected
   "water bubble feel"). Current Lambert + bright lighting is the
   compromise.

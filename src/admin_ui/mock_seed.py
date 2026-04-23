@@ -1,8 +1,10 @@
 """Mockup seed for exercising the Phase 3.9/3.10 graph viz.
 
-Inserts a small realistic topology: 7 components, bound edges,
-catalog rows, dangling outgoings, and flows so the 3-zone hover +
-light-of-sight BFS have something to traverse.
+Inserts a small realistic topology covering every edge kind:
+bound edges, catalog rows (both implicit — with bound callers — and
+orphan inbound stubs), dangling outgoings (outbound stubs), and
+flows so the 3-zone hover + light-of-sight BFS have something to
+traverse.
 
 Every mockup row has `metadata.mock = True` so cleanup can strip them
 cleanly without touching real data.

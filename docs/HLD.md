@@ -1304,18 +1304,32 @@ Communications tab:
 - **Broadcast button** in the top-right opens a dialog: pick target type
   + write message → admin broadcasts directly.
 
-Graph tab (Phase 3.5):
+Graph tab (Phase 3.5 → upgraded in 3.10):
 - Two-panel grid: [sidebar | 3d-force-graph canvas].
-- **Sidebar**: plane legend, live component/edge counts, and a hover/click
-  panel that renders the hovered component's name, type, plane pills,
-  and `component_doc_md` (via marked + DOMPurify).
-- **Canvas**: 3d-force-graph (loaded from jsDelivr — same pattern as
-  marked/DOMPurify). Nodes = active components, colored by the set of
-  planes the component has attributions in (RGB-averaged blend when
-  multi-plane; grey when no attributions). Node size scales with plane
-  count. Links labelled `{edge_type}: {identifier}`.
-- Interactive physics: drag nodes → library-default settle behaviour
-  (no custom pause/resume wiring needed).
+- **Sidebar**: plane legend, live component/edge counts (bound ·
+  catalog · dangling breakdown), and a hover/click panel with tabs
+  Doc / Slice / Catalog / Bindings in / Bindings out / Flows.
+- **Canvas**: 3d-force-graph (loaded from jsDelivr). Per-type node
+  mesh (sphere / cylinder / torus / cone / octahedron / icosahedron
+  / tetrahedron / box / flat-slab for app / db / cache / queue /
+  lambda / cron / external / library / infra). Node color blends
+  the planes the component has attributions on.
+- **Edges rendered:** bound (solid), orphan catalogs (`? → X` stubs
+  with muted `?` placeholder anchored outside the target), outgoing
+  danglings (`X → ?` stubs). Catalogs WITH a bound caller are
+  implicit and hidden. N≥2 bound edges sharing
+  `(target, edge_type, identifier)` bundle through a virtual
+  junction node for a clean fan-in geometry.
+- **3-zone hover** on bound + stub edges: caller zone (flows
+  feeding this outgoing), target zone (flows fired by this
+  incoming — catalog-bridged), convergence zone (at a junction:
+  all contributors + trunk). Stub ends show
+  "no known caller" / "unknown target" tooltips.
+- **Click = light-of-sight:** forward BFS from destination through
+  flows (catalog-bridged) with a 220 ms per-layer stagger. Persists
+  until another edge or empty space is clicked.
+- **Interactions:** drag nodes, cursor-centric zoom (exponential
+  on deltaY, clamped per event), hover shows tooltip + glow.
 - Single `GET /api/graph` fetch on tab entry; manual refresh button.
 
 ### 10.3 Why Direct DB Access (not MCP)
