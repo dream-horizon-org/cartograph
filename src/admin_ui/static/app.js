@@ -1180,29 +1180,30 @@ async function initOrRefreshGraph() {
         refreshGraphVisuals();
       });
 
-    // Post-init layout + camera tweaks — run once per page lifecycle.
-    // Stronger repulsion for breathing room between real components.
+    // Compact layout. Prior values (charge -320, link ~80) made edges
+    // visually long and the graph tend to stretch along one axis;
+    // reducing both tightens the cluster and opens up 3D arrangement.
     const chargeForce = graphInstance.d3Force('charge');
     if (chargeForce && typeof chargeForce.strength === 'function') {
-      chargeForce.strength(-320);
+      chargeForce.strength(-140);
     }
-    // Link distances. Junction-out is overridden by the per-tick pin
-    // anyway, but we set a small value so residual force doesn't fight
-    // the pin. Junction-in is sized so a caller going THROUGH a
-    // junction ends up at roughly the same total distance from the
-    // real target as a caller connected by a regular bound edge:
-    //   regular bound: source ≈ 80 units from target
-    //   bundled:       source ≈ 62 (junction-in) + 18 (pin) = 80 units
-    // Keeping the effective "caller→target distance" consistent means
-    // bundled callers don't get pushed out into their own ring.
     const linkForce = graphInstance.d3Force('link');
     if (linkForce && typeof linkForce.distance === 'function') {
       linkForce.distance(l => {
-        if (l.isJunctionOut) return 15;
-        if (l.isJunctionIn)  return 62;   // was 100 — too far
-        return 80;                         // regular bound
+        if (l.isJunctionOut) return 10;
+        if (l.isJunctionIn)  return 36;   // keeps caller→junction→target ≈ regular bound
+        return 48;                         // regular bound — was 80
       });
     }
+    // Center force pulls the whole graph toward origin so it doesn't
+    // stretch out along one axis. Small strength so it shapes the
+    // cluster without dominating.
+    try {
+      const centerForce = graphInstance.d3Force('center');
+      if (centerForce && typeof centerForce.strength === 'function') {
+        centerForce.strength(0.06);
+      }
+    } catch (e) { /* no-op */ }
 
     // Junction pinning. Each tick, place each junction at a fixed
     // OFFSET of ~18 units from its real target component, in the
@@ -1215,7 +1216,7 @@ async function initOrRefreshGraph() {
     // Positions are computed only when target + at least one caller
     // have converged; otherwise we leave the junction to d3-force for
     // this tick.
-    const JUNCTION_OFFSET = 18;
+    const JUNCTION_OFFSET = 12;
     graphInstance.onEngineTick(() => {
       if (!graphSnapshot.nodeById) return;
       const gd = graphInstance.graphData();
