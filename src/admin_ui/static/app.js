@@ -1158,58 +1158,73 @@ async function initOrRefreshGraph() {
   const stubNodes = [];
   const stubLinks = [];
   const stubEdgeIds = new Set();
+  // Group first so we can assign distinct per-anchor offset directions.
+  // Overlap → charge-force collisions → cluster-wide shaking, so each
+  // sibling stub must get its own fixed direction vector.
+  const pendingStubs = [];  // {e, stubKind, anchorId}
   for (const e of data.edges) {
     if (e.kind === 'catalog') {
       const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
       if (boundKeySet.has(key)) continue;  // has a bound caller → implicit
-      const stubId = `__stub_in__${e.id}`;
-      stubNodes.push({
-        id: stubId,
-        isStub: true,
-        stubKind: 'inbound',
-        stubAnchorId: e.target_id,
-        name: '?',
-        type: 'stub',
-        planes: [],
-        color: '#475569',
-      });
-      stubLinks.push({
-        id: e.id,
-        source: stubId,
-        target: e.target_id,
-        edge_type: e.edge_type,
-        identifier: e.identifier,
-        confidence: e.confidence,
-        curvature: 0,
-        isStub: true,
-        stubKind: 'inbound',
-      });
-      stubEdgeIds.add(e.id);
+      pendingStubs.push({e, stubKind: 'inbound', anchorId: e.target_id});
     } else if (e.kind === 'dangling') {
-      const stubId = `__stub_out__${e.id}`;
-      stubNodes.push({
-        id: stubId,
-        isStub: true,
-        stubKind: 'outbound',
-        stubAnchorId: e.source_id,
-        name: '?',
-        type: 'stub',
-        planes: [],
-        color: '#475569',
-      });
-      stubLinks.push({
-        id: e.id,
-        source: e.source_id,
-        target: stubId,
-        edge_type: e.edge_type,
-        identifier: e.identifier,
-        confidence: e.confidence,
-        curvature: 0,
-        isStub: true,
-        stubKind: 'outbound',
-      });
-      stubEdgeIds.add(e.id);
+      pendingStubs.push({e, stubKind: 'outbound', anchorId: e.source_id});
     }
+  }
+  // Anchor → ordered list of its stubs.
+  const anchorBuckets = {};
+  for (const p of pendingStubs) {
+    (anchorBuckets[p.anchorId] ||= []).push(p);
+  }
+  // Precompute an offset vector per stub. Offsets are FROZEN (anchor-
+  // relative, never re-derived from the anchor's moving position) so
+  // the stub pin doesn't oscillate with anchor motion, and every
+  // sibling stub of one anchor gets a distinct direction.
+  const STUB_R = 22;
+  for (const [anchorId, list] of Object.entries(anchorBuckets)) {
+    const k = list.length;
+    for (let i = 0; i < k; i++) {
+      // Spread around a small tilted ring. z stays near the equator so
+      // stubs read as "beside" their anchor rather than "above/below."
+      const theta = k > 1 ? (i / k) * 2 * Math.PI : 0;
+      const phi = 1.3;  // ~74° from +Z → mostly lateral spread
+      const dir = {
+        x: Math.sin(phi) * Math.cos(theta),
+        y: Math.sin(phi) * Math.sin(theta),
+        z: Math.cos(phi) * (i % 2 === 0 ? 1 : -1),  // alternate up/down so 3+ stubs spread in 3D
+      };
+      list[i].offset = {x: dir.x * STUB_R, y: dir.y * STUB_R, z: dir.z * STUB_R};
+    }
+  }
+  for (const {e, stubKind, anchorId, offset} of pendingStubs) {
+    const stubId = stubKind === 'inbound' ? `__stub_in__${e.id}` : `__stub_out__${e.id}`;
+    stubNodes.push({
+      id: stubId,
+      isStub: true,
+      stubKind,
+      stubAnchorId: anchorId,
+      stubOffset: offset,
+      name: '?',
+      type: 'stub',
+      planes: [],
+      color: '#475569',
+    });
+    if (stubKind === 'inbound') {
+      stubLinks.push({
+        id: e.id, source: stubId, target: anchorId,
+        edge_type: e.edge_type, identifier: e.identifier,
+        confidence: e.confidence, curvature: 0,
+        isStub: true, stubKind: 'inbound',
+      });
+    } else {
+      stubLinks.push({
+        id: e.id, source: anchorId, target: stubId,
+        edge_type: e.edge_type, identifier: e.identifier,
+        confidence: e.confidence, curvature: 0,
+        isStub: true, stubKind: 'outbound',
+      });
+    }
+    stubEdgeIds.add(e.id);
   }
 
   const links = [...regularLinks, ...bundledLinks, ...junctionOutLinks, ...stubLinks];
@@ -1320,25 +1335,20 @@ async function initOrRefreshGraph() {
         n.vz = (n.vz || 0) - n.z * pull;
       }
 
-      // Stub pinning: dangling-edge "?" placeholders sit at a fixed
-      // offset from their anchor component, pushed OUTWARD radially so
-      // they live at the cluster boundary. Inbound stubs and outbound
-      // stubs both use the same radial direction — they only differ in
-      // which end of the link is the real component.
-      const STUB_OFFSET = 22;
+      // Stub pinning: each "?" placeholder sits at a FROZEN offset
+      // from its anchor — the offset was assigned at transform time
+      // with a distinct direction per sibling stub. We don't recompute
+      // anything anchor-dependent here (used to use radial outward,
+      // which rotates as the anchor settles → caused whole-cluster
+      // shaking when the stub moved and its charge pushed neighbors).
       for (const n of gd.nodes) {
         if (!n.isStub) continue;
         const anchor = byId[n.stubAnchorId];
         if (!anchor || anchor.x == null) continue;
-        const ax = anchor.x, ay = anchor.y, az = anchor.z;
-        // Radial outward from origin through the anchor. Falls back to
-        // a unit X-axis direction if the anchor is exactly at origin.
-        let ux = ax, uy = ay, uz = az;
-        let rlen = Math.sqrt(ux * ux + uy * uy + uz * uz);
-        if (rlen < 0.1) { ux = 1; uy = 0; uz = 0; rlen = 1; }
-        n.fx = ax + (ux / rlen) * STUB_OFFSET;
-        n.fy = ay + (uy / rlen) * STUB_OFFSET;
-        n.fz = az + (uz / rlen) * STUB_OFFSET;
+        const o = n.stubOffset || {x: 22, y: 0, z: 0};
+        n.fx = anchor.x + o.x;
+        n.fy = anchor.y + o.y;
+        n.fz = anchor.z + o.z;
       }
 
       // Junction pinning (unchanged): place each junction at a fixed
@@ -1832,7 +1842,7 @@ function renderGraphDetailPanel() {
     body = sliceHtml || '<p class="empty">No source_slice — this component covers its whole source resource.</p>';
   } else if (activeDetailTab === 'catalog') {
     body = incoming_catalog.length
-      ? renderEdgeList(incoming_catalog, {showSide: 'caller-side-unknown'})
+      ? renderCatalogList(incoming_catalog)
       : '<p class="empty">No catalog rows. Applications/lambdas/external-services should declare exposed endpoints via upsert_edge_catalog.</p>';
   } else if (activeDetailTab === 'in') {
     body = incoming_bound.length
@@ -1870,6 +1880,40 @@ function renderGraphDetailPanel() {
 function setGraphDetailTab(tabId) {
   activeDetailTab = tabId;
   renderGraphDetailPanel();
+}
+
+function renderCatalogList(catalogs) {
+  // Render catalog rows with their ACTUAL binding state: list the
+  // bound callers matched by (target, edge_type, identifier). Only
+  // mark "no caller bound yet" when the row is truly orphan.
+  return catalogs.map(e => {
+    const callers = graphSnapshot.edges.filter(b =>
+      b.kind === 'bound'
+      && b.target_id === e.target_id
+      && b.edge_type === e.edge_type
+      && b.identifier === e.identifier
+    );
+    let sideHtml;
+    if (callers.length === 0) {
+      sideHtml = `<span class="edge-from catalog">exposed — no caller bound yet</span>`;
+    } else {
+      const names = callers.map(c => {
+        const n = graphSnapshot.nodeById[c.source_id];
+        return escapeHtml(n?.name || c.source_id.slice(0, 8));
+      });
+      sideHtml = `<span class="edge-from">${callers.length} caller(s): ${names.join(', ')}</span>`;
+    }
+    const conf = e.confidence != null ? ` · conf ${Number(e.confidence).toFixed(2)}` : '';
+    return `
+      <div class="edge-row" data-edge-id="${e.id}">
+        <div class="edge-head">
+          <span class="edge-type">${escapeHtml(e.edge_type)}</span>
+          <code class="edge-identifier">${escapeHtml(e.identifier)}</code>
+        </div>
+        <div class="edge-sub">${sideHtml}${conf}</div>
+      </div>
+    `;
+  }).join('');
 }
 
 function renderEdgeList(edges, opts) {
