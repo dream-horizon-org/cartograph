@@ -202,6 +202,11 @@ def seed_edges(ids: dict[str, str]) -> dict[str, str]:
         ("mock/u", "calls", "u.handle"),
         ("mock/y", "calls", "y.handle"),
         ("mock/z", "calls", "z.handle"),
+        # --- Orphan catalogs (no bound caller → render as incoming stubs) ---
+        # p exposes an endpoint nothing in the graph calls → inbound stub at p.
+        ("mock/p", "calls", "p.admin_ping"),
+        # s exposes a debug endpoint nothing calls → inbound stub at s.
+        ("mock/s", "calls", "s.debug"),
     ]
     for canonical, etype, ident in catalog_defs:
         row = execute_returning(
@@ -281,6 +286,12 @@ def seed_edges(ids: dict[str, str]) -> dict[str, str]:
         ("mock/feeds-api",    "calls", "https://vendor.example.com/feeds/raw"),
         ("mock/kyc-svc",      "calls", "https://third-party-kyc-api.example/v2/check"),
         ("mock/payments-svc", "publishes_to", "slack#payments-alerts"),
+        # Chain-demo danglings (outbound stubs)
+        # s calls an unknown external metrics sink.
+        ("mock/s", "publishes_to", "metrics.unknown"),
+        # u emits to an unknown webhook (terminal of the chain but still
+        # has side effects).
+        ("mock/u", "calls", "https://webhook.unknown/notify"),
     ]
     for from_c, etype, ident in dangling_defs:
         row = execute_returning(
@@ -350,6 +361,11 @@ def seed_flows(ids: dict[str, str], edges: dict[str, str]) -> int:
          "bound::mock/payments-svc->mock/notify-svc::payment.completed"),
 
         # --- Chain demo flows (one catalog → one outgoing per hop) ---
+        # p has an ORPHAN catalog (p.admin_ping) that, when hit, fires p→q.
+        # Clicking the inbound stub at p should light the full chain.
+        ("mock/p",
+         "catalog::mock/p::p.admin_ping",
+         "bound::mock/p->mock/q::q.handle"),
         ("mock/q",
          "catalog::mock/q::q.handle",
          "bound::mock/q->mock/r::r.handle"),
@@ -368,6 +384,16 @@ def seed_flows(ids: dict[str, str], edges: dict[str, str]) -> int:
         ("mock/t",
          "catalog::mock/t::t.handle",
          "bound::mock/t->mock/u::u.handle"),
+        # s's s.handle also triggers the metrics.unknown dangling.
+        # Click p→q → chain lights through s and into s's dangling.
+        ("mock/s",
+         "catalog::mock/s::s.handle",
+         "dangling::mock/s::metrics.unknown"),
+        # u's u.handle (bound incoming from t) triggers the webhook dangling.
+        # So the full chain ends at u→webhook.unknown.
+        ("mock/u",
+         "catalog::mock/u::u.handle",
+         "dangling::mock/u::https://webhook.unknown/notify"),
 
         # match-svc: multiple outgoings per incoming for CALLER-zone demo.
         # We don't have catalog rows for match/search/user, so we fake

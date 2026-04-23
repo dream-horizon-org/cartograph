@@ -971,6 +971,13 @@ function makeNodeMesh(node) {
       // Intentionally tiny — routing dot, not a component.
       geom = new THREE.TetrahedronGeometry(s);
       break;
+    case 'stub':
+      // Unknown-side "?" placeholder for dangling edges (orphan catalog
+      // inbound, outgoing dangling). Small, muted — it's a marker, not
+      // a component. No text label on the mesh itself; the hover
+      // tooltip conveys "unknown caller/target."
+      geom = new THREE.SphereGeometry(s * 0.55, 20, 20);
+      break;
     case 'application':
     default:
       geom = new THREE.SphereGeometry(s, 32, 32);
@@ -979,10 +986,11 @@ function makeNodeMesh(node) {
   // Matte Lambert (no glassy/metallic feel). We add bright scene
   // lights separately so the nodes read as properly illuminated
   // solids, not translucent bubbles.
+  const isMuted = node.isJunction || node.isStub;
   const mat = new THREE.MeshLambertMaterial({
     color: node.color || '#cccccc',
     transparent: true,
-    opacity: node.isJunction ? 0.55 : 0.95,
+    opacity: isMuted ? 0.55 : 0.95,
   });
   return new THREE.Mesh(geom, mat);
 }
@@ -1134,14 +1142,85 @@ async function initOrRefreshGraph() {
     }
   }
 
-  const links = [...regularLinks, ...bundledLinks, ...junctionOutLinks];
-  const allNodes = [...transformedNodes, ...junctionNodes];
+  // --- Dangling stubs ---
+  //
+  // Two kinds of stubs surface as visual links:
+  //   1. Orphan catalog    : kind='catalog' with NO matching bound caller.
+  //                          Rendered as "? → X" (stub source → real target).
+  //   2. Outgoing dangling : kind='dangling' (to_component_id NULL).
+  //                          Rendered as "X → ?" (real source → stub target).
+  // Catalogs that DO have bound callers stay hidden — the bound edge
+  // already represents them. Each stub gets a unique "?" placeholder
+  // node so they don't fake-converge in the layout.
+  const boundKeySet = new Set(
+    boundEdges.map(e => `${e.target_id}|${e.edge_type}|${e.identifier}`)
+  );
+  const stubNodes = [];
+  const stubLinks = [];
+  const stubEdgeIds = new Set();
+  for (const e of data.edges) {
+    if (e.kind === 'catalog') {
+      const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
+      if (boundKeySet.has(key)) continue;  // has a bound caller → implicit
+      const stubId = `__stub_in__${e.id}`;
+      stubNodes.push({
+        id: stubId,
+        isStub: true,
+        stubKind: 'inbound',
+        stubAnchorId: e.target_id,
+        name: '?',
+        type: 'stub',
+        planes: [],
+        color: '#475569',
+      });
+      stubLinks.push({
+        id: e.id,
+        source: stubId,
+        target: e.target_id,
+        edge_type: e.edge_type,
+        identifier: e.identifier,
+        confidence: e.confidence,
+        curvature: 0,
+        isStub: true,
+        stubKind: 'inbound',
+      });
+      stubEdgeIds.add(e.id);
+    } else if (e.kind === 'dangling') {
+      const stubId = `__stub_out__${e.id}`;
+      stubNodes.push({
+        id: stubId,
+        isStub: true,
+        stubKind: 'outbound',
+        stubAnchorId: e.source_id,
+        name: '?',
+        type: 'stub',
+        planes: [],
+        color: '#475569',
+      });
+      stubLinks.push({
+        id: e.id,
+        source: e.source_id,
+        target: stubId,
+        edge_type: e.edge_type,
+        identifier: e.identifier,
+        confidence: e.confidence,
+        curvature: 0,
+        isStub: true,
+        stubKind: 'outbound',
+      });
+      stubEdgeIds.add(e.id);
+    }
+  }
+
+  const links = [...regularLinks, ...bundledLinks, ...junctionOutLinks, ...stubLinks];
+  const allNodes = [...transformedNodes, ...junctionNodes, ...stubNodes];
   const gData = {nodes: allNodes, links};
 
   // Expose junction metadata to the rest of the module so hover on a
   // junction-out link can explain the whole bundle + light it up.
   graphSnapshot.junctionOutById = junctionOutById;
   graphSnapshot.bundledEdgeIds = bundledEdgeIds;
+  graphSnapshot.stubEdgeIds = stubEdgeIds;
 
   const canvas = document.getElementById('graph-canvas');
   if (!graphInstance) {
@@ -1170,6 +1249,7 @@ async function initOrRefreshGraph() {
       .linkLabel(l => edgeHoverLabel(l))
       .onNodeClick(n => {
         if (n.isJunction) return;  // junctions aren't real components
+        if (n.isStub) return;      // "?" placeholders aren't real components
         showGraphNodeDetail(n);
         hoverLitEdgeIds = new Set();
         refreshGraphVisuals();
@@ -1196,6 +1276,7 @@ async function initOrRefreshGraph() {
       linkForce.distance(l => {
         if (l.isJunctionOut) return 12;
         if (l.isJunctionIn)  return 40;
+        if (l.isStub)        return 22;  // short hop from anchor to "?"
         return 55;
       });
     }
@@ -1237,6 +1318,27 @@ async function initOrRefreshGraph() {
         n.vx = (n.vx || 0) - n.x * pull;
         n.vy = (n.vy || 0) - n.y * pull;
         n.vz = (n.vz || 0) - n.z * pull;
+      }
+
+      // Stub pinning: dangling-edge "?" placeholders sit at a fixed
+      // offset from their anchor component, pushed OUTWARD radially so
+      // they live at the cluster boundary. Inbound stubs and outbound
+      // stubs both use the same radial direction — they only differ in
+      // which end of the link is the real component.
+      const STUB_OFFSET = 22;
+      for (const n of gd.nodes) {
+        if (!n.isStub) continue;
+        const anchor = byId[n.stubAnchorId];
+        if (!anchor || anchor.x == null) continue;
+        const ax = anchor.x, ay = anchor.y, az = anchor.z;
+        // Radial outward from origin through the anchor. Falls back to
+        // a unit X-axis direction if the anchor is exactly at origin.
+        let ux = ax, uy = ay, uz = az;
+        let rlen = Math.sqrt(ux * ux + uy * uy + uz * uz);
+        if (rlen < 0.1) { ux = 1; uy = 0; uz = 0; rlen = 1; }
+        n.fx = ax + (ux / rlen) * STUB_OFFSET;
+        n.fy = ay + (uy / rlen) * STUB_OFFSET;
+        n.fz = az + (uz / rlen) * STUB_OFFSET;
       }
 
       // Junction pinning (unchanged): place each junction at a fixed
@@ -1446,6 +1548,10 @@ function isLinkLit(link, set) {
 function resolveLinkColor(l) {
   if (isLinkLit(l, litEdgeIds))      return 'rgba(251, 191, 36, 0.98)';   // LOS amber
   if (isLinkLit(l, hoverLitEdgeIds)) return 'rgba(34, 211, 238, 0.9)';    // hover cyan
+  // Stubs are muted — they mark a dangling boundary, not the primary
+  // structure. Dimmer than regular bound so the bound chain remains
+  // visually dominant.
+  if (l.isStub)                      return 'rgba(148, 163, 184, 0.35)';
   // Bundled in-segments + the trunk itself share a muted tone so the
   // bundle reads as one structure. Trunk NOT visually thicker or
   // brighter than contributors by default — user wanted it to match.
@@ -1459,6 +1565,7 @@ function resolveLinkWidth(l) {
   // same base width. Lit states bump width uniformly.
   if (isLinkLit(l, litEdgeIds))      return 2.0;
   if (isLinkLit(l, hoverLitEdgeIds)) return 1.4;
+  if (l.isStub)                      return 0.6;
   return 0.8;
 }
 
@@ -2047,6 +2154,40 @@ function hoverZoneResolve(link, zone) {
   }
 
   const edgeIds = new Set();
+
+  // --- Stub side hovers ---
+  //
+  // Orphan catalog stub  (stubSrc → realTgt): caller zone is the
+  //   stub side → no known caller. Target zone behaves normally.
+  // Outgoing dangling    (realSrc → stubTgt): caller zone behaves
+  //   normally. Target zone is the stub side → no known target.
+  if (link.isStub) {
+    if (link.stubKind === 'inbound' && zone === 'caller') {
+      edgeIds.add(link.id);
+      return {
+        tooltipHtml: `
+          ${header}
+          <div class="tt-zone">DANGLING — no known caller for this inbound</div>
+          <ul class="tt-list"><li><em>orphan catalog: no bound caller recorded</em></li></ul>
+        `,
+        edgeIds: [...edgeIds],
+      };
+    }
+    if (link.stubKind === 'outbound' && zone === 'target') {
+      edgeIds.add(link.id);
+      return {
+        tooltipHtml: `
+          ${header}
+          <div class="tt-zone">DANGLING — unknown target for this outbound</div>
+          <ul class="tt-list"><li><em>caller knows the identifier but target isn't in graph</em></li></ul>
+        `,
+        edgeIds: [...edgeIds],
+      };
+    }
+    // Other cases fall through: outbound caller-zone + inbound target-zone
+    // run the standard flow lookup, which naturally finds the feeders /
+    // downstreams of the real anchor component.
+  }
 
   if (zone === 'caller') {
     // Caller-side: glow all incoming edges of the CALLER whose flows
