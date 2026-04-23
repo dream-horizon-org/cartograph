@@ -856,19 +856,25 @@ async function _postWake(body) {
 // in — HSL blend when multiple. Hovering or clicking a node shows its
 // component_doc_md (markdown) in the sidebar.
 
-// Modern data-viz palette — more saturated than the Tailwind 400
-// range we had, distinct hue per plane, balanced on #0a0a0a bg.
+// Darker + more vibrant — Tailwind 600-range jewel tones. Reads
+// strongly against the #050505 bg without being neon.
 const PLANE_COLORS = {
-  github:    '#22d3ee',  // cyan-400
-  deploy:    '#38bdf8',  // sky-400 — kept close to github for "code+deploy" affinity
-  cloud:     '#f472b6',  // pink-400
-  telemetry: '#c084fc',  // violet-400
-  config:    '#fbbf24',  // amber-400
+  github:    '#059669',  // emerald-600
+  deploy:    '#2563eb',  // blue-600
+  cloud:     '#db2777',  // pink-600
+  telemetry: '#7c3aed',  // violet-600
+  config:    '#d97706',  // amber-600
 };
-const NO_PLANE_COLOR = '#475569';  // slate-600 — darker so nodes without attributions sink
+const NO_PLANE_COLOR = '#1e293b';  // slate-800 — unattributed nodes sink
 
 let graphInstance = null;
 let graphLoadedOnce = false;
+// Per-type mesh factory — returns a fresh THREE.Mesh for each node so
+// component_type is visually distinct. Loaded after three.js is ready.
+// See makeNodeMesh() below; set on .nodeThreeObject(makeNodeMesh).
+// Pending LOS timers — kept so a new click cancels an in-flight layered
+// reveal from a prior click.
+let _losTimers = [];
 // Snapshot of the latest /api/graph response. Kept in module scope so
 // click handlers for nodes + edges can resolve related rows (catalog,
 // dangling, flows) without re-fetching.
@@ -906,6 +912,56 @@ function nodeColor(planes) {
   const colors = (planes || []).map(p => PLANE_COLORS[p]).filter(Boolean);
   return blendColors(colors);
 }
+
+// ---------- Per-type node mesh factory ----------
+//
+// Different component types render as different THREE geometries so
+// shape communicates type at a glance, independent of plane color.
+// Junctions are deliberately tiny (size 0.3) so they read as routing
+// dots, not components.
+
+function _sizeForNode(node) {
+  if (node.isJunction) return 0.3;
+  // Modest scaling with plane count so multi-plane nodes pop a bit.
+  return 2 + (node.planes?.length || 0) * 0.7;
+}
+
+function makeNodeMesh(node) {
+  const THREE = window.THREE;
+  if (!THREE) return null;  // fallback → library default sphere
+  const s = _sizeForNode(node);
+  let geom;
+  switch (node.type) {
+    case 'database':
+      geom = new THREE.CylinderGeometry(s, s, s * 1.6, 24); break;
+    case 'cache':
+      geom = new THREE.TorusGeometry(s, s * 0.32, 12, 28); break;
+    case 'queue':
+      geom = new THREE.ConeGeometry(s, s * 2, 20); break;
+    case 'lambda':
+      geom = new THREE.OctahedronGeometry(s * 1.2); break;
+    case 'cron':
+      geom = new THREE.IcosahedronGeometry(s); break;
+    case 'external-service':
+      geom = new THREE.TetrahedronGeometry(s * 1.4); break;
+    case 'library':
+      geom = new THREE.BoxGeometry(s * 1.5, s * 1.5, s * 1.5); break;
+    case 'infrastructure':
+      geom = new THREE.BoxGeometry(s * 2.2, s * 0.6, s * 2.2); break;
+    case 'junction':
+      geom = new THREE.TetrahedronGeometry(s); break;
+    case 'application':
+    default:
+      geom = new THREE.SphereGeometry(s, 32, 32); break;
+  }
+  const mat = new THREE.MeshLambertMaterial({
+    color: node.color || '#cccccc',
+    transparent: true,
+    opacity: node.isJunction ? 0.55 : 0.92,
+  });
+  return new THREE.Mesh(geom, mat);
+}
+
 
 async function initOrRefreshGraph() {
   if (typeof ForceGraph3D !== 'function') {
@@ -1063,21 +1119,17 @@ async function initOrRefreshGraph() {
   const canvas = document.getElementById('graph-canvas');
   if (!graphInstance) {
     graphInstance = ForceGraph3D()(canvas)
-      .backgroundColor('#0a0a0a')
-      .nodeResolution(32)
-      // SCALAR opacity — 3d-force-graph treats nodeOpacity as a
-      // number, not an accessor. Earlier I passed a function which
-      // coerced to NaN/0 and rendered nodes invisible/black on the
-      // dark bg. Junction differentiation now via color + size only.
-      .nodeOpacity(0.9)
+      .backgroundColor('#050505')
       .nodeLabel(n => n.isJunction
         ? `${n.name}`
         : `${n.name} (${n.type})`
       )
-      .nodeColor(n => n.color)
-      // Junctions are visually small so the fan-in + fan-out is legible
-      // but the junction itself doesn't draw attention.
-      .nodeVal(n => n.isJunction ? 1.2 : (4 + (n.planes?.length || 0) * 1.5))
+      // Per-type THREE.Mesh replaces the default sphere so shape
+      // communicates component_type. makeNodeMesh reads node.color
+      // internally so .nodeColor() / .nodeVal() / .nodeOpacity() are
+      // unused here.
+      .nodeThreeObject(makeNodeMesh)
+      .nodeThreeObjectExtend(false)
       .linkCurvature(l => l.curvature || 0)
       .linkColor(l => resolveLinkColor(l))
       .linkWidth(l => resolveLinkWidth(l))
@@ -1097,6 +1149,8 @@ async function initOrRefreshGraph() {
       })
       .onLinkClick(l => lightOfSight(l))
       .onBackgroundClick(() => {
+        _losTimers.forEach(t => clearTimeout(t));
+        _losTimers = [];
         litEdgeIds = new Set();
         hoverLitEdgeIds = new Set();
         refreshGraphVisuals();
@@ -1252,14 +1306,19 @@ function refreshGraphVisuals() {
 // a node (in which case hover-glow clears but LOS stays).
 
 function lightOfSight(link) {
-  // Click on a junction-out trunk → light up all bundled contributors
-  // and treat any one of them as the seed (they all share the same
-  // (target, type, identifier) so the BFS forward-reach is identical).
+  // Cancel any in-flight reveal from a prior click — new click
+  // supersedes the old chain.
+  _losTimers.forEach(t => clearTimeout(t));
+  _losTimers = [];
+  litEdgeIds = new Set();
+  refreshGraphVisuals();
+
+  // Resolve the seed set. Bundle-aware: clicking the trunk OR any
+  // bundled contributor lights the whole bundle as layer 0.
   let seedIds;
   if (link.isJunctionOut && link.groupEdgeIds) {
-    seedIds = [...link.groupEdgeIds, link.id];  // include the trunk so it lights too
+    seedIds = [...link.groupEdgeIds, link.id];
   } else if (link.isJunctionIn) {
-    // Light up the whole bundle when any individual contributor is clicked.
     const meta = graphSnapshot.junctionOutById || {};
     let bundle = null;
     for (const [outId, out] of Object.entries(meta)) {
@@ -1273,41 +1332,73 @@ function lightOfSight(link) {
     seedIds = [link.id];
   }
 
-  const cap = 8;
+  // Forward-only BFS in layers.
+  // Semantics: an edge is part of the traversal if it's been visited
+  // once. Forward expansion = "this edge's flow downstream." For each
+  // visited edge id e, look at flows where e is the INCOMING. Their
+  // outgoings are layer N+1. No backward expansion. Sibling converging
+  // edges (same target+type+identifier) are included so a LOS click
+  // on one caller shows all parallel callers hitting the same endpoint
+  // (that's what "convergence" means in the graph).
+  //
+  // Cycle pruning: if a target edge is already visited, we skip it.
+  // Branch terminates there; other branches continue.
+  //
+  // Safety cap: 100 layers (graph is finite + small; this shouldn't
+  // trigger in practice).
+
   const visited = new Set(seedIds);
-  const frontier = seedIds.map(id => ({edgeId: id, depth: 0}));
-  while (frontier.length) {
-    const {edgeId, depth} = frontier.shift();
-    if (depth >= cap) continue;
-    for (const f of graphSnapshot.flows) {
-      if (f.incoming_edge_id === edgeId && !visited.has(f.outgoing_edge_id)) {
-        visited.add(f.outgoing_edge_id);
-        frontier.push({edgeId: f.outgoing_edge_id, depth: depth + 1});
+  const layers = [seedIds];              // layer 0 = seed
+  const SAFETY_CAP = 100;
+
+  let currentLayer = seedIds;
+  for (let depth = 1; depth < SAFETY_CAP; depth++) {
+    const nextLayer = new Set();
+    for (const edgeId of currentLayer) {
+      // Forward: this edge is the incoming of some flow → include that
+      // flow's outgoing in the next layer.
+      for (const f of graphSnapshot.flows) {
+        if (f.incoming_edge_id === edgeId
+            && !visited.has(f.outgoing_edge_id)) {
+          nextLayer.add(f.outgoing_edge_id);
+        }
       }
-      if (f.outgoing_edge_id === edgeId && !visited.has(f.incoming_edge_id)) {
-        visited.add(f.incoming_edge_id);
-        frontier.push({edgeId: f.incoming_edge_id, depth: depth + 1});
-      }
-    }
-    // Also light sibling bound edges converging on the same endpoint —
-    // shows the full convergence set when you click anything in it.
-    const e = graphSnapshot.edgeById[edgeId];
-    if (e && e.to_component_id) {
-      for (const sib of graphSnapshot.edges) {
-        if (sib.id !== edgeId
-            && sib.kind === 'bound'
-            && sib.to_component_id === e.to_component_id
-            && sib.edge_type === e.edge_type
-            && sib.identifier === e.identifier
-            && !visited.has(sib.id)) {
-          visited.add(sib.id);
-          frontier.push({edgeId: sib.id, depth: depth + 1});
+      // Sibling convergence — any bound edge hitting the same
+      // (target, type, identifier). These aren't strictly "downstream"
+      // through flows, but they share the same endpoint so lighting
+      // them in the NEXT layer preserves the pulse-out feel.
+      const e = graphSnapshot.edgeById[edgeId];
+      if (e && e.to_component_id) {
+        for (const sib of graphSnapshot.edges) {
+          if (sib.id !== edgeId
+              && sib.kind === 'bound'
+              && sib.to_component_id === e.to_component_id
+              && sib.edge_type === e.edge_type
+              && sib.identifier === e.identifier
+              && !visited.has(sib.id)) {
+            nextLayer.add(sib.id);
+          }
         }
       }
     }
+    if (nextLayer.size === 0) break;
+    nextLayer.forEach(id => visited.add(id));
+    layers.push([...nextLayer]);
+    currentLayer = [...nextLayer];
   }
-  litEdgeIds = visited;
-  refreshGraphVisuals();
+
+  // Stagger reveal — one layer every ~220ms so the propagation reads
+  // as "light traveling outward" rather than a static flash.
+  const STAGGER_MS = 220;
+  const lit = new Set();
+  layers.forEach((layer, i) => {
+    const t = setTimeout(() => {
+      layer.forEach(id => lit.add(id));
+      litEdgeIds = new Set(lit);  // fresh set so refresh sees change
+      refreshGraphVisuals();
+    }, i * STAGGER_MS);
+    _losTimers.push(t);
+  });
 }
 
 function showGraphNodeDetail(node) {
