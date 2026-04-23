@@ -914,12 +914,25 @@ async function initOrRefreshGraph() {
   }
   const data = await res.json();
 
-  // Build lookup maps once per load — used by sidebar + LOS BFS.
+  // Transform once, then use the same view in both 3d-force-graph and
+  // the sidebar. Prior bug: sidebar looked up the raw server rows and
+  // referenced .name / .doc / .canonical which only exist on the
+  // transformed shape → "undefined" everywhere.
+  const transformedNodes = data.nodes.map(n => ({
+    id: n.id,
+    name: n.display_name || n.canonical_name,
+    canonical: n.canonical_name,
+    doc: n.component_doc_md,
+    slice: n.source_slice,
+    type: n.component_type,
+    planes: n.planes,
+    color: nodeColor(n.planes),
+  }));
   graphSnapshot = {
-    nodes: data.nodes,
+    nodes: transformedNodes,
     edges: data.edges,
     flows: data.flows || [],
-    nodeById: Object.fromEntries(data.nodes.map(n => [n.id, n])),
+    nodeById: Object.fromEntries(transformedNodes.map(n => [n.id, n])),
     edgeById: Object.fromEntries(data.edges.map(e => [e.id, e])),
   };
 
@@ -938,16 +951,7 @@ async function initOrRefreshGraph() {
   const boundEdges = data.edges.filter(e => e.kind === 'bound');
 
   const gData = {
-    nodes: data.nodes.map(n => ({
-      id: n.id,
-      name: n.display_name || n.canonical_name,
-      canonical: n.canonical_name,
-      doc: n.component_doc_md,
-      slice: n.source_slice,
-      type: n.component_type,
-      planes: n.planes,
-      color: nodeColor(n.planes),
-    })),
+    nodes: transformedNodes,
     links: boundEdges.map(e => ({
       id: e.id,
       source: e.source_id,
