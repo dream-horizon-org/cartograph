@@ -856,16 +856,17 @@ async function _postWake(body) {
 // in — HSL blend when multiple. Hovering or clicking a node shows its
 // component_doc_md (markdown) in the sidebar.
 
-// Darker + more vibrant — Tailwind 600-range jewel tones. Reads
-// strongly against the #050505 bg without being neon.
+// Bright vibrant gradient palette — inspired by "bright colour
+// gradients" packs. More chroma than the prior jewel tones, but still
+// readable against #050505.
 const PLANE_COLORS = {
-  github:    '#059669',  // emerald-600
-  deploy:    '#2563eb',  // blue-600
-  cloud:     '#db2777',  // pink-600
-  telemetry: '#7c3aed',  // violet-600
-  config:    '#d97706',  // amber-600
+  github:    '#14b8a6',  // teal-500 — coded energy
+  deploy:    '#3b82f6',  // blue-500 — trustworthy
+  cloud:     '#ec4899',  // pink-500 — hot
+  telemetry: '#a855f7',  // purple-500
+  config:    '#f59e0b',  // amber-500
 };
-const NO_PLANE_COLOR = '#1e293b';  // slate-800 — unattributed nodes sink
+const NO_PLANE_COLOR = '#334155';  // slate-700 — darker so unattributed sinks
 
 let graphInstance = null;
 let graphLoadedOnce = false;
@@ -930,34 +931,55 @@ function makeNodeMesh(node) {
   const THREE = window.THREE;
   if (!THREE) return null;  // fallback → library default sphere
   const s = _sizeForNode(node);
+
+  // Geometries tuned so every type reads as the same approximate
+  // visual volume as a sphere of radius s. Pure math volume matching
+  // isn't perceptual, so these are empirically bumped.
   let geom;
   switch (node.type) {
     case 'database':
-      geom = new THREE.CylinderGeometry(s, s, s * 1.6, 24); break;
+      // Short cylinder; radius ≈ s, height ≈ 2s.
+      geom = new THREE.CylinderGeometry(s * 1.05, s * 1.05, s * 2, 28);
+      break;
     case 'cache':
-      geom = new THREE.TorusGeometry(s, s * 0.32, 12, 28); break;
+      // Torus: outer radius ≈ s, tube radius ≈ 0.5s — fatter so it
+      // visually matches the sphere's bulk.
+      geom = new THREE.TorusGeometry(s, s * 0.5, 16, 32);
+      break;
     case 'queue':
-      geom = new THREE.ConeGeometry(s, s * 2, 20); break;
+      // Cone: base ≈ 1.2s, height ≈ 2.2s.
+      geom = new THREE.ConeGeometry(s * 1.2, s * 2.4, 24);
+      break;
     case 'lambda':
-      geom = new THREE.OctahedronGeometry(s * 1.2); break;
+      // Octahedron: bump to 1.5s so it's not dwarfed by spheres.
+      geom = new THREE.OctahedronGeometry(s * 1.55);
+      break;
     case 'cron':
-      geom = new THREE.IcosahedronGeometry(s); break;
+      geom = new THREE.IcosahedronGeometry(s * 1.35);
+      break;
     case 'external-service':
-      geom = new THREE.TetrahedronGeometry(s * 1.4); break;
+      geom = new THREE.TetrahedronGeometry(s * 1.75);
+      break;
     case 'library':
-      geom = new THREE.BoxGeometry(s * 1.5, s * 1.5, s * 1.5); break;
+      geom = new THREE.BoxGeometry(s * 1.7, s * 1.7, s * 1.7);
+      break;
     case 'infrastructure':
-      geom = new THREE.BoxGeometry(s * 2.2, s * 0.6, s * 2.2); break;
+      // Flat wide slab: meant to feel like a floor/cluster.
+      geom = new THREE.BoxGeometry(s * 2.5, s * 0.7, s * 2.5);
+      break;
     case 'junction':
-      geom = new THREE.TetrahedronGeometry(s); break;
+      // Intentionally tiny — routing dot, not a component.
+      geom = new THREE.TetrahedronGeometry(s);
+      break;
     case 'application':
     default:
-      geom = new THREE.SphereGeometry(s, 32, 32); break;
+      geom = new THREE.SphereGeometry(s, 32, 32);
+      break;
   }
   const mat = new THREE.MeshLambertMaterial({
     color: node.color || '#cccccc',
     transparent: true,
-    opacity: node.isJunction ? 0.55 : 0.92,
+    opacity: node.isJunction ? 0.5 : 0.94,
   });
   return new THREE.Mesh(geom, mat);
 }
@@ -1157,24 +1179,78 @@ async function initOrRefreshGraph() {
       });
 
     // Post-init layout + camera tweaks — run once per page lifecycle.
-    // Node spacing: stronger repulsion + longer links so the graph
-    // breathes. Exact values tuned for ~15-50 node scale.
+    // Stronger repulsion for breathing room between real components.
     const chargeForce = graphInstance.d3Force('charge');
     if (chargeForce && typeof chargeForce.strength === 'function') {
-      chargeForce.strength(-260);
+      chargeForce.strength(-320);
     }
+    // Link distance — asymmetric to pull junctions close to their
+    // TARGET (not midway between callers and target). That makes the
+    // bundled trunk short (20% of the total distance) and the caller
+    // in-segments long (80%), visually matching "fan in near target".
     const linkForce = graphInstance.d3Force('link');
     if (linkForce && typeof linkForce.distance === 'function') {
-      linkForce.distance(90);
+      linkForce.distance(l => {
+        if (l.isJunctionOut) return 18;   // trunk: short, near target
+        if (l.isJunctionIn)  return 110;  // in-segment: long, pulls callers away
+        return 80;                         // regular bound edges
+      });
     }
-    // Cursor-centric zoom — OrbitControls supports zoomToCursor in
-    // recent Three.js. Try to enable it; no-op on older versions.
+    // Cursor-centric zoom. We try OrbitControls.zoomToCursor first
+    // (works on recent Three.js); if that property isn't honoured we
+    // fall back to a manual wheel handler that moves the camera
+    // along the ray through the cursor toward / away from the
+    // graph's focal point.
     try {
       const controls = graphInstance.controls();
       if (controls) {
         controls.zoomToCursor = true;
+        // Disable the library's default wheel zoom so our custom
+        // handler (below) doesn't fight it. If zoomToCursor landed
+        // in this Three.js version, OrbitControls will still update
+        // the camera when we change its position; if not, our manual
+        // math does the work.
+        controls.enableZoom = true;  // keep enabled; zoomToCursor is hint-only
       }
     } catch (e) { /* no-op */ }
+
+    // Manual cursor-centric zoom — works regardless of OrbitControls
+    // version. We prevent-default the wheel event so scroll doesn't
+    // double-fire with the library default, then move the camera
+    // toward (zoom in) or away from (zoom out) the cursor's
+    // projected world position.
+    canvas.addEventListener('wheel', (ev) => {
+      if (!window.THREE || !graphInstance.camera) return;
+      ev.preventDefault();
+      const THREE = window.THREE;
+      const camera = graphInstance.camera();
+      const controlsObj = graphInstance.controls ? graphInstance.controls() : null;
+      const target = (controlsObj && controlsObj.target)
+        || new THREE.Vector3(0, 0, 0);
+      const rect = canvas.getBoundingClientRect();
+      const nx = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+      const ny = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera({x: nx, y: ny}, camera);
+      // Pick a point along the ray at the current orbit-target distance.
+      const dist = camera.position.distanceTo(target);
+      const cursorWorld = ray.ray.at(dist, new THREE.Vector3());
+      // Zoom factor: scroll up (deltaY < 0) zooms in, scroll down
+      // zooms out. Clamp to sensible step size.
+      const factor = ev.deltaY > 0 ? 1.15 : 1 / 1.15;
+      // Scale camera's offset from the cursor world point by factor.
+      // result = cursorWorld + (camera.position - cursorWorld) * factor
+      const newPos = camera.position.clone()
+        .sub(cursorWorld).multiplyScalar(factor).add(cursorWorld);
+      camera.position.copy(newPos);
+      // Also nudge the orbit target toward the cursor so subsequent
+      // pans feel natural — but only a fraction, so we don't
+      // constantly drift the camera focus.
+      if (controlsObj && controlsObj.target) {
+        controlsObj.target.lerp(cursorWorld, 0.05);
+        if (typeof controlsObj.update === 'function') controlsObj.update();
+      }
+    }, {passive: false});
   }
   graphInstance.graphData(gData);
 
@@ -1198,16 +1274,14 @@ async function initOrRefreshGraph() {
 let lastHoveredLink = null;
 let lastZone = null;
 
-function linkZoneForCursor(link, mouseX, mouseY) {
-  // Returns 'source' | 'midpoint' | 'target' based on cursor position
-  // along the link's 2D projection. Needs the 3d-force-graph camera
-  // to project node positions. Returns null if link is missing coords.
+function linkFraction(link, mouseX, mouseY) {
+  // Return normalised cursor position along the projected link
+  // (0 = source end, 1 = target end), or null if we can't compute.
   if (!link || !link.source || !link.target) return null;
   if (typeof graphInstance.camera !== 'function') return null;
   const camera = graphInstance.camera();
   const canvas = document.getElementById('graph-canvas');
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  // Project THREE.Vector3 → screen space.
   const project = (node) => {
     if (!window.THREE) return null;
     const v = new window.THREE.Vector3(node.x || 0, node.y || 0, node.z || 0);
@@ -1219,9 +1293,31 @@ function linkZoneForCursor(link, mouseX, mouseY) {
   if (!src || !tgt) return null;
   const dx = tgt.x - src.x, dy = tgt.y - src.y;
   const len2 = dx * dx + dy * dy;
-  if (len2 < 1) return 'midpoint';
-  const t = ((mouseX - src.x) * dx + (mouseY - src.y) * dy) / len2;
-  if (t < 0.33) return 'source';
+  if (len2 < 1) return 0.5;
+  return Math.max(0, Math.min(1, ((mouseX - src.x) * dx + (mouseY - src.y) * dy) / len2));
+}
+
+function linkZoneForCursor(link, mouseX, mouseY) {
+  // Junction-aware zone classification.
+  //   caller : hover on the caller side (before the junction)
+  //   midpoint: hover on the junction itself / middle of the edge
+  //   target : hover on the callee side (after the junction)
+  //
+  // For bundled links the junction sits at 80% toward target, so the
+  // in-segment is always "caller side" and the short trunk is mostly
+  // "midpoint" with its last 20% being "target side."
+  //
+  // For regular bound edges we split into thirds.
+  const t = linkFraction(link, mouseX, mouseY);
+  if (t == null) return null;
+  if (link.isJunctionIn) {
+    return 'caller';  // whole in-segment is pre-junction
+  }
+  if (link.isJunctionOut) {
+    return t > 0.8 ? 'target' : 'midpoint';
+  }
+  // Regular bound edge.
+  if (t < 0.33) return 'caller';
   if (t > 0.66) return 'target';
   return 'midpoint';
 }
@@ -1261,22 +1357,25 @@ function isLinkLit(link, set) {
 function resolveLinkColor(l) {
   if (isLinkLit(l, litEdgeIds))      return 'rgba(251, 191, 36, 0.98)';   // LOS amber
   if (isLinkLit(l, hoverLitEdgeIds)) return 'rgba(34, 211, 238, 0.9)';    // hover cyan
-  if (l.isJunctionOut)               return 'rgba(148, 163, 184, 0.75)';  // bundled trunk — slate-400 toned
-  if (l.isJunctionIn)                return 'rgba(148, 163, 184, 0.45)';  // contributors — softer
-  return 'rgba(168, 168, 168, 0.42)';                                     // regular bound edge
+  // Bundled in-segments + the trunk itself share a muted tone so the
+  // bundle reads as one structure. Trunk NOT visually thicker or
+  // brighter than contributors by default — user wanted it to match.
+  if (l.isJunctionOut)               return 'rgba(148, 163, 184, 0.55)';
+  if (l.isJunctionIn)                return 'rgba(148, 163, 184, 0.55)';
+  return 'rgba(168, 168, 168, 0.45)';                                     // regular bound
 }
 
 function resolveLinkWidth(l) {
-  if (isLinkLit(l, litEdgeIds))      return l.isJunctionOut ? 3.5 : 2.0;
-  if (isLinkLit(l, hoverLitEdgeIds)) return l.isJunctionOut ? 2.6 : 1.4;
-  // Junction-out trunks render meaningfully thicker by default to
-  // signal they carry N callers.
-  return l.isJunctionOut ? 2.2 : 0.8;
+  // All edges (including junction trunks + contributors) share the
+  // same base width. Lit states bump width uniformly.
+  if (isLinkLit(l, litEdgeIds))      return 2.0;
+  if (isLinkLit(l, hoverLitEdgeIds)) return 1.4;
+  return 0.8;
 }
 
 function resolveLinkParticles(l) {
   if (!isLinkLit(l, litEdgeIds)) return 0;
-  return l.isJunctionOut ? 6 : 4;  // trunk gets denser flow
+  return 4;  // same density on trunk + contributors
 }
 
 // ---------- Visual refresh ----------
@@ -1304,6 +1403,43 @@ function refreshGraphVisuals() {
 // backward (incoming(s) whose flows fire this outgoing). Capped at
 // depth 8. Persists until user clicks empty space, another edge, or
 // a node (in which case hover-glow clears but LOS stays).
+
+// ---------- Catalog bridging helpers ----------
+//
+// A bound edge "A calls B at GET /x" fires B's catalog endpoint
+// "B exposes GET /x". Flows on B typically reference the CATALOG row
+// as their incoming_edge_id (that's how the mock + production SMEs
+// record it — the catalog represents "this endpoint fired", independent
+// of which caller triggered it). For LOS forward expansion to work,
+// we treat these as equivalent incomings.
+
+function effectiveFlowIncomingsForEdge(edgeId) {
+  // Return [edgeId plus any catalog rows matching (to, type, identifier)]
+  // so the BFS can find flows keyed on either.
+  const e = graphSnapshot.edgeById[edgeId];
+  if (!e || !e.to_component_id) return [edgeId];
+  const out = [edgeId];
+  for (const cat of graphSnapshot.edges) {
+    if (cat.kind === 'catalog'
+        && cat.to_component_id === e.to_component_id
+        && cat.edge_type === e.edge_type
+        && cat.identifier === e.identifier) {
+      out.push(cat.id);
+    }
+  }
+  return out;
+}
+
+function catalogEdgeFor(edge) {
+  // If `edge` is a bound row, find its matching catalog; otherwise null.
+  if (!edge || !edge.to_component_id || edge.kind === 'catalog') return null;
+  return graphSnapshot.edges.find(c =>
+    c.kind === 'catalog'
+    && c.to_component_id === edge.to_component_id
+    && c.edge_type === edge.edge_type
+    && c.identifier === edge.identifier
+  );
+}
 
 function lightOfSight(link) {
   // Cancel any in-flight reveal from a prior click — new click
@@ -1355,18 +1491,23 @@ function lightOfSight(link) {
   for (let depth = 1; depth < SAFETY_CAP; depth++) {
     const nextLayer = new Set();
     for (const edgeId of currentLayer) {
-      // Forward: this edge is the incoming of some flow → include that
-      // flow's outgoing in the next layer.
+      // Catalog-bridged forward expansion. For the clicked bound edge
+      // and every subsequent one, we treat any catalog row matching
+      // (to, type, identifier) as an equivalent incoming. That's how
+      // the mock + real SMEs record flows: the catalog represents the
+      // "this endpoint fired" event, independent of caller. Without
+      // bridging, clicking a caller's bound edge wouldn't expand into
+      // the callee's downstream because the flow's incoming references
+      // the catalog, not the bound row.
+      const flowIncomingIds = new Set(effectiveFlowIncomingsForEdge(edgeId));
       for (const f of graphSnapshot.flows) {
-        if (f.incoming_edge_id === edgeId
+        if (flowIncomingIds.has(f.incoming_edge_id)
             && !visited.has(f.outgoing_edge_id)) {
           nextLayer.add(f.outgoing_edge_id);
         }
       }
-      // Sibling convergence — any bound edge hitting the same
-      // (target, type, identifier). These aren't strictly "downstream"
-      // through flows, but they share the same endpoint so lighting
-      // them in the NEXT layer preserves the pulse-out feel.
+      // Also include bound sibling edges converging on the same
+      // endpoint. Shows the convergence fan-in during the reveal.
       const e = graphSnapshot.edgeById[edgeId];
       if (e && e.to_component_id) {
         for (const sib of graphSnapshot.edges) {
@@ -1689,50 +1830,54 @@ function wireEdgeHoverZones() {
   });
 }
 
-function hoverZoneResolve(link, zone) {
-  // Given a hovered link + zone, return {tooltipHtml, edgeIds}.
-  // edgeIds is the set of edges that should glow cyan in the canvas.
-  // The tooltip and the glow are derived from the same computation so
-  // the viz and the explanation never drift.
-
-  // Junction-out trunk: hovering any zone shows "the whole bundle" —
-  // these are the converging edges, presented as one unit.
-  if (link.isJunctionOut) {
-    const tgtNode2 = graphSnapshot.nodeById[link.target?.id || link.target];
-    const callers = (link.groupEdgeIds || []).map(id => {
-      const e = graphSnapshot.edgeById[id];
-      const src = e ? graphSnapshot.nodeById[e.source_id] : null;
-      return src ? src.name : '?';
-    });
-    const ids = [...(link.groupEdgeIds || []), link.id];
-    return {
-      tooltipHtml: `
-        <div class="tt-head">
-          <span class="tt-kind">${escapeHtml(link.edge_type)}</span>
-          <code class="tt-ident">${escapeHtml(link.identifier)}</code>
-        </div>
-        <div class="tt-zone">CONVERGENCE — ${callers.length} callers fan in to <b>${escapeHtml(tgtNode2?.name || '?')}</b></div>
-        <ul class="tt-list">${callers.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>
-      `,
-      edgeIds: ids,
-    };
-  }
-
-  const srcNode = graphSnapshot.nodeById[link.source?.id || link.source];
-  // For junction-in (bundled contributor), the "real" target is the
-  // catalog endpoint owner — resolve via the matching junction-out.
-  let tgtNode;
+function resolveEdgeEndpoints(link) {
+  // Always return the REAL component nodes, never junctions.
+  // - Regular bound: source = caller, target = callee
+  // - Junction-in: source = caller, target = real callee (looked up
+  //   via the shared junction's out-link metadata)
+  // - Junction-out: source = the "canonical" caller (first of the
+  //   bundle — not a meaningful choice, but consistent), target = real callee
+  const meta = graphSnapshot.junctionOutById || {};
   if (link.isJunctionIn) {
-    const meta = graphSnapshot.junctionOutById || {};
+    const src = graphSnapshot.nodeById[link.source?.id || link.source];
     for (const out of Object.values(meta)) {
       if (out.groupEdgeIds.includes(link.id)) {
-        tgtNode = graphSnapshot.nodeById[out.target_id];
-        break;
+        const tgt = graphSnapshot.nodeById[out.target_id];
+        return {srcNode: src, tgtNode: tgt};
       }
     }
-  } else {
-    tgtNode = graphSnapshot.nodeById[link.target?.id || link.target];
+    return {srcNode: src, tgtNode: null};
   }
+  if (link.isJunctionOut) {
+    const tgt = graphSnapshot.nodeById[link.target?.id || link.target];
+    // Pick the first bundled edge's source as the canonical caller
+    // for tooltip purposes; the bundle covers many.
+    const firstEdge = graphSnapshot.edgeById[link.groupEdgeIds?.[0]];
+    const src = firstEdge ? graphSnapshot.nodeById[firstEdge.source_id] : null;
+    return {srcNode: src, tgtNode: tgt};
+  }
+  // Regular bound: look up directly.
+  return {
+    srcNode: graphSnapshot.nodeById[link.source?.id || link.source],
+    tgtNode: graphSnapshot.nodeById[link.target?.id || link.target],
+  };
+}
+
+function resolveUnderlyingEdge(link) {
+  // Return the REAL (not synthetic) edge row this link corresponds to.
+  // For regular bound + junction-in: the edge row itself.
+  // For junction-out: the first bundled contributor (they all share
+  //   target+type+identifier so flow resolution is equivalent).
+  if (link.isJunctionOut) {
+    return graphSnapshot.edgeById[link.groupEdgeIds?.[0]];
+  }
+  return graphSnapshot.edgeById[link.id];
+}
+
+function hoverZoneResolve(link, zone) {
+  // Returns {tooltipHtml, edgeIds}. edgeIds = cyan glow set.
+  const {srcNode, tgtNode} = resolveEdgeEndpoints(link);
+  const underlying = resolveUnderlyingEdge(link);
   const header = `
     <div class="tt-head">
       <span class="tt-kind">${escapeHtml(link.edge_type)}</span>
@@ -1743,99 +1888,146 @@ function hoverZoneResolve(link, zone) {
     </div>
   `;
 
-  const edgeIds = new Set([link.id]);
+  const edgeIds = new Set();
 
-  if (zone === 'source') {
-    // CALLER view: source's incoming edges whose flows include this outgoing.
-    // Those incoming edges are catalog rows on the source (or inbound
-    // bound edges into it). Light up sibling BOUND outgoings on this
-    // source that share the same incoming — i.e. the other things the
-    // source does as part of the same request.
-    const feederIds = graphSnapshot.flows
-      .filter(f => f.component_id === (srcNode?.id) && f.outgoing_edge_id === link.id)
-      .map(f => f.incoming_edge_id);
-    // Sibling outgoings of source triggered by the same incomings.
-    const siblingOutgoingIds = new Set();
-    for (const fid of feederIds) {
+  if (zone === 'caller') {
+    // "Before the junction" view. Glow:
+    //   • This edge only (its slice — not sibling contributors)
+    //   • The caller component's incoming edges whose flows include
+    //     this outgoing as a downstream.
+    // Only bound incoming edges actually glow visually (catalog rows
+    // aren't rendered as lines), but the tooltip lists both.
+    edgeIds.add(link.id);
+
+    const feederEdgeIds = [];
+    if (srcNode && underlying) {
       for (const f of graphSnapshot.flows) {
-        if (f.component_id === (srcNode?.id)
-            && f.incoming_edge_id === fid
-            && f.outgoing_edge_id !== link.id) {
-          siblingOutgoingIds.add(f.outgoing_edge_id);
+        if (f.component_id === srcNode.id
+            && f.outgoing_edge_id === underlying.id) {
+          feederEdgeIds.push(f.incoming_edge_id);
         }
       }
     }
-    // Glow the sibling outgoings (catalog rows aren't rendered, so the
-    // incoming edges themselves don't glow — but the siblings visualise
-    // the "this request also does X and Y" idea).
-    siblingOutgoingIds.forEach(id => edgeIds.add(id));
+    // Each feeder may be a catalog row (not rendered) or a bound-in
+    // edge (rendered). Glow the bound ones.
+    for (const fid of feederEdgeIds) {
+      const fe = graphSnapshot.edgeById[fid];
+      if (fe && fe.kind === 'bound') edgeIds.add(fid);
+    }
 
-    const feederEdges = feederIds.map(id => graphSnapshot.edgeById[id]).filter(Boolean);
-    const siblings = [...siblingOutgoingIds].map(id => graphSnapshot.edgeById[id]).filter(Boolean);
-    const feederBody = feederEdges.length
-      ? feederEdges.map(fe => `<li>${escapeHtml(fe.edge_type)} <code>${escapeHtml(fe.identifier)}</code></li>`).join('')
-      : '<li><em>no catalog incoming feeds this outgoing</em></li>';
-    const siblingBody = siblings.length
-      ? `<div class="tt-zone">Sibling outgoings lit on the canvas:</div><ul class="tt-list">${siblings.map(s => {
-          const tgt = graphSnapshot.nodeById[s.target_id];
-          return `<li>${escapeHtml(s.edge_type)} <code>${escapeHtml(s.identifier)}</code> → ${escapeHtml(tgt?.name || '?')}</li>`;
-        }).join('')}</ul>`
-      : '';
+    const feederList = feederEdgeIds
+      .map(id => graphSnapshot.edgeById[id])
+      .filter(Boolean)
+      .map(fe => `<li>${escapeHtml(fe.edge_type)} <code>${escapeHtml(fe.identifier)}</code>${fe.kind === 'catalog' ? ' <em>(catalog — own exposed surface)</em>' : ''}</li>`)
+      .join('');
     return {
       tooltipHtml: `
         ${header}
-        <div class="tt-zone">CALLER view — incoming endpoints of <b>${escapeHtml(srcNode?.name || '?')}</b> feeding this outgoing</div>
-        <ul class="tt-list">${feederBody}</ul>
-        ${siblingBody}
+        <div class="tt-zone">CALLER view — incoming edges of <b>${escapeHtml(srcNode?.name || '?')}</b> that fire this outgoing</div>
+        <ul class="tt-list">${feederList || '<li><em>no flow recorded</em></li>'}</ul>
       `,
       edgeIds: [...edgeIds],
     };
   }
 
-  if (zone === 'target') {
-    // CALLEE view: target's outgoing edges in the flow triggered by this incoming.
-    const downstreamIds = graphSnapshot.flows
-      .filter(f => f.component_id === (tgtNode?.id) && f.incoming_edge_id === link.id)
-      .map(f => f.outgoing_edge_id);
-    downstreamIds.forEach(id => edgeIds.add(id));
-    const downstream = downstreamIds.map(id => graphSnapshot.edgeById[id]).filter(Boolean);
-    const body = downstream.length
-      ? downstream.map(de => {
-          const tgt = de.target_id ? graphSnapshot.nodeById[de.target_id] : null;
-          return `<li>${escapeHtml(de.edge_type)} <code>${escapeHtml(de.identifier)}</code> → ${escapeHtml(tgt?.name || 'dangling')}</li>`;
-        }).join('')
-      : '<li><em>no flow recorded from this incoming</em></li>';
+  if (zone === 'midpoint') {
+    // "At the junction" view. Glow the full convergence set:
+    //   • If bundled: the trunk + every in-segment contributor.
+    //   • If regular bound: the edge + every sibling bound edge
+    //     hitting the same (target, type, identifier).
+    // The tooltip lists all the callers converging here.
+
+    let contributors;
+    if (link.isJunctionOut) {
+      contributors = [...(link.groupEdgeIds || [])];
+      edgeIds.add(link.id);                // trunk
+      contributors.forEach(id => edgeIds.add(id));
+    } else if (link.isJunctionIn) {
+      // Shouldn't reach here (zone 'midpoint' returned only for
+      // junction-out or regular) — belt-and-braces.
+      const meta = graphSnapshot.junctionOutById || {};
+      for (const [outId, out] of Object.entries(meta)) {
+        if (out.groupEdgeIds.includes(link.id)) {
+          contributors = [...out.groupEdgeIds];
+          edgeIds.add(outId);
+          contributors.forEach(id => edgeIds.add(id));
+          break;
+        }
+      }
+      contributors = contributors || [link.id];
+    } else {
+      // Regular bound edge — find siblings converging on same endpoint.
+      contributors = [link.id];
+      edgeIds.add(link.id);
+      if (tgtNode) {
+        for (const sib of graphSnapshot.edges) {
+          if (sib.id !== link.id
+              && sib.kind === 'bound'
+              && sib.to_component_id === tgtNode.id
+              && sib.edge_type === link.edge_type
+              && sib.identifier === link.identifier) {
+            contributors.push(sib.id);
+            edgeIds.add(sib.id);
+          }
+        }
+      }
+    }
+
+    const contributorList = contributors
+      .map(id => graphSnapshot.edgeById[id])
+      .filter(Boolean)
+      .map(c => {
+        const src = graphSnapshot.nodeById[c.source_id];
+        return `<li>${escapeHtml(src?.name || '?')}</li>`;
+      }).join('');
     return {
       tooltipHtml: `
         ${header}
-        <div class="tt-zone">CALLEE view — outgoings of <b>${escapeHtml(tgtNode?.name || '?')}</b> fired by this incoming</div>
-        <ul class="tt-list">${body}</ul>
+        <div class="tt-zone">CONVERGENCE — ${contributors.length} caller(s) fan in to <b>${escapeHtml(tgtNode?.name || '?')}</b></div>
+        <ul class="tt-list">${contributorList || '<li><em>no contributors found</em></li>'}</ul>
       `,
       edgeIds: [...edgeIds],
     };
   }
 
-  // MIDPOINT — convergence. Other bound edges hitting the same
-  // (target, edge_type, identifier) endpoint.
-  const siblings = graphSnapshot.edges.filter(e =>
-    e.kind === 'bound'
-    && e.target_id === (tgtNode?.id)
-    && e.edge_type === link.edge_type
-    && e.identifier === link.identifier
-    && e.id !== link.id
-  );
-  siblings.forEach(s => edgeIds.add(s.id));
-  const body = siblings.length
-    ? siblings.map(s => {
-        const src = graphSnapshot.nodeById[s.source_id];
-        return `<li>from ${escapeHtml(src?.name || s.source_id.slice(0, 8))}</li>`;
-      }).join('')
-    : '<li><em>only you call this endpoint</em></li>';
+  // zone === 'target'
+  // "After the junction" view. Glow:
+  //   • This edge (or trunk)
+  //   • Target component's outgoing edges in the flow triggered by
+  //     this incoming (via catalog bridging — the underlying edge's
+  //     catalog equivalent is the incoming in target's flows).
+
+  edgeIds.add(link.id);
+  if (link.isJunctionOut) {
+    // Also include bundled contributors in the glow so the caller
+    // chains stay visible when exploring target-side.
+    (link.groupEdgeIds || []).forEach(id => edgeIds.add(id));
+  }
+
+  const downstreamIds = [];
+  if (tgtNode && underlying) {
+    const incomingCandidates = effectiveFlowIncomingsForEdge(underlying.id);
+    for (const f of graphSnapshot.flows) {
+      if (f.component_id === tgtNode.id
+          && incomingCandidates.includes(f.incoming_edge_id)) {
+        downstreamIds.push(f.outgoing_edge_id);
+      }
+    }
+  }
+  downstreamIds.forEach(id => edgeIds.add(id));
+
+  const downstreamList = downstreamIds
+    .map(id => graphSnapshot.edgeById[id])
+    .filter(Boolean)
+    .map(de => {
+      const nextTgt = de.target_id ? graphSnapshot.nodeById[de.target_id] : null;
+      return `<li>${escapeHtml(de.edge_type)} <code>${escapeHtml(de.identifier)}</code> → ${escapeHtml(nextTgt?.name || 'dangling')}</li>`;
+    }).join('');
   return {
     tooltipHtml: `
       ${header}
-      <div class="tt-zone">CONVERGENCE — others calling <code>${escapeHtml(link.edge_type)} ${escapeHtml(link.identifier)}</code> on <b>${escapeHtml(tgtNode?.name || '?')}</b></div>
-      <ul class="tt-list">${body}</ul>
+      <div class="tt-zone">CALLEE view — outgoings of <b>${escapeHtml(tgtNode?.name || '?')}</b> fired by this incoming</div>
+      <ul class="tt-list">${downstreamList || '<li><em>no downstream flow from this incoming</em></li>'}</ul>
     `,
     edgeIds: [...edgeIds],
   };
