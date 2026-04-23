@@ -1057,16 +1057,18 @@ async function initOrRefreshGraph() {
     junctionNodes.push({
       id: junctionId,
       isJunction: true,
-      // Junctions exist only to route edges visually — minimal data for
-      // node accessors. name/type etc. are what they are so nodeLabel
-      // stays meaningful if the user hovers one.
       name: `⌖ ${group.length} callers → ${group[0].edge_type} ${group[0].identifier}`,
       canonical: key,
       type: 'junction',
       planes: [],
-      // Light slate so the junction reads as scaffolding distinct from
-      // real components. Still visible against the dark bg.
-      color: '#94a3b8',  // slate-400
+      color: '#94a3b8',
+      // Onengineink pins each junction at a FIXED OFFSET from its
+      // target node each tick — so the junction is always "just
+      // outside the target," regardless of where the force layout
+      // puts anything. These two fields tell the pinner which
+      // target and which callers to use.
+      junctionTargetId: group[0].target_id,
+      junctionCallerIds: group.map(e => e.source_id),
     });
     const sample = group[0];
     const outId = `__junction_out__${key}`;
@@ -1184,18 +1186,65 @@ async function initOrRefreshGraph() {
     if (chargeForce && typeof chargeForce.strength === 'function') {
       chargeForce.strength(-320);
     }
-    // Link distance — asymmetric to pull junctions close to their
-    // TARGET (not midway between callers and target). That makes the
-    // bundled trunk short (20% of the total distance) and the caller
-    // in-segments long (80%), visually matching "fan in near target".
+    // Link distances. Junction nodes are PINNED each tick (see
+    // onEngineTick below) so the junction-out distance doesn't really
+    // matter for layout — the junction will be wherever we put it.
+    // We still set a small junction-out distance to avoid any residual
+    // force fighting our pin.
     const linkForce = graphInstance.d3Force('link');
     if (linkForce && typeof linkForce.distance === 'function') {
       linkForce.distance(l => {
-        if (l.isJunctionOut) return 18;   // trunk: short, near target
-        if (l.isJunctionIn)  return 110;  // in-segment: long, pulls callers away
-        return 80;                         // regular bound edges
+        if (l.isJunctionOut) return 15;   // overridden by pin anyway
+        if (l.isJunctionIn)  return 100;  // pulls callers toward junction
+        return 80;                         // regular bound
       });
     }
+
+    // Junction pinning. Each tick, place each junction at a fixed
+    // OFFSET of ~18 units from its real target component, in the
+    // direction of the callers' centroid. This means:
+    //   - Junction always "just outside" its target, visually close.
+    //   - Trunk (junction → target) is always short, regardless of
+    //     where callers end up.
+    //   - Offset direction points toward callers so the fan-in geometry
+    //     looks natural.
+    // Positions are computed only when target + at least one caller
+    // have converged; otherwise we leave the junction to d3-force for
+    // this tick.
+    const JUNCTION_OFFSET = 18;
+    graphInstance.onEngineTick(() => {
+      if (!graphSnapshot.nodeById) return;
+      const gd = graphInstance.graphData();
+      if (!gd || !gd.nodes) return;
+      // Build a quick id → node lookup over the LIVE nodes (these have
+      // x/y/z populated by the simulation).
+      const byId = {};
+      for (const n of gd.nodes) byId[n.id] = n;
+      for (const n of gd.nodes) {
+        if (!n.isJunction) continue;
+        const target = byId[n.junctionTargetId];
+        if (!target || target.x == null) continue;
+        // Centroid of the callers that feed this junction.
+        let cx = 0, cy = 0, cz = 0, count = 0;
+        for (const cid of (n.junctionCallerIds || [])) {
+          const c = byId[cid];
+          if (c && c.x != null) {
+            cx += c.x; cy += c.y; cz += c.z; count += 1;
+          }
+        }
+        if (count === 0) continue;
+        cx /= count; cy /= count; cz /= count;
+        // Direction from target toward callers' centroid.
+        const dx = cx - target.x;
+        const dy = cy - target.y;
+        const dz = cz - target.z;
+        const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (len < 0.1) continue;  // degenerate: callers at target
+        n.fx = target.x + (dx / len) * JUNCTION_OFFSET;
+        n.fy = target.y + (dy / len) * JUNCTION_OFFSET;
+        n.fz = target.z + (dz / len) * JUNCTION_OFFSET;
+      }
+    });
     // Cursor-centric zoom. We try OrbitControls.zoomToCursor first
     // (works on recent Three.js); if that property isn't honoured we
     // fall back to a manual wheel handler that moves the camera
