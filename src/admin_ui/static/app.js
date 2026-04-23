@@ -1186,16 +1186,20 @@ async function initOrRefreshGraph() {
     if (chargeForce && typeof chargeForce.strength === 'function') {
       chargeForce.strength(-320);
     }
-    // Link distances. Junction nodes are PINNED each tick (see
-    // onEngineTick below) so the junction-out distance doesn't really
-    // matter for layout — the junction will be wherever we put it.
-    // We still set a small junction-out distance to avoid any residual
-    // force fighting our pin.
+    // Link distances. Junction-out is overridden by the per-tick pin
+    // anyway, but we set a small value so residual force doesn't fight
+    // the pin. Junction-in is sized so a caller going THROUGH a
+    // junction ends up at roughly the same total distance from the
+    // real target as a caller connected by a regular bound edge:
+    //   regular bound: source ≈ 80 units from target
+    //   bundled:       source ≈ 62 (junction-in) + 18 (pin) = 80 units
+    // Keeping the effective "caller→target distance" consistent means
+    // bundled callers don't get pushed out into their own ring.
     const linkForce = graphInstance.d3Force('link');
     if (linkForce && typeof linkForce.distance === 'function') {
       linkForce.distance(l => {
-        if (l.isJunctionOut) return 15;   // overridden by pin anyway
-        if (l.isJunctionIn)  return 100;  // pulls callers toward junction
+        if (l.isJunctionOut) return 15;
+        if (l.isJunctionIn)  return 62;   // was 100 — too far
         return 80;                         // regular bound
       });
     }
