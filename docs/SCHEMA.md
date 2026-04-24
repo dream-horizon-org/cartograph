@@ -457,13 +457,18 @@ CREATE TABLE consolidations (
     r_conf_score    FLOAT,                       -- resolver's confidence (NULL until resolver intervenes)
     status          TEXT NOT NULL DEFAULT 'B2' CHECK (status IN (
                         'B1',                     -- Blocked on agent_a (nominator's turn)
-                        'B2',                     -- Blocked on agent_b (nominated's turn) — initial state
-                        'R',                      -- Resolver review
+                        'B2',                     -- Blocked on agent_b (nominated's turn) — MERGE initial
+                        'R',                      -- Resolver review (SPLIT initial — no negotiation phase)
                         'M',                      -- Mutation in progress
                         'MD',                     -- Materialisation done (mutation executed)
                         'D',                      -- Done (fully complete, acked)
                         'F'                       -- Failed / rejected
                     )),
+    -- Phase 4 invariant: splits have no counterparty → B2 is structurally
+    -- unreachable for them. Code inserts splits at 'R' directly; this
+    -- constraint is the DB-layer belt-and-suspenders.
+    CONSTRAINT consolidation_split_no_b2
+        CHECK (NOT (nomination_type = 'split' AND status = 'B2')),
     mutation_assigned_to TEXT,                   -- agent_id responsible for executing mutation
                                                  -- merge: resolver picks A1 or A2 (more planes wins)
                                                  -- split: always A1 (self-nominator)

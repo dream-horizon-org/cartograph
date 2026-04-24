@@ -8,75 +8,94 @@ This document defines how agents get invoked, what they can read, and what they 
 
 ### 1.1 Consolidation States
 
+Consolidations have **two distinct state machines** keyed on
+`nomination_type`: one for `merge` (two parties) and one for `split`
+(self-nomination, one party). They share the resolver-side shape
+(R → {M, F}, MD → D) but differ on the negotiation phase. Keeping
+them separate avoids conditional "is this a split?" branches in the
+state-machine code — same pattern as the clarification asker/responder
+and task worker/owner tables below.
+
+Shared shorthand:
+- `B1` = Blocked on Agent1 (nominator's turn)
+- `B2` = Blocked on Agent2 (nominated's turn) — **merge only**
+- `R`  = Resolver review
+- `M`  = Mutation in progress (`mutation_assigned_to` executes)
+- `MD` = Materialisation Done (mutation complete, resolver to verify)
+- `D`  = Done
+- `F`  = Failed / rejected
+
+#### 1.1a MERGE (two parties — nominator + nominated)
+
 ```
-States:
-  B1  = Blocked on Agent1 (nominator's turn)
-  B2  = Blocked on Agent2 (nominated's turn) ← INITIAL STATE
-  R   = Resolver review
-  M   = Mutation in progress (mutation_assigned_to executes)
-  MD  = Materialisation Done (mutation executed, pending ack)
-  D   = Done (fully complete)
-  F   = Failed / rejected
+Initial: B2 (nominated's turn — nominator already gave evidence at creation)
 
-Agent1 = nominator (proposed_by). Agent2 = nominated.
-Initial state = B2 (nominator already provided evidence at creation).
-
-Transitions:
-  B2 → B1    (nominated responds, flips to nominator)
-  B1 → B2    (nominator responds, flips to nominated)
-  B1 → R     (system: if r_conf IS NULL and both conf breach threshold)
-             (agent: if r_conf IS NOT NULL, agent explicitly escalates)
-  B2 → R     (same conditions as above)
-  R  → B1/B2 (resolver needs more info, sends back to either agent)
-  R  → F     (resolver rejects)
-  R  → M     (resolver approves, sets mutation_assigned_to)
-  M  → MD    (mutation_assigned_to agent completes merge/split)
-  MD → D     (ack — done)
-
-Diagram:
-
-             ┌────┐ ◄──────────── ┌────┐
-             │ B1 │ ─────────────►│ B2 │ (initial)
-             └─┬──┘               └──┬─┘
-               │▲                   ▲│
-               ││                   ││
-               │└─────────┬─────────┘│
-               │          │          │
-               └─────────┬┼──────────┘
-   (conf-breach/escalate)││
-                         ▼│(back to negotiation)
-                       ┌──┴─┐
-              ┌────────│ R  │
-              │        └─┬──┘
-              │          │   
-              ▼          ▼   
-            ┌────┐     ┌────┐
-            │ F  │     │ M  │
-            └────┘     └─┬──┘
-                         │
-                         ▼
-                       ┌────┐
-                       │ MD │
-                       └─┬──┘
-                         │
-                         ▼
-                       ┌────┐
-                       │ D  │
-                       └────┘
+  ┌────┐ ◄──────────── ┌────┐
+  │ B1 │ ─────────────►│ B2 │ (initial)
+  └─┬──┘               └──┬─┘
+    │                     │
+    └──────────┬──────────┘
+   (conf-breach auto-escalate, or manual if r_conf set)
+               │
+               ▼
+             ┌────┐
+    ┌────────│ R  │───────┐
+    │        └─┬──┘       │
+    │        ┌─┴──┐       │
+    │        │B1/B2│      │   (resolver sends back)
+    │        └────┘       │
+    ▼                     ▼
+  ┌────┐               ┌────┐     ┌────┐     ┌────┐
+  │ F  │               │ M  │ ──► │ MD │ ──► │ D  │
+  └────┘               └────┘     └────┘     └────┘
 ```
 
-**Who gets triggered and their options:**
+| State  | Triggered            | Valid next states                                                                                      |
+| ------ | -------------------- | ------------------------------------------------------------------------------------------------------ |
+| B2     | Nominated (agent_b)  | B1 (respond, flip to nominator), R (manual escalate — only if r_conf_score IS NOT NULL)                |
+| B1     | Nominator (agent_a)  | B2 (respond, flip to nominated), R (manual escalate — only if r_conf_score IS NOT NULL)                |
+| B1, B2 | System (auto)        | R (when BOTH a_conf_score AND b_conf_score ≥ merge threshold AND r_conf_score IS NULL)                 |
+| R      | Resolver             | B1 (need more from nominator), B2 (need more from nominated), F (reject), M (approve + mutation_assigned_to) |
+| M      | mutation_assigned_to | MD (mutation complete)                                                                                 |
+| MD     | Resolver             | D                                                                                                      |
 
+#### 1.1b SPLIT (one party — self-nominator)
 
-| State  | Triggered            | Options (valid next states)                                                                                      |
-| ------ | -------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| B2     | Nominated (agent_b)  | B1 (respond, flip to nominator)                                                                                  |
-| B1     | Nominator (agent_a)  | B2 (respond, flip to nominated)                                                                                  |
-| B1, B2 | System (auto)        | R (if both conf breach threshold and r_conf IS NULL)                                                             |
-| B1, B2 | Agent (manual)       | R (escalate, only if r_conf IS NOT NULL)                                                                         |
-| R      | Resolver             | B1 (need more from nominator), B2 (need more from nominated), F (reject), M (approve + set mutation_assigned_to) |
-| M      | mutation_assigned_to | MD (mutation complete)                                                                                           |
-| MD     | Resolver             | D (done)                                                                                                         |
+No counter-party to negotiate with; B2 doesn't exist for splits.
+Skips the B-negotiation phase entirely and lands directly at `R` on
+nomination.
+
+```
+Initial: R (resolver's turn — no negotiation phase)
+
+                   ┌────┐
+                   │ R  │
+               ┌───┴─┬──┘────┐
+               ▼     ▼       ▼
+             ┌────┐┌────┐  ┌────┐     ┌────┐     ┌────┐
+             │ B1 ││ F  │  │ M  │ ──► │ MD │ ──► │ D  │
+             └─┬──┘└────┘  └────┘     └────┘     └────┘
+               │
+               └─→ back to R (nominator elaborates; no r_conf gate since
+                               r_conf is already set from the first review)
+```
+
+| State | Triggered            | Valid next states                                                                      |
+| ----- | -------------------- | -------------------------------------------------------------------------------------- |
+| R     | Resolver             | B1 (need more from nominator), F (reject), M (approve + mutation_assigned_to = agent_a — enforced) |
+| B1    | Nominator (agent_a)  | R (respond with more info) — NOT B2, there is no counter-party                         |
+| M     | mutation_assigned_to | MD (spawn_child_agent + execute_mutation complete)                                     |
+| MD    | Resolver             | D                                                                                      |
+
+No auto-escalate rule applies to splits — only one confidence score
+exists. The scanner explicitly filters `nomination_type = 'merge'` for
+both auto-escalate and auto-reject.
+
+The invariant is enforced three ways:
+- Python state-machine dicts `_SPLIT_*_TRANSITIONS` structurally lack B2.
+- `nominate_consolidation` inserts splits at `R` directly.
+- DB CHECK constraint `consolidation_split_no_b2` rejects any row that
+  lands at (split, B2) regardless of which code path tries to write it.
 
 
 ---
@@ -514,57 +533,59 @@ Exposed to agents via `cartograph-db` MCP. Every act on a stateful entity (conso
 
 ```
 nominate_consolidation(agent_id, component_a_id, component_b_id?, type, confidence, message)
-  Creates new consolidation row (status=B2) + communication message with
-  state_transition metadata.
+  Creates new consolidation row + communication message with state_transition metadata.
   Only SMEs can nominate. Validates: caller owns component_a.
-  type='merge' → component_b_id required, must be owned by a different SME.
-  type='split' → component_b_id optional (child component is spawned in
-                 Phase 4 via spawn_child_agent after resolver approval).
+  type='merge' → component_b_id required, owned by different SME. Initial status=B2.
+  type='split' → component_b_id optional (child spawned via spawn_child_agent).
+                 Initial status=R (no negotiation phase — solo nomination).
 
 respond_consolidation(agent_id, consolidation_id, confidence, message, new_status)
   Updates confidence score + appends communication.
   Validates:
     - agent is agent_a or agent_b on this consolidation
-    - new_status is a valid transition from current status
+    - for split: only agent_a (no agent_b exists)
+    - new_status is a valid transition from current status (per-type machine)
     - state actually changes (can't respond without transition)
-  Valid transitions for nominated (agent_b):
+  Valid transitions for MERGE nominated (agent_b):
     B2 → B1 (respond, flip to nominator)
     B2 → R  (escalate to resolver, only if r_conf IS NOT NULL)
-  Valid transitions for nominator (agent_a):
+  Valid transitions for MERGE nominator (agent_a):
     B1 → B2 (respond, flip to nominated)
     B1 → R  (escalate to resolver, only if r_conf IS NOT NULL)
+  Valid transitions for SPLIT nominator (agent_a, only role):
+    B1 → R  (respond with more info — NOT B2, no counterparty)
 
 review_consolidation(agent_id, consolidation_id, r_confidence, message, new_status, mutation_assigned_to?)
-  Resolver-only. Reviews and decides. Writes r_conf_score + state
-  transition + resolved_by / resolved_at (on F/D). Communication row
-  metadata carries role='resolver' + state_transition.
-  Validates: agent_type='resolver'
-  Valid transitions:
-    R → B1 (back to nominator) | R → B2 (back to nominated)
-    R → F  (rejected — terminal)
-    R → M  (approved — mutation_assigned_to REQUIRED)
-           merge: caller picks agent_a or agent_b (resolver judgment);
-                  must equal one of the two IDs on the row.
-           split: must equal agent_a (enforced).
+  Resolver-only. Per-nomination-type transition table.
+  Writes r_conf_score + state transition + resolved_by/resolved_at (on F/D).
+  Valid transitions for MERGE resolver:
+    R → B1 | R → B2 | R → F | R → M (mutation_assigned_to REQUIRED; agent_a or agent_b)
+    MD → D
+  Valid transitions for SPLIT resolver:
+    R → B1 | R → F | R → M (mutation_assigned_to REQUIRED; enforced = agent_a)
+    MD → D
+    (NO R → B2 — splits have no counterparty to send back to.)
 
-execute_mutation(agent_id, consolidation_id, new_status)  -- Phase 4
-  SME executes approved merge/split. M → MD.
+execute_mutation(agent_id, consolidation_id, message)  -- Phase 4
+  mutation_assigned_to SME acknowledges mutation work is applied. M → MD.
 
-complete_consolidation(agent_id, consolidation_id)  -- Phase 4
-  Resolver final ack. MD → D.
+complete_consolidation(agent_id, consolidation_id, message)  -- Phase 4
+  Resolver final verification. MD → D.
 ```
 
 **Auto-transitions (system, not an agent tool):**
 
 The trigger manager runs `auto_transitions.run_auto_transitions` on
-every cycle (see §2.1 step 5). Two rules:
+every cycle (see §2.1 step 5). Both rules are **merge-only** —
+splits have only one confidence score (a_conf_score) and lands
+directly at R on nomination, bypassing this phase entirely.
 
-- `a_conf_score >= 0.85 AND b_conf_score >= 0.85 AND r_conf_score IS NULL`
+- `nomination_type='merge' AND a_conf_score >= 0.85 AND b_conf_score >= 0.85 AND r_conf_score IS NULL`
   → set `status='R'`. This is how first escalation to resolver happens —
   not an explicit agent call. Manual `respond_consolidation(new_status='R')`
   is refused until `r_conf_score` is non-null (resolver has already
   weighed in).
-- `a_conf_score <= 0.3 AND b_conf_score <= 0.3`
+- `nomination_type='merge' AND a_conf_score <= 0.3 AND b_conf_score <= 0.3`
   → set `status='F'`. Both sides strongly disagree → terminal reject, no
   resolver needed.
 

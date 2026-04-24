@@ -1224,9 +1224,27 @@ MCP server (`:8100`). Reads/writes the `communications` table directly via
 
 Chat view (the original 1:1 admin↔agent view):
 ```
-GET /api/agents
-  Returns: [{agent_id, agent_type, status, created_at}]
-  Filters: excludes decommissioned
+GET /api/agents?include_decommissioned=(true|false)
+  Returns: [{agent_id, agent_type, status, sleep_until, created_at,
+            deactivation_reason, deactivation_notes, merged_into_agent_id,
+            component_id, component_canonical, component_display, component_status}]
+  Default excludes decommissioned. Pass include_decommissioned=true to
+  audit merged/absorbed agents (Phase 4). Each SME row also surfaces its
+  managed component (via LEFT JOIN on resource_component_agents + components)
+  so the UI can render a "📦 Display Name" pill inline — non-SMEs return
+  NULLs in the component_* fields.
+
+GET /api/agent/:agent_id/chain
+  Returns: {chain: [...]}
+  Walks merged_into_agent_id bottom-up for up to 10 hops so the admin UI
+  can render the merge lineage (A → B → C (active)) on decommissioned
+  agents (Phase 4).
+
+GET /api/proxy_audit?item_type=&item_id=&survivor_id=&limit=
+  Returns: {entries: [...]}
+  Query the append-only proxy_audit log. Used by the communications tab
+  to batch-load entries and stamp "via <survivor>" badges on rows
+  authored by decommissioned agents (Phase 4).
 
 GET /api/chat/:agent_id?before=<iso_timestamp>&limit=20
   Returns: {messages: [...], has_more: bool}
