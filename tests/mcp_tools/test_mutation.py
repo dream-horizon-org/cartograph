@@ -213,6 +213,141 @@ def test_absorb_preserves_chain_history_for_transitive_merges(agent_factory):
     assert row_b["merged_into_agent_id"] == "sme-a"
 
 
+# ========================== absorb cascade ==========================
+
+
+def test_absorb_cascade_moves_attributions_edges_flows(agent_factory):
+    s = _m_state_merge(agent_factory)
+    # Seed evidence on target (comp_b): 1 attribution, 1 catalog edge,
+    # 1 outgoing bound edge, 1 flow linking them.
+    attr = execute_one(
+        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
+           VALUES (%s, 'github', 'repo', 'o/b#evidence') RETURNING id""",
+        (s["comp_b"],),
+    )
+    cat = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (NULL, %s, 'calls', 'POST /b', 'test') RETURNING id""",
+        (s["comp_b"],),
+    )
+    ds = execute_one(
+        """INSERT INTO components (canonical_name, display_name, component_type)
+           VALUES ('o/ds', 'ds', 'application') RETURNING id"""
+    )
+    out = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'GET /ds', 'test') RETURNING id""",
+        (s["comp_b"], ds["id"]),
+    )
+    flow = execute_one(
+        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+                              discovered_by)
+           VALUES (%s, %s, %s, 'test') RETURNING id""",
+        (s["comp_b"], cat["id"], out["id"]),
+    )
+
+    result = mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
+
+    # All cascade counts recorded.
+    assert result["cascade"]["attributions"] == 1
+    assert result["cascade"]["edges"] == 2  # cat + out
+    assert result["cascade"]["flows"] == 1
+
+    # Attribution now on survivor.
+    row = execute_one("SELECT component_id FROM attributions WHERE id=%s", (attr["id"],))
+    assert str(row["component_id"]) == str(s["comp_a"])
+    # Catalog now on survivor.
+    row = execute_one("SELECT to_component_id FROM edges WHERE id=%s", (cat["id"],))
+    assert str(row["to_component_id"]) == str(s["comp_a"])
+    # Bound outgoing now from survivor.
+    row = execute_one("SELECT from_component_id FROM edges WHERE id=%s", (out["id"],))
+    assert str(row["from_component_id"]) == str(s["comp_a"])
+    # Flow now on survivor.
+    row = execute_one("SELECT component_id FROM flows WHERE id=%s", (flow["id"],))
+    assert str(row["component_id"]) == str(s["comp_a"])
+
+
+def test_absorb_cascade_attributions_off(agent_factory):
+    """cascade_attributions=False → evidence stays with (decommissioned) target."""
+    s = _m_state_merge(agent_factory)
+    attr = execute_one(
+        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
+           VALUES (%s, 'github', 'repo', 'o/b#x') RETURNING id""",
+        (s["comp_b"],),
+    )
+    result = mutation.absorb_agent(
+        "sme-a", s["cons_id"], "sme-b", cascade_attributions=False,
+    )
+    assert result["cascade"]["attributions"] == 0
+    row = execute_one("SELECT component_id FROM attributions WHERE id=%s", (attr["id"],))
+    assert str(row["component_id"]) == str(s["comp_b"])  # unchanged
+
+
+def test_absorb_cascade_edges_off(agent_factory):
+    s = _m_state_merge(agent_factory)
+    execute_mutate(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (NULL, %s, 'calls', 'POST /keep', 'test')""",
+        (s["comp_b"],),
+    )
+    result = mutation.absorb_agent(
+        "sme-a", s["cons_id"], "sme-b", cascade_edges=False,
+    )
+    assert result["cascade"]["edges"] == 0
+    # Edge still points at comp_b (now decommissioned).
+    row = execute_one(
+        "SELECT COUNT(*) as n FROM edges WHERE to_component_id = %s",
+        (s["comp_b"],),
+    )
+    assert row["n"] == 1
+
+
+def test_absorb_cascade_flows_off(agent_factory):
+    s = _m_state_merge(agent_factory)
+    cat = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (NULL, %s, 'calls', 'POST /x', 'test') RETURNING id""",
+        (s["comp_b"],),
+    )
+    ds = execute_one(
+        """INSERT INTO components (canonical_name, display_name, component_type)
+           VALUES ('o/ds2', 'ds2', 'application') RETURNING id"""
+    )
+    out = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'GET /ds2', 'test') RETURNING id""",
+        (s["comp_b"], ds["id"]),
+    )
+    flow = execute_one(
+        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+                              discovered_by)
+           VALUES (%s, %s, %s, 'test') RETURNING id""",
+        (s["comp_b"], cat["id"], out["id"]),
+    )
+    # Cascade edges ON but flows OFF — edges move, flow stays.
+    result = mutation.absorb_agent(
+        "sme-a", s["cons_id"], "sme-b", cascade_flows=False,
+    )
+    assert result["cascade"]["edges"] >= 2
+    assert result["cascade"]["flows"] == 0
+    row = execute_one("SELECT component_id FROM flows WHERE id=%s", (flow["id"],))
+    assert str(row["component_id"]) == str(s["comp_b"])  # flow unchanged
+
+
+def test_absorb_cascade_empty_body_produces_zero_counts(agent_factory):
+    """No attributions/edges/flows on target → all counts 0, absorb still succeeds."""
+    s = _m_state_merge(agent_factory)
+    result = mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
+    assert result["cascade"] == {
+        "attributions": 0, "edges": 0, "flows": 0, "collapsed_edges": 0
+    }
+
+
 # ========================== spawn_child_agent ==========================
 
 
@@ -628,8 +763,12 @@ def test_get_stale_edges_includes_survivor_when_merged(agent_factory):
         (s["comp_a"], s["comp_b"]),
     )
     # Absorb sme-b into sme-a — flips sme-b.merged_into_agent_id to sme-a
-    # AND decommissions comp_b.
-    mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
+    # AND decommissions comp_b. We turn cascade_edges OFF here so the
+    # edge STAYS pointing at the dead comp_b (otherwise 4.1.3 would
+    # auto-transfer it and there'd be nothing stale to surface).
+    mutation.absorb_agent(
+        "sme-a", s["cons_id"], "sme-b", cascade_edges=False,
+    )
     rows = comp_tool.get_stale_edges("sme-a")
     # sme-a's edge now points at decommissioned comp_b.
     target_rows = [r for r in rows if str(r["stale_component_id"]) == str(s["comp_b"])]

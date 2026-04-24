@@ -895,14 +895,20 @@ def absorb_agent(
     target_agent_id: str,
     deactivation_reason: str = "merged",
     deactivation_notes: str | None = None,
+    cascade_attributions: bool = True,
+    cascade_edges: bool = True,
+    cascade_flows: bool = True,
 ) -> dict[str, Any]:
-    """Phase 4. MERGE: flip target to decommissioned (with deactivation
-    metadata), union target's source_slice into the survivor's component,
-    decommission target component, re-point target's RCA rows to survivor.
-    Attributions move separately via transfer_attributions."""
+    """Phase 4 + 4.1 cascade. MERGE: flip target to decommissioned,
+    union source_slice, decommission target component, re-point RCA.
+    Phase 4.1: by default also cascades attributions + edges + flows
+    from target to survivor via the mutation-scoped transfer_* tools
+    (survivor workflow collapses to absorb + execute_mutation). Set any
+    cascade_* flag to False to opt out."""
     return mutation_tool.absorb_agent(
         agent_id, consolidation_id, target_agent_id,
         deactivation_reason, deactivation_notes,
+        cascade_attributions, cascade_edges, cascade_flows,
     )
 
 

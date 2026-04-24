@@ -160,12 +160,23 @@ def absorb_agent(
     target_agent_id: str,
     deactivation_reason: str = "merged",
     deactivation_notes: str | None = None,
+    cascade_attributions: bool = True,
+    cascade_edges: bool = True,
+    cascade_flows: bool = True,
 ) -> dict:
     """Merge target into the caller's component.
 
     Gated on consolidation.status='M', caller=mutation_assigned_to.
     Refuses if target IS the caller. Target must be the other party on
     the consolidation.
+
+    Phase 4.1: cascade_* flags (default True) pull all of target's
+    attributions / edges / flows into the survivor's component via
+    the mutation-scoped transfer_* tools. With defaults, the survivor
+    workflow collapses from 5 calls (transfer_attrs + transfer_edges +
+    transfer_flows + absorb + execute_mutation) to 2 (absorb +
+    execute_mutation). Set any flag to False to hand-pick movement —
+    e.g. keep survivor's existing edges and discard target's.
 
     Effects (all in one operation, but not one DB transaction — each
     step is atomic on its own table):
@@ -177,12 +188,13 @@ def absorb_agent(
       3. target component: status='decommissioned'. Its source_slice
          stays frozen as a tombstone.
       4. resource_component_agents rows owned by target are re-pointed
-         to the survivor (agent_id + component_id flipped). Duplicate
-         (resource_id, survivor_component_id) rows collapse.
+         to the survivor. Duplicates collapse.
+      5. (cascade_attributions) attributions on target → survivor.
+      6. (cascade_edges) edges touching target → survivor (catalog
+         collisions collapse; bound/dangling collisions raise).
+      7. (cascade_flows) flows on target → survivor.
 
-    Does NOT:
-      - move attributions (use transfer_attributions separately).
-      - flip the consolidation status (use execute_mutation).
+    Does NOT flip the consolidation status (use execute_mutation).
     """
     cons = _assert_mutation_gate(agent_id, consolidation_id)
     if target_agent_id == agent_id:
@@ -271,12 +283,59 @@ def absorb_agent(
             (agent_id, target_agent_id),
         )
 
+    cascade_result = {"attributions": 0, "edges": 0, "flows": 0, "collapsed_edges": 0}
+
+    # Steps 5-7 only run when both components exist AND the respective
+    # cascade flag is on. Cascades use the mutation-scoped transfer_*
+    # helpers — same gate (_assert_transfer_scope) re-runs per call,
+    # which is cheap (single consolidation SELECT) and keeps the
+    # transfer audit trail uniform whether invoked directly or via
+    # cascade.
+    if survivor_component_id and target_component_id:
+        if cascade_attributions:
+            attr_rows = execute(
+                "SELECT id FROM attributions WHERE component_id = %s",
+                (target_component_id,),
+            )
+            attr_ids = [str(r["id"]) for r in attr_rows]
+            if attr_ids:
+                r = transfer_attributions(
+                    agent_id, consolidation_id, attr_ids,
+                    target_component_id, survivor_component_id,
+                )
+                cascade_result["attributions"] = r["transferred"]
+
+        if cascade_edges:
+            edge_rows = execute(
+                """SELECT id FROM edges
+                   WHERE from_component_id = %s OR to_component_id = %s""",
+                (target_component_id, target_component_id),
+            )
+            edge_ids = [str(r["id"]) for r in edge_rows]
+            if edge_ids:
+                r = transfer_edges(
+                    agent_id, consolidation_id, edge_ids, direction="both",
+                )
+                cascade_result["edges"] = r["transferred"]
+                cascade_result["collapsed_edges"] = r["collapsed"]
+
+        if cascade_flows:
+            flow_rows = execute(
+                "SELECT id FROM flows WHERE component_id = %s",
+                (target_component_id,),
+            )
+            flow_ids = [str(r["id"]) for r in flow_rows]
+            if flow_ids:
+                r = transfer_flows(agent_id, consolidation_id, flow_ids)
+                cascade_result["flows"] = r["transferred"]
+
     return {
         "absorbed": target_agent_id,
         "survivor": agent_id,
         "survivor_component_id": survivor_component_id,
         "target_component_id": target_component_id,
         "merged_source_slice": merged_slice,
+        "cascade": cascade_result,
     }
 
 
