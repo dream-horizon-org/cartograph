@@ -27,6 +27,7 @@ from cartograph_mcp.tools import agent_lifecycle
 from cartograph_mcp.tools import clarification as clarification_tool
 from cartograph_mcp.tools import components as components_tool
 from cartograph_mcp.tools import consolidation as consolidation_tool
+from cartograph_mcp.tools import mutation as mutation_tool
 from cartograph_mcp.tools import notifications as notifications_tool
 from cartograph_mcp.tools import search as search_tool
 from cartograph_mcp.tools import sleep as sleep_tool
@@ -844,6 +845,57 @@ def review_consolidation(
     return consolidation_tool.review_consolidation(
         agent_id, consolidation_id, r_confidence, message, new_status,
         mutation_assigned_to,
+    )
+
+
+@mcp.tool()
+def absorb_agent(
+    agent_id: str,
+    consolidation_id: str,
+    target_agent_id: str,
+    deactivation_reason: str = "merged",
+    deactivation_notes: str | None = None,
+) -> dict[str, Any]:
+    """Phase 4. MERGE: flip target to decommissioned (with deactivation
+    metadata), union target's source_slice into the survivor's component,
+    decommission target component, re-point target's RCA rows to survivor.
+    Attributions move separately via transfer_attributions."""
+    return mutation_tool.absorb_agent(
+        agent_id, consolidation_id, target_agent_id,
+        deactivation_reason, deactivation_notes,
+    )
+
+
+@mcp.tool()
+def spawn_child_agent(
+    agent_id: str,
+    consolidation_id: str,
+    child_agent_id: str,
+    child_component_data: dict[str, Any],
+    child_source_slice: dict[str, Any],
+    split_briefing: str,
+) -> dict[str, Any]:
+    """Phase 4. SPLIT: carve a new component + idle SME out of the caller's
+    component. Child source_slice is subtracted from parent atomically.
+    Consolidation.child_agent_id prevents duplicate spawns."""
+    return mutation_tool.spawn_child_agent(
+        agent_id, consolidation_id, child_agent_id,
+        child_component_data, child_source_slice, split_briefing,
+    )
+
+
+@mcp.tool()
+def transfer_attributions(
+    agent_id: str,
+    from_component_id: str,
+    to_component_id: str,
+    attribution_ids: list[str],
+) -> dict[str, Any]:
+    """Phase 4. Move attribution rows between two components. Re-embeds both.
+    Does NOT touch source_slice — run upsert_component separately if slice
+    also needs to move."""
+    return mutation_tool.transfer_attributions(
+        agent_id, from_component_id, to_component_id, attribution_ids,
     )
 
 
