@@ -1405,89 +1405,247 @@ These are small enough to defer to ship-time:
 
 ---
 
-## Phase 4: Mutation + Resolution + Edges
+## Phase 4: Mutation + Proxy Inheritance
 
-Executing approved merges/splits, resolving references, building the edge graph.
+Executing approved merges/splits. Core shift from the original spec:
+no `proxy_items` table — inherited items are DERIVED at read time by
+walking `agent_runs.merged_into_agent_id` chains. Survivor acts on
+inherited items via a single router that invokes existing public
+tools in a relaxed-validation ContextVar.
 
-### MCP Tools Added
-**Act — Mutation (gated: only when agent is mutation_assigned_to on consolidation in state M):**
-- `execute_mutation(agent_id, consolidation_id, new_status)` — Validate: agent is mutation_assigned_to. Transition: M→MD.
-- `complete_consolidation(agent_id, consolidation_id)` — Transition: MD→D.
-- `absorb_agent(agent_id, target_agent_id)` — MERGE:
-  - Create proxy_items entries for ALL of target's pending items (tasks WHERE worker_agent_id=target AND status IN ('BW','BO'), consolidations WHERE (agent_a_id=target OR agent_b_id=target) AND status NOT IN ('D','F'), clarifications WHERE (asker=target OR responder=target) AND status NOT IN ('CC'), unacked chats WHERE to_agent=target AND acked_at IS NULL, unacked broadcasts for target)
-  - SET target agent status='decommissioned'
-  - Validate: agent is mutation_assigned_to on an active consolidation in state M
-- `spawn_child_agent(parent_agent_id, consolidation_id, component_data, briefing)` — SPLIT:
-  - INSERT new component with split_from_component_id=parent's component, split_briefing=briefing
-  - INSERT new agent in agent_runs (status='idle')
-  - INSERT resource_component_agents row for new agent+component
-  - SET consolidation.child_agent_id = new agent (prevent duplicate spawns)
-  - Validate: agent is mutation_assigned_to; consolidation.child_agent_id IS NULL
-  - Auto-embed new component
-- `transfer_attributions(from_component_id, to_component_id, attribution_ids[])` — UPDATE attributions SET component_id=to WHERE id IN (...). Re-embed BOTH components. Validate: agent owns from_component. Does NOT auto-touch `source_slice` — attributions are evidence, slice is structural. The mutation_assigned_to agent must call `upsert_component` explicitly on both sides to keep `source_slice` consistent.
-- `get_proxy_items(agent_id)` — SELECT * FROM proxy_items WHERE surviving_agent_id=agent_id. Returns all inherited items with type, item_id, status.
-- `get_proxy_chats(agent_id, proxy_agent_id, page, limit)` — SELECT from communications WHERE (from_agent=proxy_agent_id OR to_agent=proxy_agent_id) AND type='chat', paginated. Validate: proxy_agent_id is a decommissioned agent absorbed by agent_id (check proxy_items).
+Net surface: 5 mutation tools + 2 proxy tools + 1 shared helper
+refactor + 3 schema columns + 1 audit table + 1 notifications
+reshape + admin-UI touchpoints.
 
-### `source_slice` consistency contract (Phase 3.8 → implemented in Phase 4)
+### 4.0 Schema delta
 
-`components.source_slice` is a structural JSONB field describing which
-parts of which source resource(s) a component covers. Three mutation
-paths touch it — they MUST keep the invariant "no two active components
-claim the same (resource_id, path) pair":
+`agent_runs` — three new nullable columns populated on deactivation:
+- `deactivation_reason TEXT` — enum-ish: `'merged'` | `'split_absorbed'` | `'retired'`
+- `merged_into_agent_id UUID REFERENCES agent_runs(agent_id)` — single-hop pointer; transitive chains walked at read time (never flattened, so historical `deactivation_notes` stay accurate)
+- `deactivation_notes TEXT` — human/agent-authored brief; populated per-hop at the moment of deactivation
 
-- **`spawn_child_agent` (split)** — inside the same transaction:
-  - Copy the child's share out of the parent's `source_slice` into the
-    new component's `source_slice`.
-  - Remove those entries from the parent's `source_slice`.
-  - Callers pass the child's intended slice in `component_data.source_slice`;
-    the mutation call must also accept (or compute) the updated parent
-    slice and apply both writes atomically.
-- **`absorb_agent` (merge)** — in the mutation transaction:
-  - MERGE target's `source_slice` into the surviving component's.
-  - Per `resource_id` key: union the inner arrays (dedup preserving
-    order of first appearance).
-  - Decommissioned target's `source_slice` stays frozen as a tombstone
-    (not deleted).
-- **`transfer_attributions`** — does NOT auto-touch `source_slice`.
-  Deliberately decoupled: attributions can move independently of slice
-  (e.g. a hostname attribution moves without changing which paths the
-  component owns). The SME calling `transfer_attributions` is responsible
-  for a follow-up `upsert_component` on both sides if slice changes too.
+New append-only table `proxy_audit`:
+```sql
+CREATE TABLE proxy_audit (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  survivor_id       UUID NOT NULL REFERENCES agent_runs(agent_id),
+  proxy_agent_id    UUID NOT NULL REFERENCES agent_runs(agent_id),
+  item_type         TEXT NOT NULL,   -- 'task' | 'consolidation' | 'clarification' | 'chat' | 'broadcast'
+  item_id           UUID NOT NULL,
+  action            TEXT NOT NULL,   -- 'respond' | 'close' | 'ack' | ...
+  payload_summary   JSONB NOT NULL DEFAULT '{}',
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_proxy_audit_survivor ON proxy_audit(survivor_id, created_at DESC);
+CREATE INDEX idx_proxy_audit_item     ON proxy_audit(item_type, item_id);
+```
 
-Social invariants (NOT SQL-enforced, caught at resolver-review time):
-- Exclusivity: no two active components share (resource_id, path).
-- Totality: union of all active components' slices for a given
-  resource_id should cover the parts of the resource SMEs intend to
-  represent. Uncovered parts indicate missing components; overlapping
-  parts indicate a missed consolidation.
-- Phase 4 resolver review for splits should run a lightweight check
-  via the admin-UI drift panel (future work) or by eyeballing the
-  consolidation thread.
+`proxy_items` table from the original plan is NOT created. Lifecycle
+state lives on the underlying item rows (`tasks.status`,
+`communications.acked_at`, etc.); "take over" does not exist.
 
-### Trigger Manager Additions
-- Scan consolidations for mutation: `WHERE mutation_assigned_to=agent_id AND status='M'`
-- Scan consolidations for MD verification: `WHERE status='MD'` → triggers resolver
-- Scan proxy_items: `WHERE surviving_agent_id=agent_id AND status='pending'` → include in action items for surviving agent
+### 4.1 require_active_agent helper + ContextVar (prerequisite refactor)
 
-### Proxy Item Triage Rules (enforced via system prompt, not code)
-- Tasks: review in context, close permanently if irrelevant or reopen under own agent_id
-- Chats: respond to pending admin messages
-- Broadcasts: ack inherited unacked broadcasts
-- Consolidations: continue as yourself or close if merge made them irrelevant
-- Agent reads proxy chats via get_proxy_chats() for context before triaging
+Today `status != 'decommissioned'` checks are scattered:
+- 4 duplicated `_caller` helpers in `tools/{clarification,consolidation,sleep,components}.py`
+- 6 inline SELECTs in `tools/{chat.py:18, notifications.py:44, secrets.py:20,46,64,79}`
 
-### Resolution (no new tools — uses existing Phase 2 tools)
-- Config SMEs use `upsert_attribution` to register resolved hostnames
-- All SMEs use `resolve_reference` to mark unresolved as resolved + create edge
-- re-scan unresolved table: agents use `get_unresolved` + `vector_search` + `resolve_reference`
+All 10 consolidate into `shared.actor_auth.require_active_agent(agent_id) -> dict`:
+```python
+from contextvars import ContextVar
+_PROXY_CTX: ContextVar[dict | None] = ContextVar('proxy_ctx', default=None)
 
-### Edge Discovery (no new tools — uses existing Phase 2 tools)
-- SMEs use `create_edge` with identifier, source_attr_id, target_attr_id
-- One edge per specific API call / query (UNIQUE on source_id, target_id, edge_type, identifier)
-- Bidirectional validation: check if target has matching endpoint attribution (enforced via system prompt)
+def require_active_agent(agent_id: str) -> dict:
+    ctx = _PROXY_CTX.get()
+    allow_decommissioned = bool(ctx and ctx.get('proxy_agent_id') == agent_id)
+    filter_sql = "" if allow_decommissioned else "AND status != 'decommissioned'"
+    row = execute_one(
+        f"SELECT agent_id, agent_type, status FROM agent_runs "
+        f"WHERE agent_id = %s {filter_sql}",
+        (agent_id,),
+    )
+    if row is None:
+        raise ValueError(f"Agent {agent_id} not found")
+    return row
+```
 
-### Tables Activated
-- proxy_items, broadcast_acks (broadcast_acks used by absorb_agent to find unacked broadcasts)
+Rule: any future "actor must be active" check MUST go through this
+helper. Documented at the helper's definition. Code review gate.
+
+### 4.2 Mutation MCP tools
+
+Gated on consolidation `status='M' AND mutation_assigned_to=agent_id`:
+
+- `execute_mutation(agent_id, consolidation_id)` — M→MD transition.
+- `complete_consolidation(agent_id, consolidation_id)` — MD→D (resolver-gated).
+- `absorb_agent(agent_id, target_agent_id, deactivation_reason, deactivation_notes)` — merge:
+  - Validate consolidation is in M and agent is assigned.
+  - SET target.status='decommissioned', populate the three new `agent_runs` columns in ONE UPDATE.
+  - Union source_slice: survivor's slice gets each of target's `(resource_id, paths[])` pairs merged per-key (union of arrays, dedup preserving first appearance).
+  - Target's source_slice is NOT deleted — frozen as tombstone evidence.
+- `spawn_child_agent(parent_agent_id, consolidation_id, component_data, split_briefing)` — split inside one transaction:
+  - INSERT new component (`split_from_component_id=parent_component_id`, slice = child's carve-out from `component_data.source_slice`).
+  - UPDATE parent component SET source_slice = parent minus child's share.
+  - INSERT idle agent_runs row for new SME.
+  - INSERT resource_component_agents row.
+  - SET consolidation.child_agent_id to prevent re-spawn.
+  - Auto-embed new component.
+- `transfer_attributions(agent_id, from_component_id, to_component_id, attribution_ids[])` — attribution move:
+  - Validate agent owns from_component.
+  - UPDATE attributions SET component_id=to WHERE id IN (...).
+  - Re-embed BOTH components.
+  - DOES NOT touch source_slice (intentionally decoupled — caller does follow-up `upsert_component` if slice changes).
+
+### 4.3 Proxy read tool
+
+`get_my_proxy_items(agent_id, limit=100)` — returns inherited work:
+
+```python
+# 1. Walk the reverse merged_into chain.
+#    Find all agents A where walking A.merged_into_agent_id reaches survivor.
+#    Recursive CTE bounded at depth 10.
+# 2. For each proxied agent, UNION pending work across:
+#    - tasks WHERE worker_agent_id=P AND status IN ('BW','BO')
+#    - communications WHERE to_agent=P AND type='chat' AND acked_at IS NULL
+#    - consolidations WHERE (agent_a_id=P OR agent_b_id=P) AND status NOT IN ('D','F')
+#    - clarifications WHERE (asker_agent_id=P OR responder_agent_id=P) AND status NOT IN ('CC')
+#    - broadcasts WHERE id NOT IN broadcast_acks.broadcast_id FOR P
+# 3. Enrich each row with the proxy agent's deactivation_reason/notes.
+```
+
+Response shape:
+```json
+{
+  "proxied": [{
+    "proxy_agent_id": "...",
+    "deactivation_reason": "merged",
+    "deactivation_notes": "...",
+    "merged_into_agent_id": "...",    // may equal survivor or be a hop in chain
+    "items": [{"item_type": "task", "item_id": "...", ...}]
+  }]
+}
+```
+
+### 4.4 Proxy act router
+
+`act_on_proxy_item(survivor_id, item_type, item_id, action, payload)` — the
+one sanctioned path for a survivor to act as a decommissioned agent.
+
+```python
+def act_on_proxy_item(survivor_id, item_type, item_id, action, payload):
+    require_active_agent(survivor_id)                       # R1: strict
+    proxy_agent_id = _resolve_proxy_chain(                  # R2: who owns this item
+        item_type, item_id, survivor_id                     # & is survivor reachable?
+    )
+    token = _PROXY_CTX.set({                                # R3: enter ctx
+        'proxy_agent_id': proxy_agent_id,
+        'survivor_id': survivor_id,
+    })
+    try:
+        result = _DISPATCH[(item_type, action)](            # R4: invoke public tool
+            proxy_agent_id, item_id, payload                #     with actor=proxy agent
+        )
+    finally:
+        _PROXY_CTX.reset(token)                             # R5: always reset
+    _insert_proxy_audit(                                    # R6: audit trail
+        survivor_id, proxy_agent_id,
+        item_type, item_id, action, payload,
+    )
+    return result
+```
+
+Dispatch map (one entry per public tool we allow via proxy):
+```python
+_DISPATCH = {
+  ('task',          'respond'): respond_task,
+  ('task',          'close'):   close_task,
+  ('consolidation', 'respond'): respond_consolidation,
+  ('clarification', 'respond'): respond_clarification,
+  ('chat',          'ack'):     ack_chats,
+  ('chat',          'send'):    send_chat,
+  ('broadcast',     'ack'):     ack_broadcast,
+}
+```
+
+`_resolve_proxy_chain(item_type, item_id, survivor_id)` returns the
+item's owner IFF survivor sits on the merged_into chain above the
+owner; else raises.
+
+Public tools are unchanged. All ownership/state/content validation
+fires exactly as for a direct call because `agent_id=proxy_agent_id`
+IS the original owner.
+
+### 4.5 Notifications reshape
+
+`get_notifications` + `get_detailed_notifications` response shape:
+```json
+{
+  "my":       [/* survivor's own notifications */],
+  "proxied":  [{
+    "proxy_agent_id": "...",
+    "deactivation_brief": "merged — <notes>",
+    "items": [/* same item shape as get_my_proxy_items */]
+  }]
+}
+```
+
+Not interleaved — agent sees "this is me" vs "legacy to wind down" at a glance.
+
+### 4.6 Trigger manager integration
+
+Three new scan paths:
+- `WHERE status='M' AND mutation_assigned_to=agent_id` → queue mutation
+- `WHERE status='MD'` → queue resolver for MD→D review
+- Fold `get_my_proxy_items` shape into survivor's action-items list so proxies surface on wake
+
+### 4.7 source_slice invariants (unchanged from earlier spec)
+
+Social invariants — NOT SQL-enforced, caught at resolver review:
+- Exclusivity: no two active components share `(resource_id, path)`.
+- Totality: union of all active slices covers what SMEs intend.
+- `spawn_child_agent` carves atomically; `absorb_agent` unions per-resource; `transfer_attributions` stays decoupled.
+
+### 4.8 Admin UI changes
+
+- **Communications tab** — every row authored by a decommissioned agent joins `proxy_audit ON (item_type, item_id)` to display a `via <survivor>` badge with tooltip (deactivation_brief + chain).
+- **Agent detail page** — deactivation block (reason + notes + merged_into_agent_id link) for decommissioned agents. "Follow chain" button walks to ultimate survivor.
+- **Proxy chains view** — one-page visualization: `A → B → C (active)` lineage per chain with timestamps.
+- **Action-items dashboard** — split "my" vs "inherited via proxy" buckets. Inherited items grouped by proxy agent with deactivation header.
+
+### 4.9 Testing matrix
+
+- Schema: idempotent migrations; rollback safe.
+- Helper: strict default; ContextVar match permits; mismatch forbids; concurrent proxy calls don't stomp (async/thread).
+- Mutation tools: happy paths + wrong actor + invalid state + slice merge correctness + carve-out atomicity + re-embed triggered + source_slice untouched by `transfer_attributions`.
+- Proxy read: chain depth 1/2/3; status filters per item type.
+- Proxy router: survivor strict; legitimate proxy permitted; non-proxy rejected; ctx reset on success AND exception; audit row inserted; dispatch covers all 7 entries.
+- Notifications: split-bucket shape; trigger scanner picks proxy items.
+- UI: badges render; deactivation block renders; chain view renders; bucket split works.
+
+### 4.10 Tables Activated
+- `proxy_audit` (new).
+- `broadcast_acks` (exists) — consumed by `get_my_proxy_items` for unacked broadcasts per proxied agent.
+- `proxy_items` (original spec) — NOT created.
+
+### 4.11 Implementation ordering (commit cadence)
+
+Each step → incremental commit, tests alongside code:
+
+1. Schema migrations (three `agent_runs` columns + `proxy_audit`).
+2. `require_active_agent` consolidation refactor (standalone-mergeable; groundwork).
+3. Mutation tools — `execute_mutation` + `complete_consolidation` (simplest).
+4. Mutation tool — `absorb_agent` (populates new columns, union slices).
+5. Mutation tool — `spawn_child_agent` (atomic carve-out).
+6. Mutation tool — `transfer_attributions`.
+7. `get_my_proxy_items` (read side).
+8. `act_on_proxy_item` router + dispatch map + audit inserts.
+9. Notifications reshape + trigger manager integration.
+10. Admin UI: communications badges, deactivation block, proxy chains, bucket split.
+11. Final doc + memory sync.
+
+### 4.12 Resolution & Edge Discovery (reused from Phase 2 / 3.9)
+- `resolve_reference`, `upsert_attribution` — unchanged.
+- Edge discovery uses the `upsert_edge_*` / `bind_edge` / `upsert_flow` surface shipped in 3.9. No new tools.
 
 ---
 
