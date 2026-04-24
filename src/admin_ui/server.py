@@ -66,22 +66,31 @@ def create_app() -> FastAPI:
         chain / lineage view). Deactivation columns are always returned
         for decommissioned rows so the UI can render the block inline.
         """
-        where = "" if include_decommissioned else "WHERE status != 'decommissioned'"
+        where = "WHERE 1=1" if include_decommissioned else "WHERE ar.status != 'decommissioned'"
+        # LEFT JOIN to the RCA reservation + component so SME rows carry
+        # their managed component inline. Iterators/orch/resolver have no
+        # component and come back with NULLs. Aggregating via DISTINCT ON
+        # keeps it to one row per agent even if an SME somehow has
+        # multiple (resource, component) rows.
         rows = execute(
-            f"""SELECT agent_id, agent_type, status, sleep_until, created_at,
-                       deactivation_reason, deactivation_notes, merged_into_agent_id
-               FROM agent_runs
-               {where}
-               ORDER BY
-                 CASE agent_type
-                   WHEN 'orchestrator' THEN 0
-                   WHEN 'resolver' THEN 1
-                   WHEN 'sme' THEN 2
-                   WHEN 'iterator' THEN 3
-                   ELSE 99
-                 END,
-                 created_at"""
+            f"""SELECT DISTINCT ON (ar.agent_id)
+                   ar.agent_id, ar.agent_type, ar.status, ar.sleep_until,
+                   ar.created_at, ar.deactivation_reason,
+                   ar.deactivation_notes, ar.merged_into_agent_id,
+                   c.id            AS component_id,
+                   c.canonical_name AS component_canonical,
+                   c.display_name   AS component_display,
+                   c.status         AS component_status
+                FROM agent_runs ar
+                LEFT JOIN resource_component_agents rca ON rca.agent_id = ar.agent_id
+                LEFT JOIN components c ON c.id = rca.component_id
+                {where}
+                ORDER BY ar.agent_id,
+                  CASE c.status WHEN 'active' THEN 0 WHEN 'deprecated' THEN 1 ELSE 2 END"""
         )
+        # Re-sort by type priority after DISTINCT ON (which forced agent_id order).
+        priority = {"orchestrator": 0, "resolver": 1, "sme": 2, "iterator": 3}
+        rows.sort(key=lambda r: (priority.get(r["agent_type"], 99), r["created_at"]))
         return {"agents": rows}
 
     @app.get("/api/agent/{agent_id}/chain")

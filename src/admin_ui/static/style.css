@@ -456,6 +456,24 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* Pre-demo polish: component inline tag next to agent rows + comms rows */
+.component-tag, .component-tag-inline {
+  background: #0f172a;
+  color: #67e8f9;
+  border: 1px solid #1e3a5f;
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.agent-component-row {
+  margin-top: 2px;
+  padding: 2px 0 0;
+}
+.component-tag-inline { margin-left: 4px; }
+
 .group-actions {
   display: inline-flex;
   gap: 4px;

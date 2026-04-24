@@ -183,6 +183,12 @@ function _renderAgentRow(agent, $ul) {
     : (!isDecom
         ? `<button class="row-btn row-sleep" title="Sleep ${escapeHtml(agent.agent_id)}">💤</button>`
         : '');
+  // Phase 4 pre-demo polish: show the SME's managed component inline so
+  // admin can tell "agent sme-abc-123 → Payments Service" at a glance
+  // without clicking into the graph tab.
+  const compTag = agent.component_canonical
+    ? `<span class="component-tag" title="Manages ${escapeHtml(agent.component_canonical)}">📦 ${escapeHtml(agent.component_display || agent.component_canonical)}</span>`
+    : '';
   li.innerHTML = `
     <div class="agent-row-head">
       <div class="agent-id">${escapeHtml(agent.agent_id)}</div>
@@ -193,6 +199,7 @@ function _renderAgentRow(agent, $ul) {
       ${sleepTag}
       ${mergedTag}
     </div>
+    ${compTag ? `<div class="agent-component-row">${compTag}</div>` : ''}
   `;
   // Clicking the row selects the agent for chat; clicking the sleep/wake
   // button must NOT propagate into the row-level selection handler.
@@ -585,6 +592,21 @@ async function fetchCommunications() {
   }
 }
 
+// Pre-demo polish: look up an agent's managed component for inline
+// tagging in the communications tab. Reads the same state.agents the
+// chat sidebar populates, so no extra fetches. Returns null for
+// non-SMEs + admin + unknown ids.
+function _componentLabelForAgent(agent_id) {
+  if (!agent_id || agent_id === 'admin') return null;
+  const a = state.agents.find(x => x.agent_id === agent_id);
+  if (!a || !a.component_canonical) return null;
+  return {
+    canonical: a.component_canonical,
+    display: a.component_display || a.component_canonical,
+    id: a.component_id,
+  };
+}
+
 // Phase 4: key a communication row to proxy_audit. item_id is the
 // underlying entity for consolidation/clarification/task (source_id),
 // otherwise the communication row's own id (chat/broadcast).
@@ -631,12 +653,22 @@ function renderCommunications() {
     const viaBadge = audit
       ? ` <span class="pill proxy-via" title="Proxied by ${escapeHtml(audit.survivor_id)}">via ${escapeHtml(audit.survivor_id)}</span>`
       : '';
+    // Pre-demo polish: show 📦 Component pill next to from/to when
+    // the participant is an SME with a managed component.
+    const fromComp = _componentLabelForAgent(m.from_agent);
+    const toComp = _componentLabelForAgent(m.to_agent);
+    const fromCompTag = fromComp
+      ? ` <span class="component-tag-inline" title="${escapeHtml(fromComp.canonical)}">📦 ${escapeHtml(fromComp.display)}</span>`
+      : '';
+    const toCompTag = toComp
+      ? ` <span class="component-tag-inline" title="${escapeHtml(toComp.canonical)}">📦 ${escapeHtml(toComp.display)}</span>`
+      : '';
     li.innerHTML = `
       <div class="comm-head">
         <span class="type-pill type-${m.type}">${m.type}</span>
-        <span class="from">${escapeHtml(m.from_agent)}</span>
+        <span class="from">${escapeHtml(m.from_agent)}</span>${fromCompTag}
         <span class="arrow">→</span>
-        <span class="to">${escapeHtml(commTargetLabel(m))}</span>
+        <span class="to">${escapeHtml(commTargetLabel(m))}</span>${toCompTag}
         ${state}${viaBadge}
         <span class="ts">${new Date(m.created_at).toLocaleString()}</span>
       </div>
