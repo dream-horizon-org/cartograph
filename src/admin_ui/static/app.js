@@ -483,6 +483,21 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+// Enter submits; Shift+Enter inserts a newline. Auto-grow the textarea
+// so pasted multi-line content is visible up to a reasonable cap.
+$chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    $chatForm.requestSubmit();
+  }
+});
+const _autoGrow = () => {
+  $chatInput.style.height = 'auto';
+  $chatInput.style.height = Math.min($chatInput.scrollHeight, 300) + 'px';
+};
+$chatInput.addEventListener('input', _autoGrow);
+$chatInput.addEventListener('paste', () => setTimeout(_autoGrow, 0));
+
 $chatForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = $chatInput.value.trim();
@@ -504,6 +519,7 @@ $chatForm.addEventListener('submit', async (e) => {
     state.messages.push(msg);
     state.newestTimestamp = msg.created_at;
     $chatInput.value = '';
+    $chatInput.style.height = 'auto';
     renderMessages();
     scrollToBottom();
   } finally {

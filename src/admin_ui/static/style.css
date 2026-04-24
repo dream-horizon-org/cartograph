@@ -602,6 +602,7 @@ body {
 
 #chat-form {
   display: flex;
+  align-items: flex-end;  /* button stays anchored bottom when textarea grows */
   padding: 16px;
   border-top: 1px solid #30363d;
   gap: 8px;
@@ -617,6 +618,12 @@ body {
   border-radius: 6px;
   font-size: 14px;
   outline: none;
+  font-family: inherit;
+  resize: vertical;        /* allow manual drag-resize too */
+  min-height: 42px;
+  max-height: 300px;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 #chat-input:focus {
@@ -637,6 +644,7 @@ body {
   cursor: pointer;
   font-size: 14px;
   font-weight: 500;
+  flex-shrink: 0;
 }
 
 #chat-form button:hover:not(:disabled) {

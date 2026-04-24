@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cartograph Admin</title>
-  <link rel="stylesheet" href="/style.css?v=44">
+  <link rel="stylesheet" href="/style.css?v=45">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -54,7 +54,7 @@
           <p class="empty">Select an agent on the left to start chatting.</p>
         </div>
         <form id="chat-form">
-          <input type="text" id="chat-input" placeholder="Type a message..." disabled>
+          <textarea id="chat-input" placeholder="Type a message... (Shift+Enter = newline · Enter = send)" rows="2" disabled></textarea>
           <button type="submit" disabled>Send</button>
         </form>
       </main>
@@ -252,6 +252,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=44"></script>
+  <script src="/app.js?v=45"></script>
 </body>
 </html>
