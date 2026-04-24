@@ -128,6 +128,38 @@ def _create_flows_table(cur) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_flows_outgoing ON flows(outgoing_edge_id)")
 
 
+def _create_proxy_audit_table(cur) -> None:
+    """Phase 4: append-only log of 'who acted via proxy on what.'
+
+    Every call to act_on_proxy_item writes one row. Admin UI joins this
+    against item rows authored by decommissioned agents to render a
+    via-<survivor> badge. Never updated — audit trail is immutable."""
+    # survivor_id / proxy_agent_id are TEXT to match agent_runs.agent_id.
+    # item_id is TEXT too — different item tables use TEXT IDs (tasks,
+    # communications) vs UUID (consolidations, clarifications); we store
+    # the stringified form so one table covers all.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS proxy_audit (
+          id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          survivor_id      TEXT NOT NULL REFERENCES agent_runs(agent_id),
+          proxy_agent_id   TEXT NOT NULL REFERENCES agent_runs(agent_id),
+          item_type        TEXT NOT NULL,
+          item_id          TEXT NOT NULL,
+          action           TEXT NOT NULL,
+          payload_summary  JSONB NOT NULL DEFAULT '{}',
+          created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_proxy_audit_survivor "
+        "ON proxy_audit(survivor_id, created_at DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_proxy_audit_item "
+        "ON proxy_audit(item_type, item_id)"
+    )
+
+
 def _migrate_embedding_dims(cur, target_dim: int) -> None:
     """Flip embedding columns to target_dim if they're on a different dim.
 
@@ -600,6 +632,46 @@ def run_migrations() -> None:
                      END IF;
                    END$$"""
             )
+
+            # Phase 4: proxy inheritance context on agent deactivation.
+            # When an agent is decommissioned via absorb_agent, we record
+            # who absorbed them (single-hop pointer — chains walked not
+            # flattened), the reason, and a brief. get_my_proxy_items
+            # walks these pointers transitively; proxy_audit logs who
+            # ACTUALLY acted via proxy.
+            cur.execute(
+                "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS deactivation_reason TEXT"
+            )
+            cur.execute(
+                "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS deactivation_notes TEXT"
+            )
+            # agent_runs.agent_id is TEXT (session-scoped string), not UUID,
+            # so the self-referential pointer stays TEXT.
+            cur.execute(
+                "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS merged_into_agent_id TEXT"
+            )
+            # Self-referential FK — needs a named constraint so the IF NOT
+            # EXISTS dance via pg_constraint works idempotently.
+            cur.execute(
+                """DO $$
+                   BEGIN
+                     IF NOT EXISTS (
+                       SELECT 1 FROM pg_constraint
+                       WHERE conname = 'agent_runs_merged_into_fk'
+                     ) THEN
+                       ALTER TABLE agent_runs ADD CONSTRAINT agent_runs_merged_into_fk
+                         FOREIGN KEY (merged_into_agent_id)
+                         REFERENCES agent_runs(agent_id) ON DELETE SET NULL;
+                     END IF;
+                   END$$"""
+            )
+            # Walk this pointer bottom-up in get_my_proxy_items.
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_agent_runs_merged_into "
+                "ON agent_runs(merged_into_agent_id) WHERE merged_into_agent_id IS NOT NULL"
+            )
+
+            _create_proxy_audit_table(cur)
 
             # --- Indexes ---
             _create_indexes(cur)
