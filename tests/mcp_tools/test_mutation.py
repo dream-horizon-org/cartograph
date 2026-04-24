@@ -558,6 +558,36 @@ def test_spawn_with_transfer_edge_ids_moves_edges(agent_factory):
     assert str(row["to_component_id"]) == str(result["child_component_id"])
 
 
+def test_spawn_with_transfer_attribution_ids_moves_attrs(agent_factory):
+    """Phase 4.2: split demo surfaced that hostname attributions
+    semantically belonging to the child were stranded on the parent.
+    Fix: transfer_attribution_ids param on spawn_child_agent."""
+    s = _m_state_split(agent_factory)
+    ra = s["res_a"]
+    execute_mutate(
+        "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
+        (json.dumps({ra: {"paths": ["x/", "y/"]}}), s["comp_a"]),
+    )
+    attr = execute_one(
+        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
+           VALUES (%s, 'github', 'hostname', 'payments.internal.demo41') RETURNING id""",
+        (s["comp_a"],),
+    )
+    result = mutation.spawn_child_agent(
+        "sme-a", s["cons_id"], "sme-child",
+        {"canonical_name": "o/c", "display_name": "c",
+         "component_type": "application"},
+        {ra: {"paths": ["y/"]}},
+        "carve y/",
+        transfer_attribution_ids=[str(attr["id"])],
+    )
+    assert result["transferred_attributions"] == 1
+    row = execute_one(
+        "SELECT component_id FROM attributions WHERE id=%s", (attr["id"],)
+    )
+    assert str(row["component_id"]) == str(result["child_component_id"])
+
+
 def test_spawn_with_transfer_flow_ids_moves_flows(agent_factory):
     s = _m_state_split(agent_factory)
     ra = s["res_a"]

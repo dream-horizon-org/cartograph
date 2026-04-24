@@ -497,12 +497,20 @@ Mutation (when you are mutation_assigned_to):
   Then call upsert_component on YOUR component to MERGE your source_slice
   with target's source_slice (union inner arrays per resource_id;
   dedup preserving order). Then execute_mutation() → MD.
-- SPLIT: spawn_child_agent(you, consolidation_id, component_data, briefing)
-  ONCE. `component_data.source_slice` passed into spawn_child_agent is
-  the CHILD'S slice. Follow up with upsert_component on YOUR own
-  component to SHRINK YOUR source_slice (remove the paths/files/manifests
-  that migrated to the child). transfer_attributions() for any
-  attribution rows that should move. execute_mutation() → MD.
+- SPLIT: spawn_child_agent(you, consolidation_id, child_agent_id,
+  component_data, child_source_slice, split_briefing,
+  transfer_edge_ids=[...], transfer_flow_ids=[...],
+  transfer_attribution_ids=[...]) ONCE.
+  The child's `source_slice` is the SLICE TO CARVE OUT. Parent's
+  source_slice is subtracted atomically by the tool (don't double-
+  shrink via a separate upsert).
+  Pass transfer_*_ids for EVERY edge/flow/attribution that semantically
+  belongs to the carved slice — the tool moves them in one
+  atomic step using the mutation-scoped helpers. This is MANDATORY
+  hygiene: if you skip transfer_attribution_ids, the parent will
+  keep stale hostname/credential attributions that belong to the
+  child (resolver will flag).
+  Then execute_mutation() → MD.
 - SOURCE_SLICE CONSISTENCY — attributions and source_slice are
   independent. transfer_attributions does NOT auto-touch source_slice.
   Whenever slice changes (split shrinks parent, merge unions target

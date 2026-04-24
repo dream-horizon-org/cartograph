@@ -351,6 +351,7 @@ def spawn_child_agent(
     split_briefing: str,
     transfer_edge_ids: list[str] | None = None,
     transfer_flow_ids: list[str] | None = None,
+    transfer_attribution_ids: list[str] | None = None,
 ) -> dict:
     """SPLIT: carve out a new component + new SME from the caller's scope.
 
@@ -537,13 +538,14 @@ def spawn_child_agent(
         (agent_id, child_agent_id, welcome_description),
     )
 
-    # 8. Phase 4.1: optional atomic transfers of edges + flows into the
-    #    child. Caller supplies the specific IDs (the parent knows
-    #    which edges/flows belong to the carved slice). Uses the
-    #    mutation-scoped helpers — same gate re-runs for audit uniformity.
+    # 8. Phase 4.1+: optional atomic transfers of edges/flows/attributions
+    #    into the child. Caller supplies the specific IDs (the parent knows
+    #    which belong to the carved slice). Uses the mutation-scoped
+    #    helpers — same gate re-runs for audit uniformity.
     transferred_edges = 0
     collapsed_edges = 0
     transferred_flows = 0
+    transferred_attributions = 0
     if transfer_edge_ids:
         r = transfer_edges(
             agent_id, consolidation_id, list(transfer_edge_ids),
@@ -554,6 +556,12 @@ def spawn_child_agent(
     if transfer_flow_ids:
         r = transfer_flows(agent_id, consolidation_id, list(transfer_flow_ids))
         transferred_flows = r["transferred"]
+    if transfer_attribution_ids:
+        r = transfer_attributions(
+            agent_id, consolidation_id, list(transfer_attribution_ids),
+            parent_component_id, child_component_id,
+        )
+        transferred_attributions = r["transferred"]
 
     return {
         "child_agent_id": child_agent_id,
@@ -564,6 +572,7 @@ def spawn_child_agent(
         "transferred_edges": transferred_edges,
         "collapsed_edges": collapsed_edges,
         "transferred_flows": transferred_flows,
+        "transferred_attributions": transferred_attributions,
     }
 
 

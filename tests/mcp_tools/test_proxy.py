@@ -267,6 +267,29 @@ def test_act_on_proxy_context_is_reset_after_call(agent_factory):
     assert get_proxy_context() is None
 
 
+# ---------- Phase 4.2: include_empty flag ----------
+
+def test_get_my_proxy_items_default_hides_empty_groups(agent_factory):
+    _merge_and_absorb(agent_factory)
+    # No pending items on sme-b → default filters it out.
+    out = proxy.get_my_proxy_items("sme-a")
+    assert out == {"proxied": []}
+
+
+def test_get_my_proxy_items_include_empty_surfaces_chain(agent_factory):
+    """Phase 4.2: include_empty=True surfaces every hop in the merge
+    chain regardless of inbox state. Unblocks audit / verification
+    views where chain visibility matters more than actionable items."""
+    _merge_and_absorb(agent_factory)
+    out = proxy.get_my_proxy_items("sme-a", include_empty=True)
+    assert len(out["proxied"]) == 1
+    g = out["proxied"][0]
+    assert g["proxy_agent_id"] == "sme-b"
+    assert g["depth"] == 1
+    # Items bucket still present (all empty lists).
+    assert all(v == [] for v in g["items"].values())
+
+
 def test_act_on_proxy_context_resets_even_on_exception(agent_factory):
     """If underlying tool raises, ContextVar must still reset."""
     from shared.actor_auth import get_proxy_context

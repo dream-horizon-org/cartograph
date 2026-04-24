@@ -78,7 +78,11 @@ def _proxied_agents(survivor_id: str) -> list[dict]:
     return rows
 
 
-def get_my_proxy_items(agent_id: str, limit_per_type: int = 50) -> dict:
+def get_my_proxy_items(
+    agent_id: str,
+    limit_per_type: int = 50,
+    include_empty: bool = False,
+) -> dict:
     """Return the survivor's full inherited work inbox.
 
     Response shape:
@@ -102,7 +106,12 @@ def get_my_proxy_items(agent_id: str, limit_per_type: int = 50) -> dict:
           ]
         }
 
-    Empty-inbox proxy agents are omitted entirely (not {items: {}} noise).
+    By default, empty-inbox proxy agents are omitted (keeps the survivor's
+    wake-up inbox clean — no noise from dead agents with nothing to do).
+    Pass `include_empty=True` to force the full transitive chain into the
+    response regardless of inbox state — useful for audit/verification
+    views (admin UI, demo scorecards) that need to see who-is-chained-to-who
+    independent of pending work.
     """
     require_active_agent(agent_id)
     agents = _proxied_agents(agent_id)
@@ -163,7 +172,7 @@ def get_my_proxy_items(agent_id: str, limit_per_type: int = 50) -> dict:
             ),
         }
         total = sum(len(v) for v in items.values())
-        if total == 0:
+        if total == 0 and not include_empty:
             continue
         out.append({
             "proxy_agent_id": pid,

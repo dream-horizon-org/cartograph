@@ -75,10 +75,10 @@ def _get_agent_type(agent_id: str) -> str:
 # ============ ACTION ITEMS ============
 
 @mcp.tool()
-def get_action_items_summary(agent_id: str) -> dict[str, Any]:
+def get_action_items_summary(agent_id: str):
     """Quick counts of all pending action items for this agent.
 
-    Returns keys:
+    Returns a dict with keys:
       - consolidations_pending, tasks_pending, clarifications_pending,
         unacked_chats, unacked_broadcasts (ints)
       - proxied (list): Phase 4 — per-proxy-agent groups of inherited
@@ -89,6 +89,11 @@ def get_action_items_summary(agent_id: str) -> dict[str, Any]:
 
     Call this FIRST on every wake-up to see what needs attention.
     """
+    # Return type intentionally un-annotated — FastMCP's auto schema
+    # generation on `dict[str, Any]` still produces a strict DictModel
+    # in some code paths (Phase 4 demo surfaced this: int type inferred
+    # from sibling fields gets applied to proxied list too). Bare omit
+    # of the return type is the documented escape hatch.
     agent_type = _get_agent_type(agent_id)
     return action_items.get_action_items_summary(agent_id, agent_type)
 
@@ -861,13 +866,21 @@ def review_consolidation(
 def get_my_proxy_items(
     agent_id: str,
     limit_per_type: int = 50,
-) -> dict[str, Any]:
-    """Phase 4. Return inherited work inbox for a survivor: all pending
-    tasks / chats / consolidations / clarifications / broadcasts owned by
-    any agent in the survivor's transitive merge-chain (walked via
-    agent_runs.merged_into_agent_id). Grouped by proxy agent, with
-    deactivation_reason + notes + chain depth per group."""
-    return proxy_tool.get_my_proxy_items(agent_id, limit_per_type)
+    include_empty: bool = False,
+):
+    """Phase 4 + 4.2. Return inherited work inbox for a survivor: all
+    pending tasks / chats / consolidations / clarifications / broadcasts
+    owned by any agent in the survivor's transitive merge-chain (walked
+    via agent_runs.merged_into_agent_id). Grouped by proxy agent with
+    deactivation_reason + notes + chain depth per group.
+
+    By default (include_empty=False) drops proxy groups with zero
+    pending items — keeps the survivor's wake-up inbox clean. Pass
+    include_empty=True to force the full transitive chain into the
+    response regardless of inbox state (for audit / verification)."""
+    return proxy_tool.get_my_proxy_items(
+        agent_id, limit_per_type, include_empty,
+    )
 
 
 @mcp.tool()
@@ -882,9 +895,23 @@ def act_on_proxy_item(
     owner. Router validates survivor is a legal proxy, invokes the
     existing public tool with actor=proxy_agent_id under a ContextVar
     that only relaxes the actor-active check for that exact agent.
-    Writes a proxy_audit row on success. Supported (item_type, action):
-    (task,respond), (clarification,respond), (consolidation,respond),
-    (chat,ack), (chat,send), (broadcast,ack)."""
+    Writes a proxy_audit row on success.
+
+    Supported (item_type, action) + required payload keys:
+      ('task', 'respond'):
+          payload = {"message": str, "new_status": str, "blocker_detail": str?}
+      ('clarification', 'respond'):
+          payload = {"message": str, "new_status": str}
+      ('consolidation', 'respond'):
+          payload = {"confidence": float, "message": str, "new_status": str}
+      ('chat', 'ack'):
+          payload = {}   (item_id is the communication row being acked)
+      ('chat', 'send'):
+          payload = {"proxy_agent_id": str, "to_agent_id": str, "message": str}
+          (item_id is ignored for chat.send — just pass any UUID)
+      ('broadcast', 'ack'):
+          payload = {"proxy_agent_id": str}   (item_id is broadcast comm row)
+    """
     return proxy_tool.act_on_proxy_item(
         survivor_id, item_type, item_id, action, payload,
     )
@@ -924,18 +951,20 @@ def spawn_child_agent(
     split_briefing: str,
     transfer_edge_ids: list[str] | None = None,
     transfer_flow_ids: list[str] | None = None,
+    transfer_attribution_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Phase 4 + 4.1. SPLIT: carve a new component + idle SME out of the
-    caller's component. Child source_slice is subtracted atomically.
-    Phase 4.1: requires parent's top-level components.source_slice to
-    be non-empty (strict guard against the metadata-stash gotcha).
-    Also creates a [split-welcome] BW task for the child carrying its
-    component_id + split_briefing. Optionally transfers edges + flows
-    into the child via the mutation-scoped helpers."""
+    """Phase 4 + 4.1 + 4.2. SPLIT: carve a new component + idle SME out
+    of the caller's component. Child source_slice is subtracted
+    atomically. Phase 4.1 added: strict top-level source_slice guard,
+    [split-welcome] BW task, optional edge + flow transfers.
+    Phase 4.2 adds: transfer_attribution_ids for moving attributions
+    whose evidence belongs to the carved slice (parallels edges/flows).
+    Without this, split parents end up carrying stale attributions
+    semantically owned by the child."""
     return mutation_tool.spawn_child_agent(
         agent_id, consolidation_id, child_agent_id,
         child_component_data, child_source_slice, split_briefing,
-        transfer_edge_ids, transfer_flow_ids,
+        transfer_edge_ids, transfer_flow_ids, transfer_attribution_ids,
     )
 
 
