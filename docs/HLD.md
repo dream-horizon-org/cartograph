@@ -1100,7 +1100,39 @@ agent_runs  (Phase 4 deactivation fields)
                         transitive inheritance chains)
 ```
 
-### 8.3 Embedding Strategy
+### 8.3 Status semantics — what each `status` column gates
+
+Three status columns, three different jobs. This is the locked model as of Phase 4.1.
+
+**`resources.status`** — spawn-queue + soft-delete.
+
+| Value | Gates |
+|-------|-------|
+| `pending` | Claimable by `bulk_spawn_smes` (`WHERE status='pending'`) |
+| `assigned` | Reservation; prevents double-spawn |
+| `rejected` | **Soft-delete** — excluded from `resources_live_unique` partial index (allows re-insert of same identifier) + hidden from default list reads |
+| `done` | Cosmetic/dashboard only — **no scanner or gate reads it** |
+
+**`components.status`** — write-authorization + reachability gate.
+
+| Value | Gates |
+|-------|-------|
+| `active` | Default. Ownership (`_component_of_agent`), `bind_edge` target validation, `get_my_components`, graph viz — all require active. |
+| `decommissioned` | Hidden from SME reads + admin graph viz + every ownership lookup. Surfaced proactively by `get_stale_edges` / `get_stale_flows` with survivor pointer for re-bind. Written by `absorb_agent` (merge target) + `decommission_component`. |
+| `deprecated` | Reserved in CHECK; not used actively. |
+
+**`agent_runs.status`** — the system-wide authorization boundary.
+
+| Value | Gates |
+|-------|-------|
+| `idle` | **Only** claim target for trigger manager. Without idle → agent cannot be woken. |
+| `running` | In-flight lock; stale-lock detection scans on this. |
+| `errored` | Auto-recovery scanner target (bounded retries). |
+| `decommissioned` | Hidden from EVERY MCP tool via `shared.require_active_agent`. The `_PROXY_CTX` ContextVar is the only sanctioned bypass, used exclusively by `act_on_proxy_item`. |
+
+Rule of thumb: `resources` gates who gets spawned. `components` gates who can write against it. `agent_runs` gates who can call any tool at all.
+
+### 8.4 Embedding Strategy
 
 Embeddings generated at write time via `cartograph-db` MCP. No batch step.
 
