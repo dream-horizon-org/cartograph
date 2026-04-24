@@ -12,6 +12,7 @@ from trigger_management.scanners import (
     consolidations,
     clarifications,
     auto_transitions,
+    proxies,
     recovery,
 )
 
@@ -47,6 +48,8 @@ def has_pending_items(agent_id: str, agent_type: str) -> bool:
     if consolidations.scan(agent_id, agent_type) > 0:
         return True
     if clarifications.scan(agent_id) > 0:
+        return True
+    if proxies.scan(agent_id) > 0:
         return True
     return False
 

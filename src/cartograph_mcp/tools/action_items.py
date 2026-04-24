@@ -66,13 +66,34 @@ def _count_unacked_broadcasts(agent_id: str, agent_type: str) -> int:
 
 
 def get_action_items_summary(agent_id: str, agent_type: str) -> dict:
-    """Quick counts of everything pending for this agent."""
+    """Quick counts of everything pending for this agent.
+
+    Phase 4: includes a `proxied` bucket if the survivor has inherited
+    work from any decommissioned agent in their merge chain. Counts are
+    per-proxy-agent so the agent sees "3 unacked chats from merged-in X,
+    1 pending task from merged-in Y" — not a blended blob. Keeps the
+    "wind down old identities, then act fresh" triage model clean.
+    """
+    # Lazy-import to avoid a circular dep (proxy imports from tools/ too).
+    from cartograph_mcp.tools import proxy as proxy_tool
+    proxied_groups = proxy_tool.get_my_proxy_items(agent_id).get("proxied", [])
+    proxied_counts = [
+        {
+            "proxy_agent_id": g["proxy_agent_id"],
+            "deactivation_reason": g["deactivation_reason"],
+            "deactivation_notes": g["deactivation_notes"],
+            "depth": g["depth"],
+            "counts": {k: len(v) for k, v in g["items"].items()},
+        }
+        for g in proxied_groups
+    ]
     return {
         "consolidations_pending": _count_consolidations(agent_id, agent_type),
         "tasks_pending": _count_tasks(agent_id),
         "clarifications_pending": _count_clarifications(agent_id),
         "unacked_chats": _count_unacked_chats(agent_id),
         "unacked_broadcasts": _count_unacked_broadcasts(agent_id, agent_type),
+        "proxied": proxied_counts,
     }
 
 
@@ -132,11 +153,22 @@ def _get_unacked_broadcast_details(agent_id: str, agent_type: str) -> list[dict]
 
 
 def get_action_items_detail(agent_id: str, agent_type: str) -> dict:
-    """Full rows for every pending item across all categories."""
+    """Full rows for every pending item across all categories.
+
+    Phase 4: response has two separate buckets — `my` (survivor's own
+    pending work) and `proxied` (work inherited from decommissioned
+    agents via merge-chain). Never interleaved — that matches the
+    "this is me vs legacy to wind down" mental model.
+    """
+    from cartograph_mcp.tools import proxy as proxy_tool
+    proxied = proxy_tool.get_my_proxy_items(agent_id).get("proxied", [])
     return {
-        "consolidations": _get_consolidation_details(agent_id, agent_type),
-        "tasks": _get_task_details(agent_id),
-        "clarifications": _get_clarification_details(agent_id),
-        "chats": _get_unacked_chat_details(agent_id),
-        "broadcasts": _get_unacked_broadcast_details(agent_id, agent_type),
+        "my": {
+            "consolidations": _get_consolidation_details(agent_id, agent_type),
+            "tasks": _get_task_details(agent_id),
+            "clarifications": _get_clarification_details(agent_id),
+            "chats": _get_unacked_chat_details(agent_id),
+            "broadcasts": _get_unacked_broadcast_details(agent_id, agent_type),
+        },
+        "proxied": proxied,
     }
