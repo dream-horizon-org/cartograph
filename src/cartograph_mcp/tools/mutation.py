@@ -349,22 +349,32 @@ def spawn_child_agent(
     child_component_data: dict,
     child_source_slice: dict,
     split_briefing: str,
+    transfer_edge_ids: list[str] | None = None,
+    transfer_flow_ids: list[str] | None = None,
 ) -> dict:
     """SPLIT: carve out a new component + new SME from the caller's scope.
 
     Atomic within its scope. Effects:
       1. INSERT new component with split_from_component_id = parent's,
-         source_slice = `child_source_slice`, + the rest from
-         child_component_data (canonical_name, display_name, component_type, ...).
+         source_slice = `child_source_slice`.
       2. UPDATE parent component: source_slice = parent_slice MINUS child_slice.
       3. INSERT child_agent_id into agent_runs as an idle SME.
-      4. INSERT resource_component_agents for the child (one per resource the
-         child's slice covers).
-      5. SET consolidations.child_agent_id = child_agent_id (block re-spawn).
+      4. INSERT resource_component_agents for the child.
+      5. SET consolidations.child_agent_id to block re-spawn.
       6. Auto-embed the new component.
+      7. (Phase 4.1) Create a BW "[split-welcome]" task for the child
+         with component_id + split_briefing in the description so the
+         child wakes with visible context (fixes the "child doesn't
+         know their component" gap).
+      8. (Phase 4.1) Transfer specified edge_ids + flow_ids to the
+         child via the mutation-scoped transfer tools.
 
-    Idempotency: consolidation.child_agent_id blocks re-spawn. Caller re-runs
-    safely if consolidation.child_agent_id IS NULL only.
+    Phase 4.1 tightens parent-slice validation: requires the top-level
+    components.source_slice column to be non-empty (previously fell
+    back to empty carve when agents stashed slice in metadata).
+
+    Idempotency: consolidation.child_agent_id blocks re-spawn. Caller
+    re-runs safely only while child_agent_id IS NULL.
     """
     cons = _assert_mutation_gate(agent_id, consolidation_id)
     if cons["nomination_type"] != "split":
@@ -389,6 +399,22 @@ def spawn_child_agent(
     if not parent_component_id:
         raise ValueError(
             f"Parent agent {agent_id} owns no active component — cannot split"
+        )
+
+    # Phase 4.1 hardening: verify the parent's TOP-LEVEL source_slice
+    # column is populated. The demo-POC gotcha was agents stashing
+    # slice in metadata.source_slice; the carve below reads the column,
+    # would see NULL, and emit an empty new_parent_slice silently.
+    _parent_slice_row = execute_one(
+        "SELECT source_slice FROM components WHERE id = %s",
+        (parent_component_id,),
+    )
+    if not _parent_slice_row or not _parent_slice_row["source_slice"]:
+        raise ValueError(
+            f"Parent component {parent_component_id} has no source_slice set "
+            f"at the top-level components.source_slice column. Call "
+            f"upsert_component with source_slice={{<resource_id>: {{...}}}} "
+            f"first — stashing slice inside metadata will not work."
         )
 
     # 1. Insert the child component with split_from pointer + child slice.
@@ -497,11 +523,47 @@ def spawn_child_agent(
     except Exception:
         pass  # embedding is best-effort; absent vectors just skip vector_search hits
 
+    # 7. Phase 4.1 welcome task: hand the child their component_id +
+    #    split_briefing via a BW task. Without this, the child wakes
+    #    with no context — their new component exists but they can't
+    #    find it without calling get_my_components (added in 4.1.7).
+    welcome_description = (
+        f"[split-welcome] component_id={child_component_id}\n\n"
+        f"{split_briefing}"
+    )
+    execute_mutate(
+        """INSERT INTO tasks (owner_agent_id, worker_agent_id, description, status)
+           VALUES (%s, %s, %s, 'BW')""",
+        (agent_id, child_agent_id, welcome_description),
+    )
+
+    # 8. Phase 4.1: optional atomic transfers of edges + flows into the
+    #    child. Caller supplies the specific IDs (the parent knows
+    #    which edges/flows belong to the carved slice). Uses the
+    #    mutation-scoped helpers — same gate re-runs for audit uniformity.
+    transferred_edges = 0
+    collapsed_edges = 0
+    transferred_flows = 0
+    if transfer_edge_ids:
+        r = transfer_edges(
+            agent_id, consolidation_id, list(transfer_edge_ids),
+            direction="both",
+        )
+        transferred_edges = r["transferred"]
+        collapsed_edges = r["collapsed"]
+    if transfer_flow_ids:
+        r = transfer_flows(agent_id, consolidation_id, list(transfer_flow_ids))
+        transferred_flows = r["transferred"]
+
     return {
         "child_agent_id": child_agent_id,
         "child_component_id": child_component_id,
         "parent_component_id": parent_component_id,
         "new_parent_slice": new_parent_slice,
+        "welcome_task_created": True,
+        "transferred_edges": transferred_edges,
+        "collapsed_edges": collapsed_edges,
+        "transferred_flows": transferred_flows,
     }
 
 

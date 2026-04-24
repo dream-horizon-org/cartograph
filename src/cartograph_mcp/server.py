@@ -920,13 +920,20 @@ def spawn_child_agent(
     child_component_data: dict[str, Any],
     child_source_slice: dict[str, Any],
     split_briefing: str,
+    transfer_edge_ids: list[str] | None = None,
+    transfer_flow_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Phase 4. SPLIT: carve a new component + idle SME out of the caller's
-    component. Child source_slice is subtracted from parent atomically.
-    Consolidation.child_agent_id prevents duplicate spawns."""
+    """Phase 4 + 4.1. SPLIT: carve a new component + idle SME out of the
+    caller's component. Child source_slice is subtracted atomically.
+    Phase 4.1: requires parent's top-level components.source_slice to
+    be non-empty (strict guard against the metadata-stash gotcha).
+    Also creates a [split-welcome] BW task for the child carrying its
+    component_id + split_briefing. Optionally transfers edges + flows
+    into the child via the mutation-scoped helpers."""
     return mutation_tool.spawn_child_agent(
         agent_id, consolidation_id, child_agent_id,
         child_component_data, child_source_slice, split_briefing,
+        transfer_edge_ids, transfer_flow_ids,
     )
 
 

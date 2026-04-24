@@ -481,6 +481,128 @@ def test_spawn_requires_non_empty_slice(agent_factory):
         )
 
 
+# ---------- 4.1.4 hardening ----------
+
+
+def test_spawn_requires_parent_top_level_source_slice(agent_factory):
+    """Parent MUST have components.source_slice populated at the
+    top-level column. Pre-4.1 this could silently carve empty if agents
+    stashed slice under metadata. Post-4.1 it raises explicitly."""
+    s = _m_state_split(agent_factory)  # parent has no slice set
+    with pytest.raises(ValueError, match="top-level components.source_slice"):
+        mutation.spawn_child_agent(
+            "sme-a", s["cons_id"], "sme-child",
+            {"canonical_name": "o/c", "display_name": "c",
+             "component_type": "application"},
+            {str(s["res_a"]): {"paths": ["x/"]}},
+            "split",
+        )
+
+
+def test_spawn_welcome_task_created(agent_factory):
+    s = _m_state_split(agent_factory)
+    ra = s["res_a"]
+    execute_mutate(
+        "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
+        (json.dumps({ra: {"paths": ["x/", "y/"]}}), s["comp_a"]),
+    )
+    result = mutation.spawn_child_agent(
+        "sme-a", s["cons_id"], "sme-child",
+        {"canonical_name": "o/c", "display_name": "c",
+         "component_type": "application"},
+        {ra: {"paths": ["y/"]}},
+        "carve y/ into its own component",
+    )
+    child_comp = result["child_component_id"]
+    # Welcome task exists: owner=parent, worker=child, BW.
+    task = execute_one(
+        "SELECT * FROM tasks WHERE worker_agent_id='sme-child'"
+    )
+    assert task is not None
+    assert task["owner_agent_id"] == "sme-a"
+    assert task["status"] == "BW"
+    assert "[split-welcome]" in task["description"]
+    assert child_comp in task["description"]
+    assert "carve y/" in task["description"]
+    assert result["welcome_task_created"] is True
+
+
+def test_spawn_with_transfer_edge_ids_moves_edges(agent_factory):
+    s = _m_state_split(agent_factory)
+    ra = s["res_a"]
+    execute_mutate(
+        "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
+        (json.dumps({ra: {"paths": ["x/", "y/"]}}), s["comp_a"]),
+    )
+    # Seed a catalog edge on parent — this represents an endpoint on y/
+    # that should move to the child.
+    cat = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (NULL, %s, 'calls', 'POST /y', 'test') RETURNING id""",
+        (s["comp_a"],),
+    )
+    result = mutation.spawn_child_agent(
+        "sme-a", s["cons_id"], "sme-child",
+        {"canonical_name": "o/c", "display_name": "c",
+         "component_type": "application"},
+        {ra: {"paths": ["y/"]}},
+        "carve y/",
+        transfer_edge_ids=[str(cat["id"])],
+    )
+    assert result["transferred_edges"] == 1
+    # Catalog now points at the child component.
+    row = execute_one(
+        "SELECT to_component_id FROM edges WHERE id=%s", (cat["id"],)
+    )
+    assert str(row["to_component_id"]) == str(result["child_component_id"])
+
+
+def test_spawn_with_transfer_flow_ids_moves_flows(agent_factory):
+    s = _m_state_split(agent_factory)
+    ra = s["res_a"]
+    execute_mutate(
+        "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
+        (json.dumps({ra: {"paths": ["x/", "y/"]}}), s["comp_a"]),
+    )
+    cat = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (NULL, %s, 'calls', 'POST /y', 'test') RETURNING id""",
+        (s["comp_a"],),
+    )
+    ds = execute_one(
+        """INSERT INTO components (canonical_name, display_name, component_type)
+           VALUES ('o/down', 'down', 'application') RETURNING id"""
+    )
+    out = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'GET /down', 'test') RETURNING id""",
+        (s["comp_a"], ds["id"]),
+    )
+    flow = execute_one(
+        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+                              discovered_by)
+           VALUES (%s, %s, %s, 'test') RETURNING id""",
+        (s["comp_a"], cat["id"], out["id"]),
+    )
+    # Transfer both edges (so flow refs are still valid at target) + the flow.
+    result = mutation.spawn_child_agent(
+        "sme-a", s["cons_id"], "sme-child",
+        {"canonical_name": "o/c", "display_name": "c",
+         "component_type": "application"},
+        {ra: {"paths": ["y/"]}},
+        "carve y/",
+        transfer_edge_ids=[str(cat["id"]), str(out["id"])],
+        transfer_flow_ids=[str(flow["id"])],
+    )
+    assert result["transferred_edges"] == 2
+    assert result["transferred_flows"] == 1
+    row = execute_one("SELECT component_id FROM flows WHERE id=%s", (flow["id"],))
+    assert str(row["component_id"]) == str(result["child_component_id"])
+
+
 # ========================== transfer_attributions ==========================
 
 
