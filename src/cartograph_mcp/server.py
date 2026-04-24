@@ -75,11 +75,17 @@ def _get_agent_type(agent_id: str) -> str:
 # ============ ACTION ITEMS ============
 
 @mcp.tool()
-def get_action_items_summary(agent_id: str) -> dict[str, int]:
+def get_action_items_summary(agent_id: str) -> dict[str, Any]:
     """Quick counts of all pending action items for this agent.
 
-    Returns a dict with keys: consolidations_pending, tasks_pending,
-    clarifications_pending, unacked_chats, unacked_broadcasts.
+    Returns keys:
+      - consolidations_pending, tasks_pending, clarifications_pending,
+        unacked_chats, unacked_broadcasts (ints)
+      - proxied (list): Phase 4 — per-proxy-agent groups of inherited
+        work from decommissioned agents merged into the caller. Each
+        entry: {proxy_agent_id, deactivation_reason, deactivation_notes,
+        depth, counts: {tasks, chats, consolidations, clarifications,
+        broadcasts}}.
 
     Call this FIRST on every wake-up to see what needs attention.
     """

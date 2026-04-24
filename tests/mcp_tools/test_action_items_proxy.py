@@ -126,3 +126,28 @@ def test_trigger_scanner_returns_zero_for_non_survivor(agent_factory):
     from trigger_management.scanners import proxies
     agent_factory("lone", "sme")
     assert proxies.scan("lone") == 0
+
+
+# ---------- 4.1.1 — pydantic schema regression ----------
+
+def test_summary_response_is_valid_against_mcp_tool_return_type(agent_factory):
+    """The MCP wrapper declares dict[str, Any] for get_action_items_summary
+    so pydantic accepts both int counts and the proxied list bucket in
+    the same response. Regression guard for the demo-run blocker where
+    dict[str, int] couldn't serialize the proxied list."""
+    _merge_and_absorb(agent_factory)
+    execute_mutate(
+        """INSERT INTO tasks (owner_agent_id, worker_agent_id, description, status)
+           VALUES ('admin', 'sme-b', 'inherited', 'BW')"""
+    )
+    out = action_items.get_action_items_summary("sme-a", "sme")
+    # Legacy int fields present + list proxied coexist.
+    assert isinstance(out["tasks_pending"], int)
+    assert isinstance(out["proxied"], list)
+    assert len(out["proxied"]) == 1
+    # Pydantic-like structural check on the proxied entry.
+    group = out["proxied"][0]
+    for k in ("proxy_agent_id", "deactivation_reason",
+              "deactivation_notes", "depth", "counts"):
+        assert k in group
+    assert isinstance(group["counts"], dict)
