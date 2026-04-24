@@ -707,6 +707,15 @@ def run_migrations() -> None:
                    END$$"""
             )
 
+            # Phase 4.1: consolidations.metadata JSONB for structured
+            # demo-tagging, evidence blobs, cosine scores cited, etc.
+            # Defaults to empty dict; caller populates via
+            # nominate_consolidation(metadata={...}).
+            cur.execute(
+                "ALTER TABLE consolidations ADD COLUMN IF NOT EXISTS "
+                "metadata JSONB NOT NULL DEFAULT '{}'"
+            )
+
             # --- Indexes ---
             _create_indexes(cur)
 

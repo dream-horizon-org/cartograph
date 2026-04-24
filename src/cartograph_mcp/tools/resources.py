@@ -10,6 +10,7 @@ Orchestrator reads: list_all_resources, get_resource_counts.
 Any agent: get_resource by id.
 """
 
+from shared.actor_auth import require_active_agent
 from shared.db import execute, execute_one, execute_returning, execute_mutate
 
 
@@ -505,16 +506,18 @@ def bulk_spawn_smes(
 
 
 def mark_resource_done(agent_id: str, resource_id: str) -> dict:
-    """Mark a resource as fully processed. Called by SME when materialisation completes.
+    """Mark a resource as fully processed. Called by SME when
+    materialisation of THEIR slice completes.
 
-    Validates: agent is the SME assigned to this resource via resource_component_agents.
+    Phase 4.1 note: resources.status='done' is cosmetic/dashboard — no
+    scanner or trigger gates on it. In split scenarios where parent +
+    child share the resource_id, the parent marks done after their
+    slice; child later calls this idempotently when their slice is
+    done. No error either way (UPDATE is noop-safe).
+
+    Validates: agent is the SME assigned to this resource via RCA.
     """
-    caller = execute_one(
-        "SELECT agent_type FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
-        (agent_id,),
-    )
-    if caller is None:
-        raise ValueError(f"Agent {agent_id} not found")
+    caller = require_active_agent(agent_id)
     if caller["agent_type"] != "sme":
         raise ValueError("Only SMEs can mark resources as done")
 

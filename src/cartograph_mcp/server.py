@@ -795,14 +795,16 @@ def nominate_consolidation(
     nomination_type: str,
     confidence: float,
     message: str,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """SME proposes a merge or split. Creates consolidation row (status=B2)
-    + communication. Merge requires component_b_id owned by a different SME.
-    Split accepts component_b_id=None (child is spawned after approval).
-    """
+    """SME proposes a merge or split. Creates consolidation row (status=B2
+    for merge, R for split) + communication. Merge requires component_b_id
+    owned by a different SME. Split accepts component_b_id=None.
+    Phase 4.1: metadata JSONB optional for structured tags (evidence,
+    cosine scores, demo=true, etc.)."""
     return consolidation_tool.nominate_consolidation(
         agent_id, component_a_id, component_b_id, nomination_type,
-        confidence, message,
+        confidence, message, metadata,
     )
 
 
@@ -985,6 +987,16 @@ def transfer_flows(
     return mutation_tool.transfer_flows(
         agent_id, consolidation_id, flow_ids,
     )
+
+
+@mcp.tool()
+def get_my_components(agent_id: str) -> list[dict[str, Any]]:
+    """Phase 4.1. List active components this agent owns via RCA.
+    Returns id, canonical_name, display_name, component_type, status,
+    source_slice, split_briefing, split_from_component_id, doc, timestamps.
+    Use on wake if you're unsure which component is yours — especially
+    right after a split spawn."""
+    return components_tool.get_my_components(agent_id)
 
 
 @mcp.tool()

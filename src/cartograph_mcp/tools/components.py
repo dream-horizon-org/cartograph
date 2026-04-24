@@ -903,6 +903,29 @@ def get_unresolved(agent_id: str, component_id: str) -> list[dict]:
 # ---------- Phase 4.1 hygiene: surface stale refs on this SME's edges ----------
 
 
+def get_my_components(agent_id: str) -> list[dict]:
+    """Phase 4.1. Return all active components this agent owns via RCA.
+    Critical for split-spawned children that don't know their component_id
+    on first wake (welcome task also carries it, but this is the
+    belt-and-suspenders path). Also useful for SME self-inspection.
+
+    Returns one row per component owned by the agent with: id,
+    canonical_name, display_name, component_type, status, source_slice,
+    split_briefing, split_from_component_id."""
+    _caller(agent_id)
+    return execute(
+        """SELECT DISTINCT c.id, c.canonical_name, c.display_name,
+                  c.component_type, c.status, c.source_slice,
+                  c.split_briefing, c.split_from_component_id,
+                  c.component_doc_md, c.created_at, c.updated_at
+           FROM resource_component_agents rca
+           JOIN components c ON c.id = rca.component_id
+           WHERE rca.agent_id = %s AND c.status != 'decommissioned'
+           ORDER BY c.created_at""",
+        (agent_id,),
+    )
+
+
 def get_stale_edges(agent_id: str) -> list[dict]:
     """Return edges owned by this SME's component where the OTHER
     endpoint's component is decommissioned. "Owned" = either the edge's

@@ -117,13 +117,16 @@ def nominate_consolidation(
     nomination_type: str,
     confidence: float,
     message: str,
+    metadata: dict | None = None,
 ) -> dict:
     """SME proposes merge (component_a + component_b) or split (component_a
-    into a new child). Creates consolidation row (status=B2) + communication.
+    into a new child). Creates consolidation row + communication.
 
     For merge: component_b_id required, must be owned by a different SME.
     For split: component_b_id optional — the child component doesn't exist
-      yet; it's spawned in Phase 4's spawn_child_agent after resolver approval.
+      yet; it's spawned via spawn_child_agent after resolver approval.
+    `metadata` (Phase 4.1): optional JSONB blob for structured tags —
+      evidence blobs, cosine scores cited, demo=true, etc. Defaults to {}.
     """
     sme = _caller(agent_id)
     if sme["agent_type"] != "sme":
@@ -173,15 +176,16 @@ def nominate_consolidation(
     # Merges still enter at 'B2' (nominated agent's turn to respond).
     # See TRIGGER-MANAGEMENT.md state machine.
     initial_status = "R" if nomination_type == "split" else "B2"
+    metadata_json = json.dumps(metadata or {})
     row = execute_returning(
         """INSERT INTO consolidations
            (proposed_by, agent_a_id, agent_b_id, component_a_id, component_b_id,
-            nomination_type, a_conf_score, status)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            nomination_type, a_conf_score, status, metadata)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
            RETURNING *""",
         (
             agent_id, agent_id, agent_b_id, component_a_id, component_b_id,
-            nomination_type, confidence, initial_status,
+            nomination_type, confidence, initial_status, metadata_json,
         ),
     )
 
