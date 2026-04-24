@@ -1943,6 +1943,27 @@ Pre-existing flake on `test_flows.test_flow_fan_out_one_incoming_many_outgoing` 
 
 ---
 
+## Phase 4.2: DEMO41 post-run fixes ✅
+
+Shipped after DEMO41 verification run surfaced 3 real bugs + 1 false-alarm that still warranted an ergonomic fix.
+
+### 4.2.1 `get_action_items_summary` pydantic still erroring
+Phase 4.1.1 widened the return annotation to `dict[str, Any]` but FastMCP still inferred a strict `DictModel` on some code paths. Removing the return-type annotation entirely on the MCP wrapper lets the bare-dict pass through. Verified live against the DEMO41 DB state: agents now see populated `proxied` list without pydantic erroring.
+
+### 4.2.2 `transfer_attribution_ids` on `spawn_child_agent`
+DEMO41's split left a hostname attribution (`payments.internal.demo41`) stranded on the parent (resolver flagged). We had `transfer_attributions` as a standalone tool, but `spawn_child_agent` only integrated `transfer_edge_ids` + `transfer_flow_ids`. Added `transfer_attribution_ids: list[str] = None` param — moves attrs atomically during split carve via the mutation-scoped helper. SME prompt updated to mark this as MANDATORY split hygiene.
+
+### 4.2.3 `act_on_proxy_item` docstring cheat-sheet
+Multiple SMEs had to guess payload shapes (`payload={"proxy_agent_id": ...}` for broadcast.ack; `{"to_agent_id": ..., "message": ...}` for chat.send, etc.) and hit error → retry cycles. Docstring now enumerates required keys per `(item_type, action)` pair. Pure doc change, no behavior.
+
+### 4.2.4 `get_my_proxy_items(include_empty=False)`
+DEMO41 behavior #24 ("transitive chain-walk broken") was a false alarm — the recursive CTE walks all hops correctly, but the code drops proxy groups with zero pending items to reduce survivor inbox noise. Added `include_empty: bool = False` param — default preserves production ergonomics; `True` surfaces the full transitive chain for audit / verification views. Confirmed live against DEMO41 DB: passing `include_empty=True` to `sme-770e0f4a` now returns depth=1 (sme-9c9775f1) AND depth=2 (sme-f33d6204).
+
+### 4.2 commit + test delta
+Single commit `59a6a4f` with 2 new tests (include_empty surfacing depth-2; transfer_attribution_ids cascade during split). Phase 4 + 4.1 test count: 99 → 101. Pre-existing ollama flakes elsewhere unrelated.
+
+---
+
 ## Validation Rules (enforced in ALL phases)
 
 ### Universal
