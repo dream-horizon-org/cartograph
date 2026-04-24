@@ -8,6 +8,9 @@ const state = {
   pollInterval: null,
   agentRefreshInterval: null,
   loadingHistory: false,
+  // Phase 4: when true, /api/agents?include_decommissioned=true. Flips
+  // on a sidebar toggle so admins can audit merged/absorbed agents.
+  showDecommissioned: false,
 };
 
 const $agentList = document.getElementById('agent-list');
@@ -21,7 +24,8 @@ const $refreshBtn = document.getElementById('refresh-btn');
 
 async function fetchAgents() {
   try {
-    const res = await fetch('/api/agents');
+    const qs = state.showDecommissioned ? '?include_decommissioned=true' : '';
+    const res = await fetch(`/api/agents${qs}`);
     const data = await res.json();
     state.agents = data.agents || [];
     renderAgents();
@@ -161,15 +165,24 @@ function _renderAgentRow(agent, $ul) {
   const li = document.createElement('li');
   li.dataset.agentId = agent.agent_id;
   if (agent.agent_id === state.selectedAgentId) li.classList.add('selected');
+  const isDecom = agent.status === 'decommissioned';
+  if (isDecom) li.classList.add('decommissioned');
   // isSleeping = column is set AND the deadline is still in the future.
   // Backend treats past sleep_until as already-awake; FE must agree.
   const isSleeping = !!(agent.sleep_until && new Date(agent.sleep_until) > new Date());
   const sleepTag = isSleeping
     ? `<span class="status status-sleep">💤 until ${new Date(agent.sleep_until).toLocaleString()}</span>`
     : '';
-  const actionBtn = isSleeping
+  // Phase 4: show a compact "→ <survivor>" tag for merged agents so
+  // the chain is visible at a glance without opening the chat header.
+  const mergedTag = (isDecom && agent.merged_into_agent_id)
+    ? `<span class="status status-merged" title="${escapeHtml(agent.deactivation_reason || '')}: ${escapeHtml(agent.deactivation_notes || '')}">→ ${escapeHtml(agent.merged_into_agent_id)}</span>`
+    : '';
+  const actionBtn = (isSleeping && !isDecom)
     ? `<button class="row-btn row-wake" title="Wake ${escapeHtml(agent.agent_id)}">⏰</button>`
-    : `<button class="row-btn row-sleep" title="Sleep ${escapeHtml(agent.agent_id)}">💤</button>`;
+    : (!isDecom
+        ? `<button class="row-btn row-sleep" title="Sleep ${escapeHtml(agent.agent_id)}">💤</button>`
+        : '');
   li.innerHTML = `
     <div class="agent-row-head">
       <div class="agent-id">${escapeHtml(agent.agent_id)}</div>
@@ -178,6 +191,7 @@ function _renderAgentRow(agent, $ul) {
     <div class="agent-meta">
       <span class="status status-${agent.status}">${agent.status}</span>
       ${sleepTag}
+      ${mergedTag}
     </div>
   `;
   // Clicking the row selects the agent for chat; clicking the sleep/wake
@@ -194,6 +208,75 @@ function _renderAgentRow(agent, $ul) {
   $ul.appendChild(li);
 }
 
+// Phase 4: deactivation block rendered above the messages pane when
+// a decommissioned agent is selected. Walks /api/agent/:id/chain to
+// show the full merge lineage (A → B → C (active)).
+async function _renderDeactivationBlock(agent) {
+  let block = document.getElementById('deactivation-block');
+  if (!agent || agent.status !== 'decommissioned') {
+    if (block) block.remove();
+    return;
+  }
+  if (!block) {
+    block = document.createElement('div');
+    block.id = 'deactivation-block';
+    const messagesEl = document.getElementById('messages');
+    messagesEl.parentNode.insertBefore(block, messagesEl);
+  }
+  block.innerHTML = '<div class="deactivation-loading">Loading chain…</div>';
+  try {
+    const res = await fetch(`/api/agent/${encodeURIComponent(agent.agent_id)}/chain`);
+    const data = await res.json();
+    const chain = data.chain || [];
+    const chainHtml = chain.map((a, i) => {
+      const arrow = i === chain.length - 1 ? '' : ' → ';
+      const cls = a.status === 'decommissioned' ? 'chain-hop-dead' : 'chain-hop-active';
+      return `<span class="${cls}" data-agent-id="${escapeHtml(a.agent_id)}">${escapeHtml(a.agent_id)}</span>${arrow}`;
+    }).join('');
+    block.innerHTML = `
+      <div class="deactivation-title">⚰️ Decommissioned agent</div>
+      <div class="deactivation-row">
+        <b>Reason:</b> ${escapeHtml(agent.deactivation_reason || '—')}
+      </div>
+      ${agent.deactivation_notes ? `
+        <div class="deactivation-row">
+          <b>Notes:</b> ${escapeHtml(agent.deactivation_notes)}
+        </div>
+      ` : ''}
+      <div class="deactivation-row">
+        <b>Merge chain:</b> ${chainHtml || '(single)'}
+      </div>
+    `;
+    block.querySelectorAll('.chain-hop-active, .chain-hop-dead').forEach(el => {
+      el.style.cursor = 'pointer';
+      el.addEventListener('click', () => selectAgent(el.dataset.agentId));
+    });
+  } catch (e) {
+    block.innerHTML = '<div class="deactivation-loading">Failed to load chain.</div>';
+  }
+}
+
+// Phase 4: toggle for showing decommissioned agents in the sidebar.
+// Mounted lazily at init — the checkbox lives above the agent-list.
+function _mountDecommissionedToggle() {
+  const sidebar = document.querySelector('#sidebar header');
+  if (!sidebar || document.getElementById('show-decom-toggle')) return;
+  const label = document.createElement('label');
+  label.className = 'show-decom-toggle';
+  label.style.cssText = 'display:block;font-size:11px;color:#94a3b8;margin-top:4px;cursor:pointer;';
+  label.innerHTML = `
+    <input type="checkbox" id="show-decom-toggle" style="margin-right:4px;">
+    Show merged / decommissioned
+  `;
+  sidebar.appendChild(label);
+  const cb = label.querySelector('input');
+  cb.checked = state.showDecommissioned;
+  cb.addEventListener('change', () => {
+    state.showDecommissioned = cb.checked;
+    fetchAgents();
+  });
+}
+
 async function selectAgent(agentId) {
   if (state.pollInterval) clearInterval(state.pollInterval);
 
@@ -206,10 +289,18 @@ async function selectAgent(agentId) {
   $chatTitle.textContent = agentId;
   const agent = state.agents.find(a => a.agent_id === agentId);
   $chatSubtitle.textContent = agent ? `${agent.agent_type} · ${agent.status}` : '';
+  // Phase 4: when selecting a decommissioned agent, render the
+  // deactivation + merge-chain block above the message pane so the
+  // admin sees why the agent exited + who picked up its work.
+  _renderDeactivationBlock(agent);
 
-  $chatInput.disabled = false;
-  $sendBtn.disabled = false;
-  $chatInput.focus();
+  const disabled = !!(agent && agent.status === 'decommissioned');
+  $chatInput.disabled = disabled;
+  $sendBtn.disabled = disabled;
+  $chatInput.placeholder = disabled
+    ? 'Agent decommissioned — read-only'
+    : 'Type a message...';
+  if (!disabled) $chatInput.focus();
 
   await loadInitialMessages();
   startPolling();
@@ -422,6 +513,7 @@ $messages.addEventListener('scroll', () => {
 
 $refreshBtn.addEventListener('click', fetchAgents);
 
+_mountDecommissionedToggle();
 fetchAgents();
 state.agentRefreshInterval = setInterval(fetchAgents, 5000);
 
@@ -470,14 +562,40 @@ async function fetchCommunications() {
   if (f.type) params.set('type', f.type);
   params.set('limit', '100');
   try {
-    const res = await fetch(`/api/communications?${params.toString()}`);
-    const data = await res.json();
+    const [commsRes, auditRes] = await Promise.all([
+      fetch(`/api/communications?${params.toString()}`),
+      // Phase 4: batch-load recent proxy_audit so the row renderer can
+      // stamp "via <survivor>" badges without N+1 requests. The audit
+      // log is small — one row per proxy act — and we cap at 500.
+      fetch('/api/proxy_audit?limit=500'),
+    ]);
+    const data = await commsRes.json();
+    const auditData = await auditRes.json();
     commsState.messages = data.messages || [];
     commsState.hasMore = data.has_more;
+    // Map keyed "item_type|item_id" → [audit rows].
+    commsState.proxyAudit = {};
+    for (const a of (auditData.entries || [])) {
+      const k = `${a.item_type}|${a.item_id}`;
+      (commsState.proxyAudit[k] ||= []).push(a);
+    }
     renderCommunications();
   } catch (e) {
     console.error('Failed to fetch communications:', e);
   }
+}
+
+// Phase 4: key a communication row to proxy_audit. item_id is the
+// underlying entity for consolidation/clarification/task (source_id),
+// otherwise the communication row's own id (chat/broadcast).
+function _proxyAuditFor(m) {
+  if (!commsState.proxyAudit) return null;
+  const id = (m.type === 'chat' || m.type === 'broadcast')
+    ? m.id
+    : m.source_id;
+  if (!id) return null;
+  const hits = commsState.proxyAudit[`${m.type}|${id}`];
+  return (hits && hits.length) ? hits[0] : null;
 }
 
 /** Target label: for broadcasts, "all <type>" on the agent_type column;
@@ -506,13 +624,20 @@ function renderCommunications() {
     const state = (m.metadata && m.metadata.state_transition)
       ? ` <span class="pill">${m.metadata.state_transition.from} → ${m.metadata.state_transition.to}</span>`
       : '';
+    // Phase 4: if this row's ledger author was acted-as via proxy, show
+    // "via <survivor>" — the real click came from the survivor, but the
+    // row records the original (decommissioned) owner.
+    const audit = _proxyAuditFor(m);
+    const viaBadge = audit
+      ? ` <span class="pill proxy-via" title="Proxied by ${escapeHtml(audit.survivor_id)}">via ${escapeHtml(audit.survivor_id)}</span>`
+      : '';
     li.innerHTML = `
       <div class="comm-head">
         <span class="type-pill type-${m.type}">${m.type}</span>
         <span class="from">${escapeHtml(m.from_agent)}</span>
         <span class="arrow">→</span>
         <span class="to">${escapeHtml(commTargetLabel(m))}</span>
-        ${state}
+        ${state}${viaBadge}
         <span class="ts">${new Date(m.created_at).toLocaleString()}</span>
       </div>
       <div class="comm-body">${escapeHtml(excerpt)}${excerpt.length >= 120 ? '…' : ''}</div>

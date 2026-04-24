@@ -419,6 +419,42 @@ body {
 .status-errored { background: #f8514922; color: #f85149; }
 .status-done { background: #8957e522; color: #8957e5; }
 .status-sleep { background: #4e3a0f; color: #e3b341; font-size: 10px; }
+.status-decommissioned { background: #44484d; color: #9ca3af; }
+.status-merged { background: #1e293b; color: #64748b; font-size: 10px; padding: 1px 6px; border-radius: 3px; }
+#agent-list li.decommissioned { opacity: 0.6; }
+#agent-list li.decommissioned .agent-id { color: #9ca3af; text-decoration: line-through; }
+
+/* Phase 4: deactivation block above the messages pane */
+#deactivation-block {
+  border: 1px solid #44484d;
+  background: #1e293b;
+  color: #cbd5e1;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 8px 14px;
+  font-size: 12px;
+}
+#deactivation-block .deactivation-title {
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-bottom: 6px;
+}
+#deactivation-block .deactivation-row { margin: 3px 0; }
+#deactivation-block .chain-hop-dead {
+  color: #94a3b8; text-decoration: line-through; margin: 0 2px;
+}
+#deactivation-block .chain-hop-active {
+  color: #58a6ff; font-weight: 600; margin: 0 2px;
+}
+#deactivation-block .chain-hop-active:hover,
+#deactivation-block .chain-hop-dead:hover { text-decoration: underline; }
+
+.pill.proxy-via {
+  background: #3f1d4f;
+  color: #d8b4fe;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
 
 .group-actions {
   display: inline-flex;
