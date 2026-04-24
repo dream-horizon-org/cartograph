@@ -12,6 +12,7 @@ invocation.
 
 from __future__ import annotations
 
+from shared.actor_auth import require_active_agent
 from shared.db import execute, execute_one
 
 
@@ -40,12 +41,7 @@ def get_agent_notifications(
                      to get only newer items, or None if nothing matched
     }
     """
-    me = execute_one(
-        "SELECT agent_type FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
-        (agent_id,),
-    )
-    if me is None:
-        raise ValueError(f"Agent {agent_id} not found")
+    me = require_active_agent(agent_id)
 
     types = priority_from_agent_types or ["admin"]
     invalid = [t for t in types if t not in _KNOWN_SOURCE_TYPES]

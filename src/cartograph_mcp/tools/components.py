@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 
 from shared import embedding as emb
+from shared.actor_auth import require_active_agent
 from shared.db import execute, execute_one, execute_mutate, execute_returning
 
 
@@ -39,15 +40,7 @@ _VALID_EDGE_TYPES = {
 }
 
 
-def _caller(agent_id: str) -> dict:
-    row = execute_one(
-        "SELECT agent_id, agent_type, plane FROM agent_runs "
-        "WHERE agent_id = %s AND status != 'decommissioned'",
-        (agent_id,),
-    )
-    if row is None:
-        raise ValueError(f"Agent {agent_id} not found")
-    return row
+_caller = require_active_agent  # thin alias; see shared.actor_auth
 
 
 def _assert_sme(agent_id: str) -> dict:

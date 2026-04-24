@@ -20,21 +20,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from shared.actor_auth import require_active_agent
 from shared.db import execute, execute_one, execute_mutate
 
 
 _VALID_AGENT_TYPES = {"orchestrator", "iterator", "sme", "resolver"}
 
 
-def _caller(agent_id: str) -> dict:
-    row = execute_one(
-        "SELECT agent_id, agent_type FROM agent_runs "
-        "WHERE agent_id = %s AND status != 'decommissioned'",
-        (agent_id,),
-    )
-    if row is None:
-        raise ValueError(f"Agent {agent_id} not found")
-    return row
+_caller = require_active_agent  # thin alias; see shared.actor_auth
 
 
 def _assert_orch_or_admin(agent_id: str) -> None:

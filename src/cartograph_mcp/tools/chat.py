@@ -1,5 +1,6 @@
 """Chat tools — send_chat, ack_chats, get_unacked_chats, get_chat_history."""
 
+from shared.actor_auth import require_active_agent
 from shared.db import execute, execute_one, execute_returning, execute_mutate
 
 
@@ -12,13 +13,14 @@ def send_chat(from_agent_id: str, to_agent_id: str, message: str) -> dict:
     if from_agent_id != "admin" and to_agent_id != "admin":
         raise ValueError("Agents can only chat with admin. Use consolidation/clarification for agent-to-agent.")
 
-    # Validate from_agent_id is a real registered agent (or literal 'admin')
+    # Validate from_agent_id is a real registered agent (or literal 'admin').
+    # Goes through the shared helper so the proxy router's ContextVar is
+    # honored — survivor CAN send a chat as a decommissioned agent to
+    # close out X's legacy admin threads.
     if from_agent_id != "admin":
-        row = execute_one(
-            "SELECT 1 FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
-            (from_agent_id,),
-        )
-        if row is None:
+        try:
+            require_active_agent(from_agent_id)
+        except ValueError:
             raise ValueError(
                 f"from_agent_id='{from_agent_id}' is not a registered agent. "
                 "Use your actual agent_id as shown in the invocation prompt. "

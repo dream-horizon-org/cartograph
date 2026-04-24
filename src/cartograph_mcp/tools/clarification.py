@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 
+from shared.actor_auth import require_active_agent
 from shared.db import execute, execute_one, execute_returning
 
 
@@ -41,15 +42,7 @@ _RESPONDER_TRANSITIONS = {
 }
 
 
-def _caller(agent_id: str) -> dict:
-    row = execute_one(
-        "SELECT agent_id, agent_type FROM agent_runs "
-        "WHERE agent_id = %s AND status != 'decommissioned'",
-        (agent_id,),
-    )
-    if row is None:
-        raise ValueError(f"Agent {agent_id} not found")
-    return row
+_caller = require_active_agent  # thin alias; see shared.actor_auth
 
 
 def create_clarification(

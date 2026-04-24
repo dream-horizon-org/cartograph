@@ -7,6 +7,7 @@ the User Input phase. Iterators and SMEs read them to call their plane APIs.
 Storage: values are stored as TEXT in the DB. Future: encrypt at rest.
 """
 
+from shared.actor_auth import require_active_agent
 from shared.db import execute, execute_one, execute_returning
 
 
@@ -15,13 +16,7 @@ def put_secret(agent_id: str, plane: str, key: str, value: str) -> dict:
 
     Upserts on (plane, key). Returns the stored row (with value).
     """
-    # Validate only orchestrator can write
-    row = execute_one(
-        "SELECT agent_type FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
-        (agent_id,),
-    )
-    if row is None:
-        raise ValueError(f"Agent {agent_id} not found")
+    row = require_active_agent(agent_id)
     if row["agent_type"] != "orchestrator":
         raise ValueError(
             f"Only orchestrator agents can write secrets. "
@@ -42,13 +37,7 @@ def put_secret(agent_id: str, plane: str, key: str, value: str) -> dict:
 
 def get_secret(agent_id: str, plane: str, key: str) -> dict | None:
     """Read a specific secret by plane + key. Any non-decommissioned agent can read."""
-    row = execute_one(
-        "SELECT 1 FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
-        (agent_id,),
-    )
-    if row is None:
-        raise ValueError(f"Agent {agent_id} not found")
-
+    require_active_agent(agent_id)
     return execute_one(
         "SELECT plane, key, value, created_at, updated_at FROM secrets WHERE plane = %s AND key = %s",
         (plane, key),
@@ -60,13 +49,7 @@ def list_secrets_for_plane(agent_id: str, plane: str) -> list[dict]:
 
     Useful for iterators/SMEs to discover what creds are available.
     """
-    row = execute_one(
-        "SELECT 1 FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
-        (agent_id,),
-    )
-    if row is None:
-        raise ValueError(f"Agent {agent_id} not found")
-
+    require_active_agent(agent_id)
     return execute(
         "SELECT plane, key, created_at, updated_at FROM secrets WHERE plane = %s ORDER BY key",
         (plane,),
@@ -75,12 +58,7 @@ def list_secrets_for_plane(agent_id: str, plane: str) -> list[dict]:
 
 def delete_secret(agent_id: str, plane: str, key: str) -> dict:
     """Delete a secret. Only orchestrator can delete. Returns {'deleted': bool}."""
-    row = execute_one(
-        "SELECT agent_type FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
-        (agent_id,),
-    )
-    if row is None:
-        raise ValueError(f"Agent {agent_id} not found")
+    row = require_active_agent(agent_id)
     if row["agent_type"] != "orchestrator":
         raise ValueError(
             f"Only orchestrator agents can delete secrets. "
