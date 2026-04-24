@@ -58,12 +58,20 @@ def create_app() -> FastAPI:
     # --- API ROUTES ---
 
     @app.get("/api/agents")
-    def list_agents():
-        """List all agents except decommissioned, ordered by type priority."""
+    def list_agents(include_decommissioned: bool = Query(False)):
+        """List agents ordered by type priority.
+
+        Default excludes decommissioned. Pass `include_decommissioned=true`
+        to also surface merged/absorbed agents (for the admin-UI proxy
+        chain / lineage view). Deactivation columns are always returned
+        for decommissioned rows so the UI can render the block inline.
+        """
+        where = "" if include_decommissioned else "WHERE status != 'decommissioned'"
         rows = execute(
-            """SELECT agent_id, agent_type, status, sleep_until, created_at
+            f"""SELECT agent_id, agent_type, status, sleep_until, created_at,
+                       deactivation_reason, deactivation_notes, merged_into_agent_id
                FROM agent_runs
-               WHERE status != 'decommissioned'
+               {where}
                ORDER BY
                  CASE agent_type
                    WHEN 'orchestrator' THEN 0
@@ -75,6 +83,59 @@ def create_app() -> FastAPI:
                  created_at"""
         )
         return {"agents": rows}
+
+    @app.get("/api/agent/{agent_id}/chain")
+    def agent_chain(agent_id: str):
+        """Walk merged_into_agent_id starting at `agent_id`. Returns the
+        hop-by-hop lineage so the admin UI can render a merge-chain view
+        like A → B → C (active). Bounded at depth 10."""
+        chain = []
+        cursor = agent_id
+        for _ in range(10):
+            row = execute_one(
+                """SELECT agent_id, agent_type, status,
+                          deactivation_reason, deactivation_notes,
+                          merged_into_agent_id, created_at
+                   FROM agent_runs WHERE agent_id = %s""",
+                (cursor,),
+            )
+            if row is None:
+                break
+            chain.append(row)
+            if row["merged_into_agent_id"] is None:
+                break
+            cursor = row["merged_into_agent_id"]
+        return {"chain": chain}
+
+    @app.get("/api/proxy_audit")
+    def list_proxy_audit(
+        item_type: Optional[str] = Query(None),
+        item_id: Optional[str] = Query(None),
+        survivor_id: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=1000),
+    ):
+        """Proxy audit log query. Admin UI calls with (item_type, item_id)
+        to join a decommissioned-author row with its "via <survivor>"
+        badge. Filters AND together."""
+        where = []
+        params: list = []
+        if item_type:
+            where.append("item_type = %s")
+            params.append(item_type)
+        if item_id:
+            where.append("item_id = %s")
+            params.append(item_id)
+        if survivor_id:
+            where.append("survivor_id = %s")
+            params.append(survivor_id)
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = execute(
+            f"""SELECT * FROM proxy_audit{where_sql}
+                ORDER BY created_at DESC
+                LIMIT %s""",
+            params + [limit],
+        )
+        return {"entries": rows}
 
     @app.get("/api/chat/{agent_id}")
     def get_chat(
