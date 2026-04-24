@@ -29,6 +29,7 @@ from cartograph_mcp.tools import components as components_tool
 from cartograph_mcp.tools import consolidation as consolidation_tool
 from cartograph_mcp.tools import mutation as mutation_tool
 from cartograph_mcp.tools import notifications as notifications_tool
+from cartograph_mcp.tools import proxy as proxy_tool
 from cartograph_mcp.tools import search as search_tool
 from cartograph_mcp.tools import sleep as sleep_tool
 
@@ -845,6 +846,39 @@ def review_consolidation(
     return consolidation_tool.review_consolidation(
         agent_id, consolidation_id, r_confidence, message, new_status,
         mutation_assigned_to,
+    )
+
+
+@mcp.tool()
+def get_my_proxy_items(
+    agent_id: str,
+    limit_per_type: int = 50,
+) -> dict[str, Any]:
+    """Phase 4. Return inherited work inbox for a survivor: all pending
+    tasks / chats / consolidations / clarifications / broadcasts owned by
+    any agent in the survivor's transitive merge-chain (walked via
+    agent_runs.merged_into_agent_id). Grouped by proxy agent, with
+    deactivation_reason + notes + chain depth per group."""
+    return proxy_tool.get_my_proxy_items(agent_id, limit_per_type)
+
+
+@mcp.tool()
+def act_on_proxy_item(
+    survivor_id: str,
+    item_type: str,
+    item_id: str,
+    action: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Phase 4. Act on an inherited item as the original (decommissioned)
+    owner. Router validates survivor is a legal proxy, invokes the
+    existing public tool with actor=proxy_agent_id under a ContextVar
+    that only relaxes the actor-active check for that exact agent.
+    Writes a proxy_audit row on success. Supported (item_type, action):
+    (task,respond), (clarification,respond), (consolidation,respond),
+    (chat,ack), (chat,send), (broadcast,ack)."""
+    return proxy_tool.act_on_proxy_item(
+        survivor_id, item_type, item_id, action, payload,
     )
 
 
