@@ -44,9 +44,10 @@ Multi-agent system:
 - SME: deeply analyse one resource; negotiate consolidation; execute mutations
 - Resolver: review merge/split proposals; assign mutation responsibility
 
-State tables in PostgreSQL: components, attributions, edges, unresolved,
-agent_runs, resources, resource_component_agents, tasks, secrets, consolidations,
-communications, broadcast_acks, clarifications, proxy_items.
+State tables in PostgreSQL: components, attributions, edges, flows, unresolved,
+agent_runs (with deactivation_reason/notes/merged_into_agent_id for Phase 4
+mutation tracking), resources, resource_component_agents, tasks, secrets,
+consolidations, communications, broadcast_acks, clarifications, proxy_audit.
 
 == YOUR TOOLS (via cartograph-db MCP server on localhost:8100) ==
 Read:
