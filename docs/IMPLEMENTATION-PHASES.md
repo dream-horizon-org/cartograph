@@ -1649,6 +1649,288 @@ Each step → incremental commit, tests alongside code:
 
 ---
 
+## Phase 4.1: Mutation completeness + demo-uncovered gaps
+
+Ships alongside Phase 4 after the first end-to-end demo (2026-04-24)
+surfaced ten real gaps. The demo ran parent SME → split nomination →
+resolver approval → spawn_child_agent → execute_mutation successfully,
+but revealed edge cases and missing primitives that Phase 4 glossed
+over. This phase closes them.
+
+### 4.1.0 Gaps uncovered
+
+| # | Issue | Severity | Lands in |
+|---|-------|----------|----------|
+| 3 | `get_action_items_summary` pydantic schema mismatch on `proxied` field | blocker (every SME wake) | 4.1.1 |
+| 7 | `split_briefing` written but never delivered to spawned child | blocker for splits | 4.1.4 |
+| 9 | No `transfer_edges` tool — orphans on merge/split | blocker | 4.1.2 |
+| 10 | No `transfer_flows` tool — orphans on merge/split | blocker | 4.1.2 |
+| 1 | `spawn_child_agent` silently fails slice carve when `source_slice` lives in `metadata` not top-level column | high | 4.1.4 |
+| 2 | Child agent can't discover its own component_id on first wake | high | 4.1.4 (task) + 4.1.7 (tool) |
+| 6 | Child inherits parent's resource row with `status='done'` — no signal to re-materialise | medium | 4.1.5 |
+| 8 | SME prompt hardcodes "Orchestrator already decided to spawn you" — wrong for split-spawned children | low | 4.1.8 |
+| 5 | `nominate_consolidation` has no `metadata` param — caller had to inline demo tag into message text | low | 4.1.6 |
+| — | `transfer_attributions` (shipped in 4.0) is under-gated — works without an active mutation | architectural fix | 4.1.2 |
+
+### 4.1.1 Fix `get_action_items_summary` schema
+
+**Problem:** added `proxied: list[dict]` to the response in Phase 4
+without updating the MCP tool's return type annotation. Pydantic
+serializer couldn't reconcile. Every SME hits it on wake.
+
+**Fix:** adjust the MCP wrapper's response type hint + dict shape so
+`proxied` is explicitly `list[dict[str, Any]]`. Keep the internal
+helper's shape unchanged.
+
+**Files:** `src/cartograph_mcp/server.py`, `src/cartograph_mcp/tools/action_items.py`
+**Tests:** 1 new — summary endpoint returns 200 + schema valid when caller has ≥1 proxied group
+**Effort:** XS
+
+### 4.1.2 Mutation-scoped transfer tools + stale hygiene
+
+Rewrite `transfer_attributions` gate and add `transfer_edges`,
+`transfer_flows`, `get_stale_edges`, `get_stale_flows`.
+
+**Principle:** ownership transfers are mutation primitives. They ONLY
+work when:
+1. An active consolidation exists in status='M'.
+2. Caller = `consolidation.mutation_assigned_to`.
+3. The `from_component_id` and `to_component_id` are within that
+   consolidation's declared scope (merge: a↔b pairs; split: parent→child
+   via `child_agent_id` lookup).
+
+Shared helper:
+```python
+def _assert_transfer_scope(agent_id, consolidation_id, from_comp, to_comp):
+    cons = _assert_mutation_gate(agent_id, consolidation_id)
+    if cons["nomination_type"] == "merge":
+        allowed = {(cons["component_a_id"], cons["component_b_id"]),
+                   (cons["component_b_id"], cons["component_a_id"])}
+    else:  # split
+        if not cons["child_agent_id"]:
+            raise ValueError("Spawn child first")
+        child_comp = _component_of_agent(cons["child_agent_id"])
+        allowed = {(cons["component_a_id"], child_comp)}
+    if (from_comp, to_comp) not in allowed:
+        raise ValueError(f"Transfer ({from_comp} → {to_comp}) outside scope")
+    return cons
+```
+
+**New / changed tools:**
+
+- `transfer_attributions(agent_id, consolidation_id, attribution_ids, from_component_id, to_component_id)` — **signature change** (adds `consolidation_id`). Re-embed both sides.
+
+- `transfer_edges(agent_id, consolidation_id, edge_ids, direction='both')` — new. `direction` controls which endpoint columns are rewritten:
+  - `'from'` — rewrite `from_component_id` only (for bound/dangling owned by caller).
+  - `'to'` — rewrite `to_component_id` only (for catalogs).
+  - `'both'` — rewrite both (rare; edges that touch both sides).
+  - Collision rules:
+    - Catalog: collapse on `(to_component_id, edge_type, identifier)` — keep target's existing row, drop source's.
+    - Bound/dangling: reject on full-key collision.
+
+- `transfer_flows(agent_id, consolidation_id, flow_ids)` — new. Reject on `(component_id, incoming_edge_id, outgoing_edge_id)` collision.
+
+- `get_stale_edges(agent_id)` — new. Returns edges owned by caller's component where the OTHER endpoint's component is decommissioned. Each row includes `stale_component_merged_into_agent_id` so caller can re-bind to the survivor.
+
+- `get_stale_flows(agent_id)` — new. Returns flows where referenced incoming/outgoing edges point at decommissioned components.
+
+**Hygiene wiring:** SME prompt gets a bullet in the edge-hygiene cycle
+telling them to call `get_stale_edges` + `get_stale_flows` on some wakes
+and re-bind via survivor pointers.
+
+**Files:** `src/cartograph_mcp/tools/mutation.py` (transfers), `src/cartograph_mcp/tools/components.py` (hygiene reads), `src/cartograph_mcp/server.py`
+**Tests:** ~15 new (gate enforcement per-type, direction param on edges, collision rules, stale-edge hygiene surface, retrofit transfer_attributions with new sig)
+**Effort:** M
+
+### 4.1.3 `absorb_agent` cascade: auto-transfer body
+
+Adds three flags to `absorb_agent` (all default `True`):
+
+- `cascade_attributions=True` — moves all target's attributions into survivor.
+- `cascade_edges=True` — moves all target's from-edges + to-edges into survivor.
+- `cascade_flows=True` — moves all target's flows into survivor.
+
+Internally calls `transfer_attributions` / `transfer_edges` /
+`transfer_flows` with this consolidation's `consolidation_id`. Survivor
+workflow collapses from 5 calls (`transfer_attrs` + `transfer_edges` +
+`transfer_flows` + `absorb_agent` + `execute_mutation`) to 2
+(`absorb_agent` + `execute_mutation`).
+
+Flags allow the caller to opt out if they want to hand-pick what moves
+— useful when survivor has already populated their own edges with
+better metadata and wants to keep them.
+
+**Files:** `src/cartograph_mcp/tools/mutation.py`, `src/cartograph_mcp/server.py`
+**Tests:** 5 new (all cascades on, each cascade off independently, post-absorb stale hygiene returns empty)
+**Effort:** S
+
+### 4.1.4 `spawn_child_agent` hardening
+
+Three fixes bundled:
+
+**(a) Top-level `source_slice` validation.** Read `components.source_slice` column directly. If null/empty, raise:
+```
+Parent component has no source_slice set at components.source_slice.
+Call upsert_component with source_slice={resource_id: {...}} first.
+```
+This catches the demo-POC gotcha where parent had stashed `source_slice`
+inside `metadata`, causing silent carve-out with empty slice.
+
+**(b) Atomic split-carve.** Accept two optional params:
+```python
+spawn_child_agent(..., transfer_edge_ids: list[str] = None,
+                       transfer_flow_ids: list[str] = None)
+```
+Calls `transfer_edges` + `transfer_flows` in the same transaction using
+the consolidation's id. Edges/flows can't be partially moved.
+
+**(c) Welcome task for child.** After spawning the child + setting
+`consolidation.child_agent_id`, INSERT a BW task:
+```python
+create_task(
+    owner_agent_id=parent_agent_id,
+    worker_agent_id=child_agent_id,
+    description=f"[split-welcome] component_id={child_component_id}\n\n{split_briefing}"
+)
+```
+Child wakes with a visible task carrying both their component_id and
+the briefing. Solves discoverability (#2) + briefing delivery (#7) in
+one step.
+
+**Files:** `src/cartograph_mcp/tools/mutation.py`
+**Tests:** 5 new (parent-slice-empty raises, welcome task exists with component_id + briefing in description, transfer_edge_ids param works, transfer_flow_ids param works, task owner is parent)
+**Effort:** S
+
+### 4.1.5 `mark_resource_done` idempotency (shared resource model)
+
+Retains shared resource row between parent and split-child. Confirmed
+via audit: `resources.status='done'` is not gating — no scanner,
+trigger, or tool filters by it (only surfaces in
+`get_resource_counts` dashboard). Child inherits same resource_id via
+their new RCA row; wakes via the welcome task (4.1.4(c)); materialises
+their slice; calls `mark_resource_done` → already done → idempotent
+no-op.
+
+**Fixes:** SME prompt — one-line clarification that `mark_resource_done`
+is idempotent and should be called when YOUR slice is materialised,
+regardless of the resource row's current status.
+
+**Deferred:** per-RCA status column (option b from the design review).
+YAGNI until dashboard accuracy becomes a hard requirement.
+
+**Files:** `src/agent_management/agent_types/sme.py`
+**Tests:** 1 — `mark_resource_done` called twice on same resource_id returns cleanly on both calls
+**Effort:** XS
+
+### 4.1.6 `nominate_consolidation` metadata param
+
+**Migration:** `ALTER TABLE consolidations ADD COLUMN IF NOT EXISTS
+metadata JSONB NOT NULL DEFAULT '{}'`.
+
+**Tool:** accepts `metadata: dict | None = None` param, persists to column.
+
+Demo caller hacked around this by inlining `[DEMO / metadata.demo=true]`
+into the message text — structured column means demo cleanup can now
+filter cleanly: `DELETE FROM consolidations WHERE metadata->>'demo' = 'true'`.
+
+**Files:** `src/shared/migrations.py`, `src/cartograph_mcp/tools/consolidation.py`, `src/cartograph_mcp/server.py`
+**Tests:** 2 new (metadata round-trip, default empty dict on omission)
+**Effort:** XS
+
+### 4.1.7 `get_my_components` tool
+
+New read tool. SME can enumerate components they own via RCA join.
+Critical for split-spawned children before they discover the welcome
+task, and for general SME self-inspection.
+
+```python
+get_my_components(agent_id) -> list[dict]
+  # SELECT c.id, canonical_name, display_name, component_type,
+  #        source_slice, split_briefing, split_from_component_id,
+  #        status
+  # FROM resource_component_agents rca
+  # JOIN components c ON c.id = rca.component_id
+  # WHERE rca.agent_id = %s AND c.status != 'decommissioned'
+```
+
+**Files:** `src/cartograph_mcp/tools/components.py`, `src/cartograph_mcp/server.py`
+**Tests:** 3 new (SME with one component, SME with zero components, post-split child returns child component)
+**Effort:** XS
+
+### 4.1.8 SME prompt — split-aware + discoverability
+
+Update two lines in `src/agent_management/agent_types/sme.py`:
+
+- Soften "Orchestrator already decided to spawn you on this resource":
+  ```
+  You were spawned either by the orchestrator (initial
+  materialisation) or by a parent SME via split_child_agent (Phase 4
+  split consolidation). Either way, the system has already decided you
+  own exactly one component.
+  ```
+
+- Add a wake-up step:
+  ```
+  - If this is your first wake and you're unsure which component you
+    own, call get_my_components(your_agent_id).
+  - If your first action-item has subject "[split-welcome]", read it
+    FIRST — it carries your component_id + split_briefing.
+  ```
+
+No session reset needed — `agent_manager.py:190` passes `--system-prompt`
+fresh on every invocation.
+
+**Files:** `src/agent_management/agent_types/sme.py`
+**Tests:** N/A (prompt-only; behavior verified manually on next SME spawn)
+**Effort:** XS
+
+### 4.1.9 Doc + memory sync
+
+Update 6 docs for consistency post-4.1:
+- **TRIGGER-MANAGEMENT.md** §2 Act — new transfer tool signatures, stale hygiene tools, nominate metadata param.
+- **SCHEMA.md** — `consolidations.metadata` JSONB column.
+- **HLD.md** — §2 Tools table — add `transfer_edges`, `transfer_flows`, `get_stale_edges`, `get_stale_flows`, `get_my_components`.
+- **AGENT-PROMPTS.md** — section on split-child onboarding flow.
+- **IMPLEMENTATION-PHASES.md** — mark 4.1 shipped; update test count.
+- **ONE-PAGER.md** — no functional impact; verify still accurate.
+- **memory/cartograph_state.md** — append 4.1 summary.
+
+**Effort:** S
+
+### 4.1 Ordering + dependencies
+
+```
+4.1.1 (pydantic)         ← independent, ship first
+   │
+4.1.2 (transfer tools + hygiene)
+   │
+   ├─ 4.1.3 (absorb cascade — uses transfers)
+   │
+   └─ 4.1.4 (spawn hardening — uses transfers + welcome task)
+
+4.1.5 (mark_resource_done prompt)  ← independent, any point
+4.1.6 (metadata param)              ← independent, any point
+4.1.7 (get_my_components)           ← pairs naturally with 4.1.4
+4.1.8 (SME prompt)                  ← after 4.1.4 + 4.1.7
+4.1.9 (docs + memory)               ← last
+```
+
+### 4.1 Test budget
+
+| Sub-phase | New | Retrofit |
+|-----------|-----|----------|
+| 4.1.1 | 1 | 0 |
+| 4.1.2 | 15 | 3 |
+| 4.1.3 | 5 | 0 |
+| 4.1.4 | 5 | 0 |
+| 4.1.5 | 1 | 0 |
+| 4.1.6 | 2 | 0 |
+| 4.1.7 | 3 | 0 |
+
+Total: ~32 new tests. Target final count: ~386 (from 354).
+
+---
+
 ## Validation Rules (enforced in ALL phases)
 
 ### Universal
