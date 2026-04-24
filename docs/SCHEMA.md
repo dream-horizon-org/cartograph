@@ -469,6 +469,10 @@ CREATE TABLE consolidations (
     -- constraint is the DB-layer belt-and-suspenders.
     CONSTRAINT consolidation_split_no_b2
         CHECK (NOT (nomination_type = 'split' AND status = 'B2')),
+    -- Phase 4.1: metadata JSONB for structured demo-tagging, evidence blobs,
+    -- cosine scores cited, etc. Callers populate via nominate_consolidation
+    -- (metadata={...}). Defaults to empty.
+    metadata JSONB NOT NULL DEFAULT '{}',
     mutation_assigned_to TEXT,                   -- agent_id responsible for executing mutation
                                                  -- merge: resolver picks A1 or A2 (more planes wins)
                                                  -- split: always A1 (self-nominator)

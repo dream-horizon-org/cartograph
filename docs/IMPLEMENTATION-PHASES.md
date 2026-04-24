@@ -1649,7 +1649,7 @@ Each step → incremental commit, tests alongside code:
 
 ---
 
-## Phase 4.1: Mutation completeness + demo-uncovered gaps
+## Phase 4.1: Mutation completeness + demo-uncovered gaps ✅
 
 Ships alongside Phase 4 after the first end-to-end demo (2026-04-24)
 surfaced ten real gaps. The demo ran parent SME → split nomination →
@@ -1928,6 +1928,18 @@ Update 6 docs for consistency post-4.1:
 | 4.1.7 | 3 | 0 |
 
 Total: ~32 new tests. Target final count: ~386 (from 354).
+
+### 4.1 Shipped summary (2026-04-24)
+
+All 9 sub-phases landed:
+- `87f4636` — 4.1.1 pydantic schema unblock
+- `0bd05cb` — 4.1.2 mutation-scoped transfer tools + stale hygiene (transfer_attributions retightened with consolidation_id; new: transfer_edges, transfer_flows, get_stale_edges, get_stale_flows)
+- `ceb035d` — 4.1.3 absorb_agent cascade flags (default on; workflow collapses from 5 calls to 2)
+- `c502a39` — 4.1.4 spawn_child_agent hardening (strict source_slice guard, welcome task for child, transfer_edge_ids + transfer_flow_ids params)
+- `1fc6385` — 4.1.5 + 4.1.6 + 4.1.7 + 4.1.8 bundle (mark_resource_done idempotency prompt, nominate_consolidation metadata JSONB, get_my_components, SME prompt split-awareness)
+
+Final test count: 383 passing. MCP tool count: 77 (up from 72 — added 5 tools, one signature change).
+Pre-existing flake on `test_flows.test_flow_fan_out_one_incoming_many_outgoing` unrelated to this work.
 
 ---
 
