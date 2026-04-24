@@ -311,17 +311,22 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `get_my_clarifications(agent_id)` | ✓ | ✓ | ✓ | ✓ | Non-terminal where agent is asker or responder |
 | `get_clarification_thread(agent_id, clar_id, page, limit)` | ✓ | ✓ | ✓ | ✓ | Scoped to asker + responder. |
 
-#### Mutation (planned · Phase 4)
+#### Mutation + Proxy inheritance (Phase 4 · shipped)
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `execute_mutation(agent_id, cons_id, new_status)` | — | — | ✓ *mutation POC* | — | Gated on `mutation_assigned_to == agent_id` AND `status='M'` |
-| `complete_consolidation(agent_id, cons_id)` | — | — | — | ✓ | MD→D |
-| `absorb_agent(agent_id, target_agent_id)` | — | — | ✓ *mutation POC* | — | Merge |
-| `spawn_child_agent(parent_id, cons_id, comp_data, briefing)` | — | — | ✓ *mutation POC* | — | Split |
-| `transfer_attributions(from_comp, to_comp, attr_ids[])` | — | — | ✓ *owns from_comp* | — | |
-| `get_proxy_items(agent_id)` | — | — | ✓ | — | Inherited items from absorbed agents |
-| `get_proxy_chats(agent_id, proxy_agent_id, page, limit)` | — | — | ✓ | — | Chat history of absorbed agent |
+| `execute_mutation(agent_id, cons_id, message)` | — | — | ✓ *mutation POC* | — | M→MD. Gated on `mutation_assigned_to == agent_id` AND `status='M'`. Notifies resolver. |
+| `complete_consolidation(agent_id, cons_id, message)` | — | — | — | ✓ | MD→D. Notifies both parties. |
+| `absorb_agent(agent_id, cons_id, target_id, reason?, notes?)` | — | — | ✓ *mutation POC* | — | Merge. Populates deactivation cols + unions source_slice + re-points RCA. Chain never flattened. |
+| `spawn_child_agent(parent_id, cons_id, child_id, comp_data, slice, briefing)` | — | — | ✓ *mutation POC* | — | Split. Atomic carve-out; `consolidation.child_agent_id` blocks re-spawn. |
+| `transfer_attributions(agent_id, from, to, ids[])` | — | — | ✓ *owns from* | — | Re-embeds both. Does NOT touch source_slice. |
+| `get_my_proxy_items(agent_id, limit?)` | — | — | ✓ | — | Walks merged_into chain; grouped by proxy agent with deactivation brief + depth. |
+| `act_on_proxy_item(survivor, item_type, item_id, action, payload?)` | — | — | ✓ | — | Router. Validates survivor is legal proxy, sets `_PROXY_CTX` ContextVar, invokes existing public tool with actor=proxy_agent_id. Writes proxy_audit. Supported: `(task,respond) (clarification,respond) (consolidation,respond) (chat,ack) (chat,send) (broadcast,ack)`. |
+
+Design notes (see IMPLEMENTATION-PHASES §Phase 4 for the full spec):
+- No `proxy_items` table. Inheritance derives from `agent_runs.merged_into_agent_id` at read time. Chain walked, never flattened — each deactivation's `deactivation_notes` stays historically accurate.
+- Shared helper `shared.actor_auth.require_active_agent()` gates every "actor must be active" check. Its `_PROXY_CTX` ContextVar is the only sanctioned relaxation (survivor-acts-as-proxy). Replaces 4 duplicated `_caller` helpers + 6 inline SELECTs.
+- Append-only `proxy_audit` log records who actually clicked (survivor) when an item ledger records the original owner. Admin UI joins on `(item_type, item_id)` for "via <survivor>" badges.
 
 ---
 
@@ -972,9 +977,9 @@ Orchestrator's job across ALL phases: identify blockers that are common, broadca
 │                                                                  │
 │  CONSOLIDATION           COMMUNICATION          MUTATION          │
 │  ─────────────           ──────────────         ────────         │
-│  consolidations          communications         proxy_items      │
-│                          clarifications                          │
-│                          broadcast_acks                           │
+│  consolidations          communications         proxy_audit      │
+│                          clarifications         (agent_runs.     │
+│                          broadcast_acks          merged_into)    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1080,9 +1085,14 @@ broadcast_acks
   communication_id (FK), agent_id (FK), acked_at
   PRIMARY KEY(communication_id, agent_id)
 
-proxy_items
-  id, surviving_agent_id (FK), decommissioned_agent_id, item_type,
-  item_id, status (pending|adopted|closed), created_at, resolved_at
+proxy_audit  (append-only; powers the "via <survivor>" admin-UI badge)
+  id, survivor_id (FK), proxy_agent_id (FK), item_type, item_id,
+  action, payload_summary (jsonb), created_at
+
+agent_runs  (Phase 4 deactivation fields)
+  ..., deactivation_reason, deactivation_notes,
+  merged_into_agent_id (self-FK, single-hop; walk at read time for
+                        transitive inheritance chains)
 ```
 
 ### 8.3 Embedding Strategy
@@ -1145,10 +1155,10 @@ WRITE TARGET (single, shared by all agents):
       clarification   (4):  create, respond, get_my, get_thread
       search          (1):  vector_search
 
-    PLANNED (Phase 4 — mutation):
+    Phase 4 — mutation + proxy (shipped):
       execute_mutation, complete_consolidation, absorb_agent,
-      spawn_child_agent, transfer_attributions, get_proxy_items,
-      get_proxy_chats.
+      spawn_child_agent, transfer_attributions, get_my_proxy_items,
+      act_on_proxy_item.
 
   Typed operations, NOT raw SQL.
   Scoping enforced inside each tool: agent_id + agent_type + plane checked

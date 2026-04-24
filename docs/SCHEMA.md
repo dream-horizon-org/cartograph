@@ -572,32 +572,53 @@ CREATE INDEX idx_clar_asker ON clarifications(asker_agent_id) WHERE status IN ('
 CREATE INDEX idx_clar_responder ON clarifications(responder_agent_id) WHERE status = 'B2';
 ```
 
-### `proxy_items`
+### Phase 4 deactivation cols on `agent_runs`
 
-Routes decommissioned agent's pending items to the surviving agent after a merge. The surviving agent triages these: close permanently or reopen under its own name.
+Three nullable columns populated by `absorb_agent` on the target row.
+Power the survivor's inherited-work inbox (`get_my_proxy_items`) via
+a recursive CTE on `merged_into_agent_id`. Single-hop pointer — chains
+are walked at read time, never flattened, so each deactivation's
+`deactivation_notes` stays historically accurate.
 
 ```sql
-CREATE TABLE proxy_items (
-    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    surviving_agent_id  TEXT NOT NULL REFERENCES agent_runs(agent_id),
-    decommissioned_agent_id TEXT NOT NULL,        -- the absorbed agent
-    item_type           TEXT NOT NULL CHECK (item_type IN (
-                            'task', 'consolidation', 'clarification',
-                            'chat', 'broadcast'
-                        )),
-    item_id             UUID NOT NULL,            -- FK to the source table row
-    status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
-                            'pending',             -- not yet triaged by surviving agent
-                            'adopted',             -- reopened under surviving agent's name
-                            'closed'               -- permanently closed
-                        )),
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    resolved_at         TIMESTAMPTZ
+ALTER TABLE agent_runs
+  ADD COLUMN deactivation_reason TEXT,       -- 'merged' | 'split_absorbed' | 'retired'
+  ADD COLUMN deactivation_notes  TEXT,       -- human/agent-authored brief
+  ADD COLUMN merged_into_agent_id TEXT
+    REFERENCES agent_runs(agent_id) ON DELETE SET NULL;
+
+CREATE INDEX idx_agent_runs_merged_into
+  ON agent_runs(merged_into_agent_id) WHERE merged_into_agent_id IS NOT NULL;
+```
+
+### `proxy_audit`
+
+Append-only log of "who acted via proxy on what." Every call to
+`act_on_proxy_item` writes one row. The admin UI joins on
+`(item_type, item_id)` to render a "via `<survivor>`" badge beside
+rows authored by a decommissioned agent.
+
+```sql
+CREATE TABLE proxy_audit (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    survivor_id     TEXT NOT NULL REFERENCES agent_runs(agent_id),
+    proxy_agent_id  TEXT NOT NULL REFERENCES agent_runs(agent_id),
+    item_type       TEXT NOT NULL,   -- 'task'|'consolidation'|'clarification'|'chat'|'broadcast'
+    item_id         TEXT NOT NULL,   -- stringified (tables vary UUID vs TEXT)
+    action          TEXT NOT NULL,   -- 'respond'|'close'|'ack'|...
+    payload_summary JSONB NOT NULL DEFAULT '{}',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_proxy_surviving ON proxy_items(surviving_agent_id) WHERE status = 'pending';
-CREATE INDEX idx_proxy_decom ON proxy_items(decommissioned_agent_id);
+CREATE INDEX idx_proxy_audit_survivor ON proxy_audit(survivor_id, created_at DESC);
+CREATE INDEX idx_proxy_audit_item     ON proxy_audit(item_type, item_id);
 ```
+
+No `proxy_items` table ships. The inherited-work inbox derives from
+UNIONing pending rows across 5 existing tables, filtered by the
+survivor's transitive merge chain. Lifecycle state lives on the
+underlying item rows (`tasks.status`, `communications.acked_at`,
+etc.); a proxy act via the router flips those naturally.
 
 ---
 
@@ -655,7 +676,7 @@ Model: **`mxbai-embed-large` via local Ollama** (1024 dims, Metal-accelerated on
 | communications | done   |
 | clarifications | done   |
 | broadcast_acks | done   |
-| proxy_items    | done   |
+| proxy_audit    | done   |
 | resource_component_agents | done |
 
 
