@@ -17,11 +17,14 @@ def run_auto_transitions() -> int:
 
 
 def _auto_escalate_to_resolver() -> int:
-    """Both confidence scores > threshold AND r_conf IS NULL → set status = 'R'."""
+    """Merge-only. Both confidence scores ≥ threshold AND r_conf IS NULL →
+    set status = 'R'. Splits skip this entirely — they're inserted at 'R'
+    directly (no negotiation phase) so never enter B1/B2."""
     rowcount = execute_mutate(
         """UPDATE consolidations
            SET status = 'R', updated_at = now()
-           WHERE status IN ('B1', 'B2')
+           WHERE nomination_type = 'merge'
+             AND status IN ('B1', 'B2')
              AND a_conf_score >= %s
              AND b_conf_score >= %s
              AND r_conf_score IS NULL""",
@@ -33,11 +36,13 @@ def _auto_escalate_to_resolver() -> int:
 
 
 def _auto_reject() -> int:
-    """Both confidence scores < reject threshold → set status = 'F'."""
+    """Merge-only. Both confidence scores ≤ reject threshold → set status='F'.
+    Splits have no second score, so this rule doesn't apply to them."""
     rowcount = execute_mutate(
         """UPDATE consolidations
            SET status = 'F', updated_at = now()
-           WHERE status IN ('B1', 'B2')
+           WHERE nomination_type = 'merge'
+             AND status IN ('B1', 'B2')
              AND a_conf_score IS NOT NULL
              AND b_conf_score IS NOT NULL
              AND a_conf_score <= %s

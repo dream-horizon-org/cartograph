@@ -687,6 +687,26 @@ def run_migrations() -> None:
                      AND agent_b_id IS NULL"""
             )
 
+            # Belt-and-suspenders for the per-type state machines. Split
+            # consolidations must never sit at B2 — structurally, B2 is a
+            # "nominated's turn" state that only exists for merge. This
+            # constraint codifies the invariant so any bug that tried to
+            # park a split at B2 fails hard at the DB layer. Idempotent
+            # via pg_constraint existence check.
+            cur.execute(
+                """DO $$
+                   BEGIN
+                     IF NOT EXISTS (
+                       SELECT 1 FROM pg_constraint
+                       WHERE conname = 'consolidation_split_no_b2'
+                     ) THEN
+                       ALTER TABLE consolidations
+                         ADD CONSTRAINT consolidation_split_no_b2
+                         CHECK (NOT (nomination_type = 'split' AND status = 'B2'));
+                     END IF;
+                   END$$"""
+            )
+
             # --- Indexes ---
             _create_indexes(cur)
 

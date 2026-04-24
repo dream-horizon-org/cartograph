@@ -273,15 +273,61 @@ def test_resolver_cannot_send_solo_split_back_to_B2(agent_factory):
         "sme-a", ca, None, "split", 0.9, "split"
     )
     # Already at R from nomination. Resolver tries to bounce back to B2.
-    with pytest.raises(ValueError, match="solo-party split"):
+    # Post-refactor: split has its own state machine that STRUCTURALLY
+    # lacks B2 — the rejection comes from the transition table, not a
+    # defensive guard. Allowed targets from R (split): B1, F, M.
+    with pytest.raises(ValueError, match="Invalid resolver transition"):
         consolidation.review_consolidation(
             "res", cons["id"], 0.8, "need more info", "B2", None
         )
-    # B1 (back to nominator) remains valid.
+    # B1 (back to nominator) remains valid for splits.
     result = consolidation.review_consolidation(
         "res", cons["id"], 0.8, "need more info", "B1", None
     )
     assert result["status"] == "B1"
+
+
+def test_db_check_constraint_blocks_split_at_B2(agent_factory):
+    """Belt-and-suspenders: even if code somehow tried a raw UPDATE, the DB
+    refuses a split consolidation at B2."""
+    import psycopg
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cons = consolidation.nominate_consolidation(
+        "sme-a", ca, None, "split", 0.9, "split"
+    )
+    with pytest.raises((psycopg.errors.CheckViolation, Exception)) as exc_info:
+        execute_mutate(
+            "UPDATE consolidations SET status='B2' WHERE id=%s",
+            (cons["id"],),
+        )
+    # Unwrap — psycopg raises a generic Exception wrapping CheckViolation.
+    assert "consolidation_split_no_b2" in str(exc_info.value)
+
+
+def test_split_b1_nominator_back_to_R_only(agent_factory):
+    """Split at B1 (resolver asked for more info). Nominator's only legal
+    target is R — NOT B2 (merge-only state)."""
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    agent_factory("res", "resolver")
+    cons = consolidation.nominate_consolidation(
+        "sme-a", ca, None, "split", 0.9, "split"
+    )
+    consolidation.review_consolidation(
+        "res", cons["id"], 0.7, "need more info", "B1", None
+    )
+    # Now at B1 — nominator responds.
+    with pytest.raises(ValueError, match="Invalid transition"):
+        consolidation.respond_consolidation(
+            "sme-a", cons["id"], 0.95, "more evidence", "B2"
+        )
+    # R is the valid target. Manual escalate needs r_conf_score set; the
+    # previous review call set it to 0.7, so this should succeed.
+    result = consolidation.respond_consolidation(
+        "sme-a", cons["id"], 0.95, "more evidence", "R"
+    )
+    assert result["status"] == "R"
 
 
 # ---------- Phase 4: mutation lifecycle ----------

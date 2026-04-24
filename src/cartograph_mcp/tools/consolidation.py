@@ -34,24 +34,61 @@ from shared.db import execute, execute_one, execute_returning
 
 _VALID_TYPES = {"merge", "split"}
 
-# Transitions by role, keyed by current status → set of allowed next states.
-_AGENT_A_TRANSITIONS = {
+# Per-type state machines. Keeping them separate (rather than one shared
+# machine with defensive patches) matches the pattern used for
+# clarifications (_ASKER_/_RESPONDER_TRANSITIONS) and tasks
+# (_WORKER_/_OWNER_TRANSITIONS) — structural, not conditional.
+#
+# MERGE: two parties negotiate; initial status=B2 (agent_b's turn);
+#   auto-escalate when both confidence scores ≥ threshold.
+_MERGE_AGENT_A_TRANSITIONS = {
     "B1": {"B2", "R"},   # nominator's turn
-    "B2": set(),          # not nominator's turn
+    "B2": set(),         # not nominator's turn
     "R": set(),
     "M": set(), "MD": set(), "D": set(), "F": set(),
 }
-_AGENT_B_TRANSITIONS = {
+_MERGE_AGENT_B_TRANSITIONS = {
     "B2": {"B1", "R"},   # nominated's turn
-    "B1": set(),          # not nominated's turn
+    "B1": set(),         # not nominated's turn
     "R": set(),
     "M": set(), "MD": set(), "D": set(), "F": set(),
 }
-_RESOLVER_TRANSITIONS = {
+_MERGE_RESOLVER_TRANSITIONS = {
     "R":  {"B1", "B2", "F", "M"},
     "MD": {"D"},
     "B1": set(), "B2": set(), "M": set(), "D": set(), "F": set(),
 }
+
+# SPLIT: one party (self-nomination); no agent_b; initial status=R
+#   (resolver picks up directly — no negotiation phase). B2 is
+#   structurally unreachable.
+_SPLIT_AGENT_A_TRANSITIONS = {
+    "B1": {"R"},         # nominator's only target is back-to-resolver
+    "R": set(),          # R is resolver's turn (or system via mutation)
+    "M": set(), "MD": set(), "D": set(), "F": set(),
+}
+# No _SPLIT_AGENT_B_TRANSITIONS — splits have no agent_b.
+_SPLIT_RESOLVER_TRANSITIONS = {
+    "R":  {"B1", "F", "M"},   # no B2 — nobody on that side to respond
+    "MD": {"D"},
+    "B1": set(), "M": set(), "D": set(), "F": set(),
+}
+
+
+def _agent_transitions_for(cons: dict, is_a: bool) -> dict:
+    """Pick the right agent-side transition table. For split, only agent_a
+    exists; callers should reject b before reaching here."""
+    if cons["nomination_type"] == "split":
+        return _SPLIT_AGENT_A_TRANSITIONS  # is_a guaranteed by caller
+    return _MERGE_AGENT_A_TRANSITIONS if is_a else _MERGE_AGENT_B_TRANSITIONS
+
+
+def _resolver_transitions_for(cons: dict) -> dict:
+    return (
+        _SPLIT_RESOLVER_TRANSITIONS
+        if cons["nomination_type"] == "split"
+        else _MERGE_RESOLVER_TRANSITIONS
+    )
 
 
 _caller = require_active_agent  # thin alias; see shared.actor_auth
@@ -202,9 +239,16 @@ def respond_consolidation(
             f"{consolidation_id} (agent_a={cons['agent_a_id']}, "
             f"agent_b={cons['agent_b_id']})"
         )
+    # Splits have no agent_b; if is_b fires for a split something is deeply
+    # off with the row. Guard before picking a transition table.
+    if cons["nomination_type"] == "split" and is_b:
+        raise ValueError(
+            "Split consolidations have no agent_b; respond via the "
+            "nominator only."
+        )
 
     current = cons["status"]
-    allowed = (_AGENT_A_TRANSITIONS if is_a else _AGENT_B_TRANSITIONS).get(current, set())
+    allowed = _agent_transitions_for(cons, is_a).get(current, set())
     if new_status not in allowed:
         role = "agent_a (nominator)" if is_a else "agent_b (nominated)"
         raise ValueError(
@@ -216,15 +260,6 @@ def respond_consolidation(
         raise ValueError(
             "Cannot escalate to R manually unless resolver has set r_conf_score. "
             "Let the auto-transitions scanner (both > 0.85) handle first escalation."
-        )
-    # Solo splits (no agent_b) have no one to respond → B2 is unreachable.
-    # Block the transition defensively in case state-machine quirks let
-    # someone try to put one there.
-    if new_status == "B2" and cons["agent_b_id"] is None:
-        raise ValueError(
-            "Cannot transition a solo-party split (agent_b_id IS NULL) to B2 — "
-            "there is no counter-party to respond. Valid targets: R (back to "
-            "resolver), or keep status as-is."
         )
 
     conf_col = "a_conf_score" if is_a else "b_conf_score"
@@ -292,18 +327,12 @@ def review_consolidation(
         raise ValueError(f"Consolidation {consolidation_id} not found")
 
     current = cons["status"]
-    allowed = _RESOLVER_TRANSITIONS.get(current, set())
+    allowed = _resolver_transitions_for(cons).get(current, set())
     if new_status not in allowed:
         raise ValueError(
-            f"Invalid resolver transition {current} → {new_status}. "
+            f"Invalid resolver transition {current} → {new_status} "
+            f"for {cons['nomination_type']} consolidation. "
             f"Allowed: {sorted(allowed) if allowed else 'none'}"
-        )
-    # Solo splits (no agent_b) have no one to respond at B2 — if resolver
-    # wants to send back for more info, it has to be B1 (nominator's turn).
-    if new_status == "B2" and cons["agent_b_id"] is None:
-        raise ValueError(
-            "Cannot send a solo-party split back to B2 (no counter-party to "
-            "respond). For splits, use B1 to send back to the nominator."
         )
 
     if new_status == "M":
