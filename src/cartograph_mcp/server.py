@@ -927,16 +927,67 @@ def spawn_child_agent(
 @mcp.tool()
 def transfer_attributions(
     agent_id: str,
+    consolidation_id: str,
+    attribution_ids: list[str],
     from_component_id: str,
     to_component_id: str,
-    attribution_ids: list[str],
 ) -> dict[str, Any]:
-    """Phase 4. Move attribution rows between two components. Re-embeds both.
-    Does NOT touch source_slice — run upsert_component separately if slice
-    also needs to move."""
+    """Phase 4.1. Mutation-scoped attribution transfer. Gated on:
+      - active consolidation in state 'M'
+      - caller = consolidation.mutation_assigned_to
+      - (from, to) within consolidation scope (merge: a↔b; split: parent→child)
+    Re-embeds both components. Does NOT touch source_slice."""
     return mutation_tool.transfer_attributions(
-        agent_id, from_component_id, to_component_id, attribution_ids,
+        agent_id, consolidation_id, attribution_ids,
+        from_component_id, to_component_id,
     )
+
+
+@mcp.tool()
+def transfer_edges(
+    agent_id: str,
+    consolidation_id: str,
+    edge_ids: list[str],
+    direction: str = "both",
+) -> dict[str, Any]:
+    """Phase 4.1. Mutation-scoped edge transfer. Rewrites
+    from_component_id and/or to_component_id per `direction`:
+      'from' | 'to' | 'both'.
+    Catalog collision → collapse (target wins, source dropped).
+    Bound/dangling full-key collision → reject."""
+    return mutation_tool.transfer_edges(
+        agent_id, consolidation_id, edge_ids, direction,
+    )
+
+
+@mcp.tool()
+def transfer_flows(
+    agent_id: str,
+    consolidation_id: str,
+    flow_ids: list[str],
+) -> dict[str, Any]:
+    """Phase 4.1. Mutation-scoped flow transfer. Rewrites flows.component_id
+    to the consolidation's target. Rejects on (component_id, incoming,
+    outgoing) triple collision at target."""
+    return mutation_tool.transfer_flows(
+        agent_id, consolidation_id, flow_ids,
+    )
+
+
+@mcp.tool()
+def get_stale_edges(agent_id: str) -> list[dict[str, Any]]:
+    """Phase 4.1 hygiene. Return edges owned by caller's component where
+    the OTHER endpoint's component is decommissioned. Each row carries
+    stale_component_merged_into_agent_id when the dead component was
+    absorbed — caller can re-bind to the survivor via bind_edge."""
+    return components_tool.get_stale_edges(agent_id)
+
+
+@mcp.tool()
+def get_stale_flows(agent_id: str) -> list[dict[str, Any]]:
+    """Phase 4.1 hygiene. Return flows on caller's component where an
+    edge endpoint's component is decommissioned."""
+    return components_tool.get_stale_flows(agent_id)
 
 
 @mcp.tool()

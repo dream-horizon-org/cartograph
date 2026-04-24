@@ -70,6 +70,55 @@ def _component_of_agent(agent_id: str) -> str | None:
     return str(row["component_id"]) if row else None
 
 
+def _assert_transfer_scope(
+    agent_id: str,
+    consolidation_id: str,
+    from_component_id: str,
+    to_component_id: str,
+) -> dict:
+    """Common gate for mutation-scoped transfers. Requires:
+      1. Active consolidation in state 'M'
+      2. Caller = consolidation.mutation_assigned_to
+      3. (from, to) pair is legal for the consolidation's nomination_type
+         - merge: either direction between component_a and component_b
+         - split: parent (component_a) → newly-spawned child only
+                  (child resolved via consolidation.child_agent_id)
+
+    Returns the consolidation row."""
+    cons = _assert_mutation_gate(agent_id, consolidation_id)
+    from_component_id = str(from_component_id)
+    to_component_id = str(to_component_id)
+
+    if cons["nomination_type"] == "merge":
+        comp_a = str(cons["component_a_id"])
+        comp_b = str(cons["component_b_id"]) if cons["component_b_id"] else None
+        if comp_b is None:
+            raise ValueError(
+                f"merge consolidation {consolidation_id} has no component_b"
+            )
+        allowed = {(comp_a, comp_b), (comp_b, comp_a)}
+    else:  # split
+        if not cons["child_agent_id"]:
+            raise ValueError(
+                f"Split consolidation {consolidation_id} has no spawned child yet. "
+                "Call spawn_child_agent before transferring edges/flows/attributions."
+            )
+        child_comp = _component_of_agent(cons["child_agent_id"])
+        if child_comp is None:
+            raise ValueError(
+                f"Split child {cons['child_agent_id']} has no active component."
+            )
+        allowed = {(str(cons["component_a_id"]), child_comp)}
+
+    if (from_component_id, to_component_id) not in allowed:
+        raise ValueError(
+            f"Transfer ({from_component_id} → {to_component_id}) outside "
+            f"scope of {cons['nomination_type']} consolidation {consolidation_id}. "
+            f"Allowed pairs: {sorted(allowed)}"
+        )
+    return cons
+
+
 def _merge_source_slices(survivor: dict | None, target: dict | None) -> dict:
     """Per-resource union of two source_slice dicts.
 
@@ -402,21 +451,25 @@ def spawn_child_agent(
 
 def transfer_attributions(
     agent_id: str,
+    consolidation_id: str,
+    attribution_ids: list[str],
     from_component_id: str,
     to_component_id: str,
-    attribution_ids: list[str],
 ) -> dict:
-    """Move a specific set of attribution rows between two components
-    owned by the caller. Re-embeds BOTH components so vector_search
-    stays calibrated to the new evidence set.
+    """Mutation-scoped attribution transfer. Phase 4.1 retightens the
+    Phase 4 version (which only checked "caller owns from_component"):
+    now gated on an active consolidation in state 'M' with caller as
+    mutation_assigned_to AND (from, to) within the consolidation's scope.
 
-    Does NOT touch source_slice. That's structural + moves via
-    upsert_component explicitly. Attributions are evidence; decoupled
-    from structure.
+    For merge (component_a ↔ component_b): either direction allowed.
+    For split (component_a → child): only parent→child allowed; requires
+    spawn_child_agent to have run first.
 
-    Validates: caller owns from_component. Refuses empty attribution_ids.
+    Re-embeds BOTH components so vector_search stays calibrated. Does
+    NOT touch source_slice — attributions are evidence, slice is
+    structural; caller runs upsert_component separately if slice also
+    changes.
     """
-    require_active_agent(agent_id)
     if not attribution_ids:
         raise ValueError("attribution_ids must be non-empty")
     from_component_id = str(from_component_id).strip()
@@ -424,25 +477,8 @@ def transfer_attributions(
     if from_component_id == to_component_id:
         raise ValueError("from_component_id and to_component_id must differ")
     attribution_ids = [str(a) for a in attribution_ids]
-
-    # Ownership check: caller must own from_component via RCA.
-    owns = execute_one(
-        """SELECT 1 FROM resource_component_agents
-           WHERE agent_id = %s AND component_id = %s LIMIT 1""",
-        (agent_id, from_component_id),
-    )
-    if owns is None:
-        raise ValueError(
-            f"Agent {agent_id} does not own from_component {from_component_id}"
-        )
-    # Validate target component exists + is active.
-    to_row = execute_one(
-        "SELECT status FROM components WHERE id = %s", (to_component_id,)
-    )
-    if to_row is None:
-        raise ValueError(f"to_component {to_component_id} not found")
-    if to_row["status"] == "decommissioned":
-        raise ValueError(f"to_component {to_component_id} is decommissioned")
+    # Single scope check — replaces the old RCA-ownership lookup.
+    _assert_transfer_scope(agent_id, consolidation_id, from_component_id, to_component_id)
 
     rowcount = execute_mutate(
         """UPDATE attributions
@@ -478,4 +514,265 @@ def transfer_attributions(
         "transferred": rowcount,
         "from_component_id": from_component_id,
         "to_component_id": to_component_id,
+    }
+
+
+# ---------- transfer_edges ----------
+
+
+def transfer_edges(
+    agent_id: str,
+    consolidation_id: str,
+    edge_ids: list[str],
+    direction: str = "both",
+) -> dict:
+    """Mutation-scoped edge transfer. Re-points `from_component_id`
+    and/or `to_component_id` on the given edges to the consolidation's
+    target component.
+
+    `direction`:
+      - 'from' : rewrite from_component_id only (bound/dangling — the
+                 caller owns these; they move with their owner).
+      - 'to'   : rewrite to_component_id only (catalogs — the callee
+                 owns these).
+      - 'both' : apply to both endpoints where they match the from
+                 component (default; safe for mixed batches).
+
+    Collision rules:
+      - Catalog (kind='catalog'): on (to_component_id, edge_type,
+        identifier) collision, COLLAPSE — target component keeps its
+        existing row, source's is deleted. Catalogs are declarative;
+        duplicates represent the same endpoint.
+      - Bound/dangling: on full-key collision (from, to, type,
+        identifier), REJECT — caller must reconcile manually (they
+        represent distinct caller claims).
+
+    Returns {"transferred": int, "collapsed": int, "from_component_id",
+              "to_component_id", "direction"}.
+    """
+    if direction not in ("from", "to", "both"):
+        raise ValueError("direction must be one of 'from' | 'to' | 'both'")
+    if not edge_ids:
+        raise ValueError("edge_ids must be non-empty")
+    edge_ids = [str(e) for e in edge_ids]
+
+    # Gate-check consolidation state FIRST so callers see the M-state
+    # error before any edge-existence errors (better UX + matches
+    # transfer_flows ordering).
+    _assert_mutation_gate(agent_id, consolidation_id)
+
+    # `kind` is derived from the nullable from/to columns — not a
+    # physical column on the table. Compute it inline so the collision
+    # rules can branch on catalog vs bound/dangling.
+    edges = execute(
+        """SELECT id, from_component_id, to_component_id, edge_type, identifier,
+                  CASE
+                    WHEN from_component_id IS NULL THEN 'catalog'
+                    WHEN to_component_id IS NULL THEN 'dangling'
+                    ELSE 'bound'
+                  END AS kind
+           FROM edges WHERE id = ANY(%s)""",
+        (edge_ids,),
+    )
+    if len(edges) != len(edge_ids):
+        found = {str(e["id"]) for e in edges}
+        missing = [e for e in edge_ids if e not in found]
+        raise ValueError(f"Edges not found: {missing}")
+
+    # Resolve from_component_id: every edge must share the same "source"
+    # component for the given direction, derived from the first row.
+    # Caller passes a homogeneous batch (sibling edges of one component).
+    first = edges[0]
+    from_comp = None
+    if direction in ("from", "both") and first["from_component_id"]:
+        from_comp = str(first["from_component_id"])
+    if direction == "to" or (from_comp is None and direction == "both"):
+        if first["to_component_id"]:
+            from_comp = str(first["to_component_id"])
+    if from_comp is None:
+        raise ValueError(
+            f"Cannot resolve source component for edge {first['id']} "
+            f"with direction={direction}"
+        )
+
+    # Resolve to_component_id via the scope gate.
+    # Caller must tell us which component to transfer to — derive from
+    # consolidation scope. Ambiguous without; require explicit target
+    # via a synthetic lookup: caller of this function is paired with a
+    # mutation consolidation; scope_assert picks the legal target.
+    cons = execute_one(
+        "SELECT * FROM consolidations WHERE id = %s", (consolidation_id,)
+    )
+    if cons is None:
+        raise ValueError(f"Consolidation {consolidation_id} not found")
+    # Compute the expected target based on scope rules.
+    if cons["nomination_type"] == "merge":
+        a = str(cons["component_a_id"])
+        b = str(cons["component_b_id"]) if cons["component_b_id"] else None
+        if from_comp == a:
+            to_comp = b
+        elif from_comp == b:
+            to_comp = a
+        else:
+            to_comp = None
+    else:  # split
+        child_comp = (
+            _component_of_agent(cons["child_agent_id"])
+            if cons["child_agent_id"] else None
+        )
+        to_comp = child_comp if from_comp == str(cons["component_a_id"]) else None
+    if to_comp is None:
+        raise ValueError(
+            f"Cannot derive transfer target for from_component={from_comp} "
+            f"on {cons['nomination_type']} consolidation {consolidation_id}"
+        )
+    # Enforce gate (raises if scope violated).
+    _assert_transfer_scope(agent_id, consolidation_id, from_comp, to_comp)
+
+    transferred = 0
+    collapsed = 0
+
+    for e in edges:
+        eid = str(e["id"])
+        kind = e["kind"]
+        # Decide which columns to rewrite for THIS edge.
+        rewrite_from = direction in ("from", "both") and (
+            str(e["from_component_id"]) == from_comp
+            if e["from_component_id"] else False
+        )
+        rewrite_to = direction in ("to", "both") and (
+            str(e["to_component_id"]) == from_comp
+            if e["to_component_id"] else False
+        )
+        if not (rewrite_from or rewrite_to):
+            continue  # edge doesn't reference from_comp; skip
+
+        # Catalog collision handling: if we're moving a catalog's
+        # to_component_id to one that already has an equivalent catalog
+        # (same (to, type, identifier)), drop THIS row instead of
+        # colliding the unique index.
+        if rewrite_to and kind == "catalog":
+            existing = execute_one(
+                """SELECT 1 FROM edges
+                   WHERE from_component_id IS NULL
+                     AND to_component_id = %s
+                     AND edge_type = %s AND identifier = %s
+                     AND id != %s""",
+                (to_comp, e["edge_type"], e["identifier"], eid),
+            )
+            if existing is not None:
+                execute_mutate("DELETE FROM edges WHERE id = %s", (eid,))
+                collapsed += 1
+                continue
+
+        # Build the UPDATE.
+        set_cols = []
+        params: list = []
+        if rewrite_from:
+            set_cols.append("from_component_id = %s")
+            params.append(to_comp)
+        if rewrite_to:
+            set_cols.append("to_component_id = %s")
+            params.append(to_comp)
+        set_cols.append("last_seen_at = now()")
+        params.append(eid)
+        try:
+            execute_mutate(
+                f"UPDATE edges SET {', '.join(set_cols)} WHERE id = %s",
+                params,
+            )
+            transferred += 1
+        except Exception as exc:
+            # Bound/dangling full-key collision — reject.
+            raise ValueError(
+                f"Edge {eid} collision on target component {to_comp}: {exc}"
+            ) from exc
+
+    return {
+        "transferred": transferred,
+        "collapsed": collapsed,
+        "from_component_id": from_comp,
+        "to_component_id": to_comp,
+        "direction": direction,
+    }
+
+
+# ---------- transfer_flows ----------
+
+
+def transfer_flows(
+    agent_id: str,
+    consolidation_id: str,
+    flow_ids: list[str],
+) -> dict:
+    """Mutation-scoped flow transfer. Re-points `flows.component_id` on
+    the given flows to the consolidation's target component.
+
+    Rejects on (component_id, incoming_edge_id, outgoing_edge_id)
+    collision — flows are unique per triple, so a duplicate at the
+    target means the target already has that wiring and caller should
+    delete one side explicitly.
+
+    Returns {"transferred": int, "from_component_id", "to_component_id"}.
+    """
+    if not flow_ids:
+        raise ValueError("flow_ids must be non-empty")
+    flow_ids = [str(f) for f in flow_ids]
+
+    # Gate-check consolidation state FIRST so callers get the M-state error
+    # before flow-existence errors (improves UX + matches transfer_edges).
+    cons = _assert_mutation_gate(agent_id, consolidation_id)
+
+    flows = execute(
+        "SELECT id, component_id, incoming_edge_id, outgoing_edge_id "
+        "FROM flows WHERE id = ANY(%s)",
+        (flow_ids,),
+    )
+    if len(flows) != len(flow_ids):
+        found = {str(f["id"]) for f in flows}
+        missing = [f for f in flow_ids if f not in found]
+        raise ValueError(f"Flows not found: {missing}")
+
+    from_comp = str(flows[0]["component_id"])
+    if any(str(f["component_id"]) != from_comp for f in flows):
+        raise ValueError(
+            "All flows in a batch must share the same component_id"
+        )
+    if cons["nomination_type"] == "merge":
+        a = str(cons["component_a_id"])
+        b = str(cons["component_b_id"]) if cons["component_b_id"] else None
+        to_comp = b if from_comp == a else a if from_comp == b else None
+    else:
+        child_comp = (
+            _component_of_agent(cons["child_agent_id"])
+            if cons["child_agent_id"] else None
+        )
+        to_comp = child_comp if from_comp == str(cons["component_a_id"]) else None
+    if to_comp is None:
+        raise ValueError(
+            f"Cannot derive transfer target for from_component={from_comp} "
+            f"on {cons['nomination_type']} consolidation {consolidation_id}"
+        )
+    _assert_transfer_scope(agent_id, consolidation_id, from_comp, to_comp)
+
+    transferred = 0
+    for f in flows:
+        fid = str(f["id"])
+        try:
+            execute_mutate(
+                """UPDATE flows
+                   SET component_id = %s, updated_at = now()
+                   WHERE id = %s""",
+                (to_comp, fid),
+            )
+            transferred += 1
+        except Exception as exc:
+            raise ValueError(
+                f"Flow {fid} collision at target component {to_comp}: {exc}"
+            ) from exc
+
+    return {
+        "transferred": transferred,
+        "from_component_id": from_comp,
+        "to_component_id": to_comp,
     }

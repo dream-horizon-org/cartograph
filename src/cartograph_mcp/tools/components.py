@@ -898,3 +898,139 @@ def get_unresolved(agent_id: str, component_id: str) -> list[dict]:
            ORDER BY resolved ASC, created_at DESC""",
         (component_id,),
     )
+
+
+# ---------- Phase 4.1 hygiene: surface stale refs on this SME's edges ----------
+
+
+def get_stale_edges(agent_id: str) -> list[dict]:
+    """Return edges owned by this SME's component where the OTHER
+    endpoint's component is decommissioned. "Owned" = either the edge's
+    from_component_id OR to_component_id matches the caller's component.
+
+    Each row includes `stale_component_merged_into_agent_id` when the
+    dead component was absorbed (so the caller can re-bind to the
+    survivor via bind_edge). Null survivor = component was
+    decommissioned outright (e.g. via decommission_component).
+
+    Hygiene-cycle tool — SMEs call this every few wakes to surface
+    orphan edges created when upstream mutations skipped the
+    transfer_edges step or when a related component was decommissioned
+    directly.
+    """
+    _caller(agent_id)
+    my_comp = execute_one(
+        """SELECT rca.component_id
+           FROM resource_component_agents rca
+           JOIN components c ON c.id = rca.component_id
+           WHERE rca.agent_id = %s AND c.status != 'decommissioned'
+           LIMIT 1""",
+        (agent_id,),
+    )
+    if my_comp is None:
+        return []
+    my_comp_id = str(my_comp["component_id"])
+
+    # `kind` computed inline (not a physical column).
+    # `my_side` = which column holds MY component (from|to).
+    # Survivor lookup: after absorb, RCA on the dead component gets
+    # re-pointed to the survivor, so joining components → RCA → agent_runs
+    # lands on the survivor (merged_into=NULL). Instead, find the merge
+    # consolidation whose component_b_id = the dead component, then look
+    # up agent_b_id's merged_into_agent_id. Works for absorb-produced
+    # decommissioned components; raw decommission_component leaves it NULL.
+    rows = execute(
+        """SELECT
+               e.id AS edge_id,
+               CASE
+                 WHEN e.from_component_id IS NULL THEN 'catalog'
+                 WHEN e.to_component_id IS NULL THEN 'dangling'
+                 ELSE 'bound'
+               END AS kind,
+               e.edge_type, e.identifier,
+               e.from_component_id, e.to_component_id,
+               CASE WHEN e.from_component_id = %s THEN 'from'
+                    ELSE 'to' END AS my_side,
+               CASE WHEN e.from_component_id = %s THEN e.to_component_id
+                    ELSE e.from_component_id END AS stale_component_id,
+               c.canonical_name AS stale_component_canonical,
+               c.display_name   AS stale_component_display,
+               ar_b.merged_into_agent_id
+                   AS stale_component_merged_into_agent_id,
+               c.status AS stale_component_status
+           FROM edges e
+           JOIN components c ON c.id =
+               CASE WHEN e.from_component_id = %s THEN e.to_component_id
+                    ELSE e.from_component_id END
+           LEFT JOIN consolidations cons
+               ON cons.component_b_id = c.id
+              AND cons.nomination_type = 'merge'
+           LEFT JOIN agent_runs ar_b ON ar_b.agent_id = cons.agent_b_id
+           WHERE (e.from_component_id = %s OR e.to_component_id = %s)
+             AND c.status = 'decommissioned'
+           ORDER BY e.edge_type, e.identifier""",
+        (my_comp_id, my_comp_id, my_comp_id, my_comp_id, my_comp_id),
+    )
+    # Suggested action string. Resolver-worthy annotations; caller agent
+    # interprets based on my_side + stale_component_merged_into_agent_id.
+    for r in rows:
+        if r["stale_component_merged_into_agent_id"]:
+            r["suggested_action"] = "re-bind-to-survivor"
+        else:
+            r["suggested_action"] = "target-gone-accept-or-escalate"
+    return rows
+
+
+def get_stale_flows(agent_id: str) -> list[dict]:
+    """Return flows on this SME's component where the referenced
+    incoming or outgoing edge's counterparty component is decommissioned.
+    Tells the caller which flow rows have at least one dead
+    edge-endpoint so they can rewire or delete.
+    """
+    _caller(agent_id)
+    my_comp = execute_one(
+        """SELECT rca.component_id
+           FROM resource_component_agents rca
+           JOIN components c ON c.id = rca.component_id
+           WHERE rca.agent_id = %s AND c.status != 'decommissioned'
+           LIMIT 1""",
+        (agent_id,),
+    )
+    if my_comp is None:
+        return []
+    my_comp_id = str(my_comp["component_id"])
+
+    return execute(
+        """SELECT
+               f.id AS flow_id, f.component_id,
+               f.incoming_edge_id, f.outgoing_edge_id,
+               CASE
+                 WHEN ein.from_component_id IS NULL THEN 'catalog'
+                 WHEN ein.to_component_id IS NULL THEN 'dangling'
+                 ELSE 'bound'
+               END AS incoming_kind,
+               ein.edge_type AS incoming_edge_type,
+               ein.identifier AS incoming_identifier,
+               cin.status AS incoming_other_status,
+               CASE
+                 WHEN eout.from_component_id IS NULL THEN 'catalog'
+                 WHEN eout.to_component_id IS NULL THEN 'dangling'
+                 ELSE 'bound'
+               END AS outgoing_kind,
+               eout.edge_type AS outgoing_edge_type,
+               eout.identifier AS outgoing_identifier,
+               cout.status AS outgoing_other_status
+           FROM flows f
+           JOIN edges ein  ON ein.id = f.incoming_edge_id
+           JOIN edges eout ON eout.id = f.outgoing_edge_id
+           -- Pull the component "on the other side" for each edge:
+           -- for incoming, the caller IS from_component_id (or NULL for catalog).
+           -- for outgoing, the callee IS to_component_id (or NULL for dangling).
+           LEFT JOIN components cin  ON cin.id  = ein.from_component_id
+           LEFT JOIN components cout ON cout.id = eout.to_component_id
+           WHERE f.component_id = %s
+             AND (cin.status = 'decommissioned'
+                  OR cout.status = 'decommissioned')
+           ORDER BY f.updated_at DESC""",
+        (my_comp_id,),
+    )

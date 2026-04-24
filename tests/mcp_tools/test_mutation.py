@@ -350,83 +350,333 @@ def test_spawn_requires_non_empty_slice(agent_factory):
 
 
 def test_transfer_attributions_moves_rows_and_reembeds(agent_factory):
-    _iter(agent_factory)
-    ca, ra = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
-    # Create second component + RCA for sme-a on a second resource.
-    rb = resources.upsert_resource("i", "github", "repo", "o/b")
-    execute_mutate(
-        "INSERT INTO resource_component_agents (resource_id, component_id, agent_id) "
-        "VALUES (%s, %s, 'sme-a')",
-        (rb["id"], ca),  # temporarily point to ca so we can upsert second comp
-    )
-    # Actually upsert a second component manually (component_type required).
-    cb_row = execute_one(
-        """INSERT INTO components (canonical_name, display_name, component_type)
-           VALUES ('o/b', 'b', 'application') RETURNING id"""
-    )
-    cb = str(cb_row["id"])
-    execute_mutate(
-        "UPDATE resource_component_agents SET component_id=%s WHERE resource_id=%s AND agent_id='sme-a'",
-        (cb, rb["id"]),
-    )
-    # Seed an attribution on ca.
+    s = _m_state_merge(agent_factory)
+    # Seed an attribution on the to-be-absorbed side (comp_b).
     attr = execute_one(
         """INSERT INTO attributions (component_id, plane, resource_type, identifier)
-           VALUES (%s, 'github', 'repo', 'o/a#readme') RETURNING id""",
-        (ca,),
+           VALUES (%s, 'github', 'repo', 'o/b#readme') RETURNING id""",
+        (s["comp_b"],),
     )
     attr_id = str(attr["id"])
-
-    result = mutation.transfer_attributions("sme-a", ca, cb, [attr_id])
+    # sme-a (mutation_assigned_to) moves sme-b's attribution into its own comp.
+    result = mutation.transfer_attributions(
+        "sme-a", s["cons_id"], [attr_id], s["comp_b"], s["comp_a"]
+    )
     assert result["transferred"] == 1
-    # Attribution now points at cb.
     row = execute_one("SELECT component_id FROM attributions WHERE id=%s", (attr_id,))
-    assert str(row["component_id"]) == cb
+    assert str(row["component_id"]) == str(s["comp_a"])
 
 
-def test_transfer_attributions_refuses_if_not_owner(agent_factory):
+def test_transfer_attributions_refuses_outside_mutation(agent_factory):
+    """Retightened gate: without an active M-state consolidation + scope
+    match, the call refuses. Previously only checked RCA ownership — this
+    was the architectural hole Phase 4.1 closes."""
     _iter(agent_factory)
     ca, _ = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
     cb, _ = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
-    attr = execute_one(
-        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
-           VALUES (%s, 'github', 'repo', 'o/a#readme') RETURNING id""",
-        (ca,),
+    # Nominate but DON'T approve to M.
+    cons = consolidation.nominate_consolidation(
+        "sme-a", ca, cb, "merge", 0.9, "m"
     )
-    # sme-b does NOT own ca.
-    with pytest.raises(ValueError, match="does not own"):
-        mutation.transfer_attributions("sme-b", ca, cb, [str(attr["id"])])
-
-
-def test_transfer_attributions_does_not_touch_source_slice(agent_factory):
-    """The whole point of the decoupling: attributions move, slice doesn't."""
-    survivor_slice = {"res-1": {"plane": "github", "paths": ["x/"]}}
-    _iter(agent_factory)
-    ca, _ = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a", survivor_slice)
-    cb, _ = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
-    # RCA: sme-a also gets a row on cb so ownership check passes? No — point
-    # is ownership of FROM only. sme-a owns ca. We transfer ca → cb.
     attr = execute_one(
         """INSERT INTO attributions (component_id, plane, resource_type, identifier)
            VALUES (%s, 'github', 'repo', 'a') RETURNING id""",
         (ca,),
     )
-    mutation.transfer_attributions("sme-a", ca, cb, [str(attr["id"])])
-    # ca's slice is unchanged.
-    row = execute_one("SELECT source_slice FROM components WHERE id=%s", (ca,))
+    with pytest.raises(ValueError, match="status='M'"):
+        mutation.transfer_attributions(
+            "sme-a", cons["id"], [str(attr["id"])], ca, cb
+        )
+
+
+def test_transfer_attributions_refuses_wrong_actor(agent_factory):
+    """mutation_assigned_to=sme-a, but sme-b tries to call → refused."""
+    s = _m_state_merge(agent_factory)
+    attr = execute_one(
+        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
+           VALUES (%s, 'github', 'repo', 'o/a#readme') RETURNING id""",
+        (s["comp_a"],),
+    )
+    with pytest.raises(ValueError, match="mutation_assigned_to"):
+        mutation.transfer_attributions(
+            "sme-b", s["cons_id"], [str(attr["id"])], s["comp_a"], s["comp_b"]
+        )
+
+
+def test_transfer_attributions_refuses_out_of_scope_components(agent_factory):
+    """from/to must match the consolidation's scope."""
+    s = _m_state_merge(agent_factory)
+    # Make a third component NOT in the consolidation.
+    _sme_with_component(agent_factory, "i", "sme-outsider", "o/c", "outsider")
+    c_outsider = execute_one(
+        """SELECT component_id FROM resource_component_agents
+           WHERE agent_id='sme-outsider'"""
+    )["component_id"]
+    attr = execute_one(
+        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
+           VALUES (%s, 'github', 'repo', 'o/a#readme') RETURNING id""",
+        (s["comp_a"],),
+    )
+    with pytest.raises(ValueError, match="outside.*scope"):
+        mutation.transfer_attributions(
+            "sme-a", s["cons_id"], [str(attr["id"])],
+            s["comp_a"], str(c_outsider),
+        )
+
+
+def test_transfer_attributions_does_not_touch_source_slice(agent_factory):
+    """The decoupling invariant: attributions move, slice doesn't."""
+    survivor_slice = {"res-1": {"plane": "github", "paths": ["x/"]}}
+    s = _m_state_merge(agent_factory, survivor_slice, None)
+    attr = execute_one(
+        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
+           VALUES (%s, 'github', 'repo', 'o/b#readme') RETURNING id""",
+        (s["comp_b"],),
+    )
+    mutation.transfer_attributions(
+        "sme-a", s["cons_id"], [str(attr["id"])], s["comp_b"], s["comp_a"]
+    )
+    row = execute_one("SELECT source_slice FROM components WHERE id=%s", (s["comp_a"],))
     assert row["source_slice"] == survivor_slice
 
 
 def test_transfer_attributions_empty_list_rejected(agent_factory):
-    _iter(agent_factory)
-    ca, _ = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
-    cb, _ = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+    s = _m_state_merge(agent_factory)
     with pytest.raises(ValueError, match="non-empty"):
-        mutation.transfer_attributions("sme-a", ca, cb, [])
+        mutation.transfer_attributions(
+            "sme-a", s["cons_id"], [], s["comp_a"], s["comp_b"]
+        )
 
 
 def test_transfer_attributions_same_component_rejected(agent_factory):
+    s = _m_state_merge(agent_factory)
+    with pytest.raises(ValueError, match="must differ"):
+        mutation.transfer_attributions(
+            "sme-a", s["cons_id"], ["00000000-0000-0000-0000-000000000000"],
+            s["comp_a"], s["comp_a"],
+        )
+
+
+# ========================== transfer_edges ==========================
+
+
+def test_transfer_edges_merge_rewrites_from_column(agent_factory):
+    """Bound edge from caller's side → re-point from_component_id."""
+    s = _m_state_merge(agent_factory)
+    # sme-b owns a bound edge from their component → ca (doesn't matter).
+    c_target = execute_one(
+        """INSERT INTO components (canonical_name, display_name, component_type)
+           VALUES ('o/downstream', 'ds', 'application') RETURNING id"""
+    )
+    c_target_id = str(c_target["id"])
+    edge = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'GET /x', 'test') RETURNING id""",
+        (s["comp_b"], c_target_id),
+    )
+    result = mutation.transfer_edges(
+        "sme-a", s["cons_id"], [str(edge["id"])], direction="from"
+    )
+    assert result["transferred"] == 1
+    row = execute_one("SELECT from_component_id FROM edges WHERE id=%s", (edge["id"],))
+    assert str(row["from_component_id"]) == str(s["comp_a"])
+
+
+def test_transfer_edges_catalog_collision_collapses(agent_factory):
+    """Catalog on comp_b matches existing catalog on comp_a → drop comp_b's."""
+    s = _m_state_merge(agent_factory)
+    # Catalog on comp_a.
+    execute_mutate(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (NULL, %s, 'calls', 'POST /login', 'test')""",
+        (s["comp_a"],),
+    )
+    # Duplicate catalog on comp_b.
+    edge_b = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (NULL, %s, 'calls', 'POST /login', 'test')
+           RETURNING id""",
+        (s["comp_b"],),
+    )
+    result = mutation.transfer_edges(
+        "sme-a", s["cons_id"], [str(edge_b["id"])], direction="to"
+    )
+    assert result["transferred"] == 0
+    assert result["collapsed"] == 1
+    # comp_b's duplicate is gone.
+    gone = execute_one("SELECT 1 FROM edges WHERE id=%s", (edge_b["id"],))
+    assert gone is None
+
+
+def test_transfer_edges_refuses_outside_mutation(agent_factory):
     _iter(agent_factory)
     ca, _ = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
-    with pytest.raises(ValueError, match="must differ"):
-        mutation.transfer_attributions("sme-a", ca, ca, ["00000000-0000-0000-0000-000000000000"])
+    cb, _ = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+    cons = consolidation.nominate_consolidation("sme-a", ca, cb, "merge", 0.9, "m")
+    # Not in M state.
+    edge = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'GET /x', 'test') RETURNING id""",
+        (cb, ca),
+    )
+    with pytest.raises(ValueError, match="status='M'"):
+        mutation.transfer_edges("sme-a", cons["id"], [str(edge["id"])], "from")
+
+
+def test_transfer_edges_invalid_direction_rejected(agent_factory):
+    s = _m_state_merge(agent_factory)
+    with pytest.raises(ValueError, match="direction"):
+        mutation.transfer_edges("sme-a", s["cons_id"], ["any"], "bogus")
+
+
+# ========================== transfer_flows ==========================
+
+
+def test_transfer_flows_merge_rewrites_component_id(agent_factory):
+    s = _m_state_merge(agent_factory)
+    # Catalog on comp_b (incoming side), bound to a separate component (outgoing).
+    cat = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (NULL, %s, 'calls', 'POST /x', 'test')
+           RETURNING id""",
+        (s["comp_b"],),
+    )
+    ds = execute_one(
+        """INSERT INTO components (canonical_name, display_name, component_type)
+           VALUES ('o/z', 'z', 'application') RETURNING id"""
+    )
+    out = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'GET /z', 'test')
+           RETURNING id""",
+        (s["comp_b"], ds["id"]),
+    )
+    flow = execute_one(
+        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+                              discovered_by)
+           VALUES (%s, %s, %s, 'test') RETURNING id""",
+        (s["comp_b"], cat["id"], out["id"]),
+    )
+    result = mutation.transfer_flows(
+        "sme-a", s["cons_id"], [str(flow["id"])]
+    )
+    assert result["transferred"] == 1
+    row = execute_one("SELECT component_id FROM flows WHERE id=%s", (flow["id"],))
+    assert str(row["component_id"]) == str(s["comp_a"])
+
+
+def test_transfer_flows_refuses_outside_mutation(agent_factory):
+    _iter(agent_factory)
+    ca, _ = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb, _ = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+    cons = consolidation.nominate_consolidation("sme-a", ca, cb, "merge", 0.9, "m")
+    with pytest.raises(ValueError, match="status='M'"):
+        mutation.transfer_flows(
+            "sme-a", cons["id"], ["00000000-0000-0000-0000-000000000000"]
+        )
+
+
+def test_transfer_flows_empty_list_rejected(agent_factory):
+    s = _m_state_merge(agent_factory)
+    with pytest.raises(ValueError, match="non-empty"):
+        mutation.transfer_flows("sme-a", s["cons_id"], [])
+
+
+# ========================== stale hygiene ==========================
+
+
+def test_get_stale_edges_surfaces_dead_catalog_target(agent_factory):
+    from cartograph_mcp.tools import components as comp_tool
+    _iter(agent_factory)
+    ca, _ = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb, _ = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+    # sme-a's component has a bound edge pointing at sme-b's (live) component.
+    execute_mutate(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'GET /x', 'test')""",
+        (ca, cb),
+    )
+    # Decommission sme-b's component out from under sme-a.
+    execute_mutate(
+        "UPDATE components SET status='decommissioned' WHERE id=%s", (cb,)
+    )
+    rows = comp_tool.get_stale_edges("sme-a")
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["my_side"] == "from"
+    assert str(r["stale_component_id"]) == str(cb)
+    assert r["suggested_action"] == "target-gone-accept-or-escalate"
+
+
+def test_get_stale_edges_includes_survivor_when_merged(agent_factory):
+    """Post-absorb, the decommissioned component's agent has
+    merged_into_agent_id set → suggested_action = re-bind-to-survivor."""
+    from cartograph_mcp.tools import components as comp_tool
+    s = _m_state_merge(agent_factory)
+    # sme-a has a bound edge → sme-b's component (before absorb).
+    execute_mutate(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'GET /dead', 'test')""",
+        (s["comp_a"], s["comp_b"]),
+    )
+    # Absorb sme-b into sme-a — flips sme-b.merged_into_agent_id to sme-a
+    # AND decommissions comp_b.
+    mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
+    rows = comp_tool.get_stale_edges("sme-a")
+    # sme-a's edge now points at decommissioned comp_b.
+    target_rows = [r for r in rows if str(r["stale_component_id"]) == str(s["comp_b"])]
+    assert len(target_rows) == 1
+    assert target_rows[0]["stale_component_merged_into_agent_id"] == "sme-a"
+    assert target_rows[0]["suggested_action"] == "re-bind-to-survivor"
+
+
+def test_get_stale_edges_empty_when_no_dead_neighbors(agent_factory):
+    from cartograph_mcp.tools import components as comp_tool
+    _iter(agent_factory)
+    ca, _ = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    assert comp_tool.get_stale_edges("sme-a") == []
+
+
+def test_get_stale_flows_surfaces_flow_with_dead_incoming(agent_factory):
+    from cartograph_mcp.tools import components as comp_tool
+    _iter(agent_factory)
+    ca, _ = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb, _ = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+    # Bound edge from sme-b → sme-a (caller = sme-b).
+    incoming = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, %s, 'calls', 'POST /x', 'test')
+           RETURNING id""",
+        (cb, ca),
+    )
+    # sme-a has an outgoing dangling edge.
+    outgoing = execute_one(
+        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
+                              identifier, discovered_by)
+           VALUES (%s, NULL, 'calls', 'https://gone.example', 'test')
+           RETURNING id""",
+        (ca,),
+    )
+    # Flow on sme-a chaining incoming → outgoing.
+    execute_mutate(
+        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+                              discovered_by)
+           VALUES (%s, %s, %s, 'test')""",
+        (ca, incoming["id"], outgoing["id"]),
+    )
+    # Decommission sme-b's component (makes incoming edge's from-side dead).
+    execute_mutate(
+        "UPDATE components SET status='decommissioned' WHERE id=%s", (cb,)
+    )
+    rows = comp_tool.get_stale_flows("sme-a")
+    assert len(rows) == 1
+    assert rows[0]["incoming_other_status"] == "decommissioned"
