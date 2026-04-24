@@ -2,7 +2,7 @@
 
 import pytest
 
-from shared.db import execute_mutate, execute_one
+from shared.db import execute, execute_mutate, execute_one
 from cartograph_mcp.tools import components, consolidation, resources
 
 
@@ -229,6 +229,93 @@ def test_non_resolver_cannot_review(agent_factory):
         consolidation.review_consolidation(
             "sme-a", cons["id"], 0.9, "m", "M", "sme-a"
         )
+
+
+# ---------- Phase 4: mutation lifecycle ----------
+
+def _seed_m_state(agent_factory):
+    """Common setup: merge consolidation in state M with sme-a as mutation_assigned_to."""
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+    agent_factory("res", "resolver")
+    cons = consolidation.nominate_consolidation("sme-a", ca, cb, "merge", 0.9, "m")
+    execute_mutate("UPDATE consolidations SET status='R' WHERE id=%s", (cons["id"],))
+    consolidation.review_consolidation(
+        "res", cons["id"], 0.95, "approve", "M", "sme-a"
+    )
+    return cons["id"]
+
+
+def test_execute_mutation_M_to_MD(agent_factory):
+    cons_id = _seed_m_state(agent_factory)
+    result = consolidation.execute_mutation("sme-a", cons_id, "mutation applied")
+    assert result["status"] == "MD"
+    # Notification fired to resolver.
+    msg = execute_one(
+        "SELECT * FROM communications WHERE source_id=%s "
+        "ORDER BY created_at DESC LIMIT 1",
+        (cons_id,),
+    )
+    assert msg["to_agent"] == "resolver"
+    assert msg["metadata"]["state_transition"]["to"] == "MD"
+
+
+def test_execute_mutation_refuses_wrong_actor(agent_factory):
+    cons_id = _seed_m_state(agent_factory)
+    # sme-b is not the mutation_assigned_to — forbidden.
+    with pytest.raises(ValueError, match="mutation_assigned_to"):
+        consolidation.execute_mutation("sme-b", cons_id, "try")
+
+
+def test_execute_mutation_refuses_wrong_state(agent_factory):
+    cons_id = _seed_m_state(agent_factory)
+    execute_mutate("UPDATE consolidations SET status='R' WHERE id=%s", (cons_id,))
+    with pytest.raises(ValueError, match="status='M'"):
+        consolidation.execute_mutation("sme-a", cons_id, "try")
+
+
+def test_execute_mutation_requires_message(agent_factory):
+    cons_id = _seed_m_state(agent_factory)
+    with pytest.raises(ValueError, match="message"):
+        consolidation.execute_mutation("sme-a", cons_id, "")
+
+
+def test_complete_consolidation_MD_to_D(agent_factory):
+    cons_id = _seed_m_state(agent_factory)
+    consolidation.execute_mutation("sme-a", cons_id, "done")
+    result = consolidation.complete_consolidation("res", cons_id, "verified")
+    assert result["status"] == "D"
+    assert result["resolved_by"] == "res"
+    assert result["resolved_at"] is not None
+
+
+def test_complete_consolidation_refuses_non_resolver(agent_factory):
+    cons_id = _seed_m_state(agent_factory)
+    consolidation.execute_mutation("sme-a", cons_id, "done")
+    with pytest.raises(ValueError, match="Only resolver"):
+        consolidation.complete_consolidation("sme-a", cons_id, "nope")
+
+
+def test_complete_consolidation_refuses_wrong_state(agent_factory):
+    cons_id = _seed_m_state(agent_factory)
+    # Status is still 'M'; must be MD.
+    with pytest.raises(ValueError, match="status='MD'"):
+        consolidation.complete_consolidation("res", cons_id, "nope")
+
+
+def test_complete_consolidation_notifies_both_parties(agent_factory):
+    cons_id = _seed_m_state(agent_factory)
+    consolidation.execute_mutation("sme-a", cons_id, "done")
+    consolidation.complete_consolidation("res", cons_id, "verified")
+    # Two terminal notifications, one to agent_a and one to agent_b.
+    rows = execute(
+        "SELECT to_agent, metadata FROM communications "
+        "WHERE source_id=%s AND metadata->'state_transition'->>'to'='D'",
+        (cons_id,),
+    )
+    to_agents = sorted(r["to_agent"] for r in rows)
+    assert to_agents == ["sme-a", "sme-b"]
 
 
 # ---------- reads ----------

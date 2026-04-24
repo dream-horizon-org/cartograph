@@ -848,6 +848,28 @@ def review_consolidation(
 
 
 @mcp.tool()
+def execute_mutation(
+    agent_id: str,
+    consolidation_id: str,
+    message: str,
+) -> dict[str, Any]:
+    """Phase 4. M → MD. Signal mutation work is applied; hand off to resolver
+    for verification. Gated on caller = mutation_assigned_to and status = M."""
+    return consolidation_tool.execute_mutation(agent_id, consolidation_id, message)
+
+
+@mcp.tool()
+def complete_consolidation(
+    agent_id: str,
+    consolidation_id: str,
+    message: str,
+) -> dict[str, Any]:
+    """Phase 4. MD → D. Resolver verifies mutation landed + closes. Gated on
+    caller.agent_type = 'resolver' and status = MD."""
+    return consolidation_tool.complete_consolidation(agent_id, consolidation_id, message)
+
+
+@mcp.tool()
 def get_my_consolidations(agent_id: str) -> dict[str, list[dict[str, Any]]]:
     """All non-terminal consolidations involving this agent (or all for resolver)."""
     return {"consolidations": consolidation_tool.get_my_consolidations(agent_id)}

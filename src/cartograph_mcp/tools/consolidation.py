@@ -346,6 +346,113 @@ def review_consolidation(
     return updated
 
 
+# ============ Mutation lifecycle (Phase 4) ============
+
+
+def execute_mutation(agent_id: str, consolidation_id: str, message: str) -> dict:
+    """M → MD transition. Signals the mutation work (absorb/spawn/transfer
+    attributions) has been applied atomically inside this consolidation's
+    scope. Gated on:
+      - caller = consolidation.mutation_assigned_to
+      - consolidation.status = 'M'
+
+    The body mutations (absorb_agent / spawn_child_agent / transfer_attributions)
+    are INDEPENDENT MCP tools the caller invokes before OR after this
+    transition — Phase 4 does not bundle them in one transaction because
+    the `source_slice` carve + agent-state flip need to stay observable
+    per-step in the resolver thread. This tool is the gate that says
+    "I am done with the mutation work; please verify (MD)."
+    """
+    caller = _caller(agent_id)
+    if not message or not message.strip():
+        raise ValueError("message is required")
+    cons = execute_one(
+        "SELECT * FROM consolidations WHERE id = %s", (consolidation_id,)
+    )
+    if cons is None:
+        raise ValueError(f"Consolidation {consolidation_id} not found")
+    if cons["status"] != "M":
+        raise ValueError(
+            f"execute_mutation requires status='M'; current is '{cons['status']}'"
+        )
+    if cons["mutation_assigned_to"] != agent_id:
+        raise ValueError(
+            f"Only the mutation_assigned_to agent may execute_mutation on "
+            f"consolidation {consolidation_id}. "
+            f"(assigned: {cons['mutation_assigned_to']}, caller: {agent_id})"
+        )
+
+    updated = execute_returning(
+        """UPDATE consolidations
+           SET status = 'MD', updated_at = now()
+           WHERE id = %s
+           RETURNING *""",
+        (consolidation_id,),
+    )
+    metadata = {
+        "state_transition": {"from": "M", "to": "MD"},
+        "role": "mutation_assigned",
+    }
+    execute(
+        """INSERT INTO communications (from_agent, to_agent, type, source_id, text, metadata)
+           VALUES (%s, %s, 'consolidation', %s, %s, %s::jsonb)""",
+        # MD is the resolver's turn to verify.
+        (agent_id, "resolver", consolidation_id, message, json.dumps(metadata)),
+    )
+    return updated
+
+
+def complete_consolidation(agent_id: str, consolidation_id: str, message: str) -> dict:
+    """MD → D transition. Resolver verifies the mutation landed correctly
+    and closes the consolidation. Gated on:
+      - caller.agent_type = 'resolver'
+      - consolidation.status = 'MD'
+    """
+    caller = _caller(agent_id)
+    if caller["agent_type"] != "resolver":
+        raise ValueError(
+            f"Only resolver agents may complete_consolidation. "
+            f"{agent_id} is type '{caller['agent_type']}'."
+        )
+    if not message or not message.strip():
+        raise ValueError("message is required")
+    cons = execute_one(
+        "SELECT * FROM consolidations WHERE id = %s", (consolidation_id,)
+    )
+    if cons is None:
+        raise ValueError(f"Consolidation {consolidation_id} not found")
+    if cons["status"] != "MD":
+        raise ValueError(
+            f"complete_consolidation requires status='MD'; current is '{cons['status']}'"
+        )
+
+    updated = execute_returning(
+        """UPDATE consolidations
+           SET status = 'D',
+               resolved_by = %s,
+               resolved_at = now(),
+               updated_at = now()
+           WHERE id = %s
+           RETURNING *""",
+        (agent_id, consolidation_id),
+    )
+    metadata = {
+        "state_transition": {"from": "MD", "to": "D"},
+        "role": "resolver",
+    }
+    # Notify both parties so their triggers see the terminal state.
+    notify = [cons["agent_a_id"]]
+    if cons["agent_b_id"]:
+        notify.append(cons["agent_b_id"])
+    for to_agent in notify:
+        execute(
+            """INSERT INTO communications (from_agent, to_agent, type, source_id, text, metadata)
+               VALUES (%s, %s, 'consolidation', %s, %s, %s::jsonb)""",
+            (agent_id, to_agent, consolidation_id, message, json.dumps(metadata)),
+        )
+    return updated
+
+
 # ============ Reads ============
 
 
