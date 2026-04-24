@@ -1209,11 +1209,23 @@ genuine orphans render as "exposed — no caller bound yet".
 - 292 tests passing total.
 
 ### Demo mock data
-`src/admin_ui/mock_seed.py` seeds two demo topologies:
+`src/admin_ui/mock_seed.py` seeds three demo topologies plus stubs:
 1. **Feeds / payments mesh** — 7+ callers converging on payments-svc
-   GET /balance (bundle demo), 3 on auth-svc POST /verify.
+   GET /balance (bundle demo), 3 on auth-svc POST /verify. Several
+   orphan catalogs (GET /scores, POST /charge, POST /refund, etc.)
+   and outbound danglings (vendor feed, kyc API, slack channel)
+   exercise stub rendering.
 2. **Chain demo** — p→q→r→s→t→u and x→y→z→s→t→u sharing s/t/u.
-   Click any head edge for multi-layer LOS propagation.
+   Plus orphan catalog at p (`p.admin_ping`) with a flow to p→q,
+   orphan at s (`s.debug`, isolated), dangling at s
+   (`metrics.unknown`) wired into s's flow, dangling at u
+   (`webhook.unknown`) wired into u's flow — so clicking p's
+   inbound stub propagates the full chain including trailing
+   danglings.
+3. **Fan-out demo** — A/B/C/D with two endpoints each (a1/a2, b1/b2,
+   c1/c2, d1/d2). Flows route A.a1→A→B(b1)→B→C(c1) and
+   A.a2→A→B(b2)→B→D(d1). Exercises distinct incoming endpoints on
+   the same component fanning to different downstream components.
 Cleanup: `python -m admin_ui.mock_seed cleanup`.
 
 ---
