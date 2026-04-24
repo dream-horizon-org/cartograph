@@ -131,24 +131,28 @@ def nominate_consolidation(
                 "use upsert_component to update in place instead."
             )
 
+    # Splits have no agent_b → no B1/B2 negotiation to run. Insert
+    # directly at 'R' so the resolver picks it up on the next scan.
+    # Merges still enter at 'B2' (nominated agent's turn to respond).
+    # See TRIGGER-MANAGEMENT.md state machine.
+    initial_status = "R" if nomination_type == "split" else "B2"
     row = execute_returning(
         """INSERT INTO consolidations
            (proposed_by, agent_a_id, agent_b_id, component_a_id, component_b_id,
             nomination_type, a_conf_score, status)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, 'B2')
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING *""",
         (
             agent_id, agent_id, agent_b_id, component_a_id, component_b_id,
-            nomination_type, confidence,
+            nomination_type, confidence, initial_status,
         ),
     )
 
-    # Announce. Target: for merge → agent_b (nominated); for split → admin
-    # (self-nominated — initial responder is the system / resolver once
-    # auto-transition hits).
-    to_agent = agent_b_id if agent_b_id else "admin"
+    # Announce. Target: for merge → agent_b (nominated); for split → resolver
+    # (goes straight to review, no negotiation phase).
+    to_agent = agent_b_id if agent_b_id else "resolver"
     metadata = {
-        "state_transition": {"from": None, "to": "B2"},
+        "state_transition": {"from": None, "to": initial_status},
         "nomination_type": nomination_type,
         "a_conf_score": confidence,
     }
@@ -212,6 +216,15 @@ def respond_consolidation(
         raise ValueError(
             "Cannot escalate to R manually unless resolver has set r_conf_score. "
             "Let the auto-transitions scanner (both > 0.85) handle first escalation."
+        )
+    # Solo splits (no agent_b) have no one to respond → B2 is unreachable.
+    # Block the transition defensively in case state-machine quirks let
+    # someone try to put one there.
+    if new_status == "B2" and cons["agent_b_id"] is None:
+        raise ValueError(
+            "Cannot transition a solo-party split (agent_b_id IS NULL) to B2 — "
+            "there is no counter-party to respond. Valid targets: R (back to "
+            "resolver), or keep status as-is."
         )
 
     conf_col = "a_conf_score" if is_a else "b_conf_score"
@@ -284,6 +297,13 @@ def review_consolidation(
         raise ValueError(
             f"Invalid resolver transition {current} → {new_status}. "
             f"Allowed: {sorted(allowed) if allowed else 'none'}"
+        )
+    # Solo splits (no agent_b) have no one to respond at B2 — if resolver
+    # wants to send back for more info, it has to be B1 (nominator's turn).
+    if new_status == "B2" and cons["agent_b_id"] is None:
+        raise ValueError(
+            "Cannot send a solo-party split back to B2 (no counter-party to "
+            "respond). For splits, use B1 to send back to the nominator."
         )
 
     if new_status == "M":

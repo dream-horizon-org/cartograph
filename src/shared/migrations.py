@@ -673,6 +673,20 @@ def run_migrations() -> None:
 
             _create_proxy_audit_table(cur)
 
+            # Self-heal: any split consolidation stuck at B2 with no
+            # counter-party bumps up to 'R' so the resolver can pick it
+            # up. Pre-Phase-4 code inserted ALL nominations at B2, which
+            # created zombie splits (no agent_b → never auto-escalates
+            # via the both-scores-above-threshold rule). Safe to re-run:
+            # only rows matching this exact state are touched.
+            cur.execute(
+                """UPDATE consolidations
+                   SET status = 'R', updated_at = now()
+                   WHERE status = 'B2'
+                     AND nomination_type = 'split'
+                     AND agent_b_id IS NULL"""
+            )
+
             # --- Indexes ---
             _create_indexes(cur)
 

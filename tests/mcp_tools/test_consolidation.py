@@ -65,7 +65,8 @@ def test_nominate_split_no_component_b(agent_factory):
     )
     assert cons["nomination_type"] == "split"
     assert cons["agent_b_id"] is None
-    assert cons["status"] == "B2"
+    # Post-fix: splits go straight to R (no B-negotiation without a counter-party).
+    assert cons["status"] == "R"
 
 
 def test_nominator_must_own_component_a(agent_factory):
@@ -229,6 +230,58 @@ def test_non_resolver_cannot_review(agent_factory):
         consolidation.review_consolidation(
             "sme-a", cons["id"], 0.9, "m", "M", "sme-a"
         )
+
+
+# ---------- Split fix: solo splits go straight to R ----------
+
+def test_split_nomination_starts_at_R_not_B2(agent_factory):
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cons = consolidation.nominate_consolidation(
+        "sme-a", ca, None, "split", 0.9, "two concerns"
+    )
+    # Pre-fix this landed at B2 and got stuck (no agent_b to respond;
+    # auto-escalate requires BOTH scores set). Now it skips B-negotiation.
+    assert cons["status"] == "R"
+    assert cons["agent_b_id"] is None
+    # Initial announcement goes to the resolver, not admin.
+    msg = execute_one(
+        "SELECT to_agent, metadata FROM communications WHERE source_id=%s",
+        (cons["id"],),
+    )
+    assert msg["to_agent"] == "resolver"
+    assert msg["metadata"]["state_transition"]["to"] == "R"
+
+
+def test_merge_nomination_still_starts_at_B2(agent_factory):
+    """Merge flow unchanged — still needs B2 → B1 negotiation."""
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+    cons = consolidation.nominate_consolidation(
+        "sme-a", ca, cb, "merge", 0.9, "same host"
+    )
+    assert cons["status"] == "B2"
+    assert cons["agent_b_id"] == "sme-b"
+
+
+def test_resolver_cannot_send_solo_split_back_to_B2(agent_factory):
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    agent_factory("res", "resolver")
+    cons = consolidation.nominate_consolidation(
+        "sme-a", ca, None, "split", 0.9, "split"
+    )
+    # Already at R from nomination. Resolver tries to bounce back to B2.
+    with pytest.raises(ValueError, match="solo-party split"):
+        consolidation.review_consolidation(
+            "res", cons["id"], 0.8, "need more info", "B2", None
+        )
+    # B1 (back to nominator) remains valid.
+    result = consolidation.review_consolidation(
+        "res", cons["id"], 0.8, "need more info", "B1", None
+    )
+    assert result["status"] == "B1"
 
 
 # ---------- Phase 4: mutation lifecycle ----------
