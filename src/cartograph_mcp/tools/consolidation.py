@@ -196,6 +196,10 @@ def nominate_consolidation(
         "state_transition": {"from": None, "to": initial_status},
         "nomination_type": nomination_type,
         "a_conf_score": confidence,
+        # Phase 5.6: snapshot the confidence triple AS OF this message so
+        # the consolidation thread carries an immutable score timeline,
+        # independent of the (mutable) consolidations row.
+        "confidence_at_send": {"a": confidence, "b": None, "r": None},
     }
     execute(
         """INSERT INTO communications (from_agent, to_agent, type, source_id, text, metadata)
@@ -283,6 +287,12 @@ def respond_consolidation(
         "state_transition": {"from": current, "to": new_status},
         "role": "agent_a" if is_a else "agent_b",
         conf_col: confidence,
+        # Phase 5.6: confidence triple AS OF this message.
+        "confidence_at_send": {
+            "a": confidence if is_a else cons["a_conf_score"],
+            "b": confidence if not is_a else cons["b_conf_score"],
+            "r": cons["r_conf_score"],
+        },
     }
     execute(
         """INSERT INTO communications (from_agent, to_agent, type, source_id, text, metadata)
@@ -388,6 +398,13 @@ def review_consolidation(
         "state_transition": {"from": current, "to": new_status},
         "role": "resolver",
         "r_conf_score": r_confidence,
+        # Phase 5.6: confidence triple AS OF this review write. Resolver
+        # just wrote r; a/b are whatever the agents had landed at.
+        "confidence_at_send": {
+            "a": cons["a_conf_score"],
+            "b": cons["b_conf_score"],
+            "r": r_confidence,
+        },
     }
     if mutation_assigned_to:
         metadata["mutation_assigned_to"] = mutation_assigned_to
