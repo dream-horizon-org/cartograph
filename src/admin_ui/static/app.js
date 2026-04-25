@@ -164,8 +164,15 @@ function renderAgents() {
   orderedTypes.forEach(type => {
     const agents = groups.get(type);
     const search = (agentGroupSearch[type] || '').toLowerCase();
+    // Phase 5.4: search predicate also matches component canonical /
+    // display names so SMEs are findable by what they own. /api/agents
+    // already returns component_canonical + component_display per row
+    // (Phase 4); we just widen the match.
     const filtered = search
-      ? agents.filter(a => a.agent_id.toLowerCase().includes(search))
+      ? agents.filter(a =>
+          a.agent_id.toLowerCase().includes(search) ||
+          (a.component_canonical || '').toLowerCase().includes(search) ||
+          (a.component_display   || '').toLowerCase().includes(search))
       : agents;
 
     const now = new Date();
@@ -815,13 +822,18 @@ function renderCommunications() {
     const toCompTag = toComp
       ? ` <span class="component-tag-inline" title="${escapeHtml(toComp.canonical)}">📦 ${escapeHtml(toComp.display)}</span>`
       : '';
+    // Phase 5.4: 📌 pill on persistent broadcasts so admins can tell at
+    // a glance which broadcasts are standing policy vs forward-only.
+    const persistentPill = (m.type === 'broadcast' && m.is_persistent)
+      ? ` <span class="pill persistent-pill" title="Persistent — applies to agents spawned later">📌 persistent</span>`
+      : '';
     li.innerHTML = `
       <div class="comm-head">
         <span class="type-pill type-${m.type}">${m.type}</span>
         <span class="from">${escapeHtml(m.from_agent)}</span>${fromCompTag}
         <span class="arrow">→</span>
         <span class="to">${escapeHtml(commTargetLabel(m))}</span>${toCompTag}
-        ${state}${viaBadge}
+        ${state}${viaBadge}${persistentPill}
         <span class="ts">${new Date(m.created_at).toLocaleString()}</span>
       </div>
       <div class="comm-body">${escapeHtml(excerpt)}${excerpt.length >= 120 ? '…' : ''}</div>

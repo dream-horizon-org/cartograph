@@ -1296,3 +1296,8 @@ body {
 }
 .cat-attrs { list-style: disc; padding-left: 20px; font-size: 12px; }
 .cat-attrs .muted { color: #6e7681; }
+
+/* Phase 5.4: persistent broadcast pill */
+.persistent-pill {
+  background: #d29922 !important; color: #0d1117 !important;
+}
