@@ -601,6 +601,176 @@ def create_app() -> FastAPI:
             return {"kind": "broadcast", "entity": b, "thread": [], "extras": {"acks": acks}}
         raise HTTPException(400, f"Unsupported kind: {kind}")  # unreachable
 
+    # --- CATALOG VIEW (Phase 5.3) ---
+
+    _COMPONENT_TYPES = {
+        "application", "database", "cache", "queue", "lambda",
+        "cron", "external-service", "library", "infrastructure",
+    }
+    _COMPONENT_STATUSES = {"active", "deprecated", "decommissioned"}
+    _PLANES = {"github", "deploy", "cloud", "telemetry", "config"}
+
+    @app.get("/api/components")
+    def list_components(
+        type: Optional[str] = Query(None),
+        plane: Optional[str] = Query(None),
+        status: Optional[str] = Query(None),
+        q: Optional[str] = Query(None),
+        before: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+    ):
+        """Paginated component list for the Catalog tab.
+
+        Each row carries plane set + per-kind edge counts so the FE can
+        render the row without a follow-up. Default sort: canonical_name
+        ASC. Pagination via `before` cursor on canonical_name.
+        """
+        if type and type not in _COMPONENT_TYPES:
+            raise HTTPException(400, f"Invalid type")
+        if plane and plane not in _PLANES:
+            raise HTTPException(400, f"Invalid plane")
+        if status and status not in _COMPONENT_STATUSES:
+            raise HTTPException(400, f"Invalid status")
+
+        where = []
+        params: list = []
+        if type:
+            where.append("c.component_type = %s")
+            params.append(type)
+        if status:
+            where.append("c.status = %s")
+            params.append(status)
+        if q:
+            where.append("(c.canonical_name ILIKE %s OR c.display_name ILIKE %s)")
+            params.extend([f"%{q}%", f"%{q}%"])
+        if before:
+            where.append("c.canonical_name > %s")
+            params.append(before)
+        # Plane filter requires a join — express as EXISTS to avoid
+        # multiplying rows when a component has multiple planes.
+        if plane:
+            where.append(
+                "EXISTS (SELECT 1 FROM attributions ap WHERE ap.component_id = c.id "
+                "AND ap.plane = %s)"
+            )
+            params.append(plane)
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+        rows = execute(
+            f"""SELECT c.id, c.canonical_name, c.display_name,
+                       c.component_type, c.status,
+                       COALESCE(
+                         ARRAY_AGG(DISTINCT a.plane) FILTER (WHERE a.plane IS NOT NULL),
+                         ARRAY[]::text[]
+                       ) AS planes,
+                       COUNT(DISTINCT a.id) AS attribution_count,
+                       COUNT(DISTINCT e_bound.id) FILTER (
+                         WHERE e_bound.from_component_id IS NOT NULL
+                           AND e_bound.to_component_id IS NOT NULL
+                       ) AS bound_count,
+                       COUNT(DISTINCT e_cat.id) FILTER (
+                         WHERE e_cat.from_component_id IS NULL
+                           AND e_cat.to_component_id = c.id
+                       ) AS catalog_count,
+                       COUNT(DISTINCT e_dang.id) FILTER (
+                         WHERE e_dang.to_component_id IS NULL
+                           AND e_dang.from_component_id = c.id
+                       ) AS dangling_count,
+                       (
+                         SELECT rca.agent_id FROM resource_component_agents rca
+                         WHERE rca.component_id = c.id LIMIT 1
+                       ) AS owner_sme_id
+                FROM components c
+                LEFT JOIN attributions a ON a.component_id = c.id
+                LEFT JOIN edges e_bound
+                  ON (e_bound.from_component_id = c.id OR e_bound.to_component_id = c.id)
+                LEFT JOIN edges e_cat ON e_cat.to_component_id = c.id
+                LEFT JOIN edges e_dang ON e_dang.from_component_id = c.id
+                {where_sql}
+                GROUP BY c.id
+                ORDER BY c.canonical_name ASC
+                LIMIT %s""",
+            params + [limit + 1],
+        )
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        # Reshape edge counts into a single nested dict so FE consumes
+        # one field rather than three siblings.
+        for r in rows:
+            r["edge_count"] = {
+                "bound": r.pop("bound_count", 0),
+                "catalog": r.pop("catalog_count", 0),
+                "dangling": r.pop("dangling_count", 0),
+            }
+        return {"components": rows, "has_more": has_more}
+
+    @app.get("/api/component/{component_id}/drilldown")
+    def get_component_drilldown(component_id: str):
+        """Single round-trip for the Catalog drill-down panel: component
+        row + attributions + edges (split into 4 buckets per Phase 3.9
+        protocol) + flows + source resources."""
+        component = execute_one(
+            """SELECT c.*,
+                      COALESCE(
+                        ARRAY_AGG(DISTINCT a.plane) FILTER (WHERE a.plane IS NOT NULL),
+                        ARRAY[]::text[]
+                      ) AS planes
+               FROM components c
+               LEFT JOIN attributions a ON a.component_id = c.id
+               WHERE c.id = %s::uuid
+               GROUP BY c.id""",
+            (component_id,),
+        )
+        if component is None:
+            raise HTTPException(404, "Component not found")
+        attributions = execute(
+            """SELECT id, plane, resource_type, identifier, evidence,
+                      confidence, metadata
+               FROM attributions WHERE component_id = %s::uuid
+               ORDER BY plane, resource_type, identifier""",
+            (component_id,),
+        )
+        all_edges = execute(
+            """SELECT id, from_component_id, to_component_id,
+                      edge_type, identifier, confidence, metadata,
+                      CASE
+                        WHEN from_component_id IS NOT NULL
+                             AND to_component_id IS NOT NULL THEN 'bound'
+                        WHEN from_component_id IS NULL THEN 'catalog'
+                        ELSE 'dangling'
+                      END AS kind
+               FROM edges
+               WHERE from_component_id = %s::uuid OR to_component_id = %s::uuid""",
+            (component_id, component_id),
+        )
+        edges = {
+            "bound_in":      [e for e in all_edges
+                              if e["kind"] == "bound" and str(e["to_component_id"]) == component_id],
+            "bound_out":     [e for e in all_edges
+                              if e["kind"] == "bound" and str(e["from_component_id"]) == component_id],
+            "catalog":       [e for e in all_edges if e["kind"] == "catalog"],
+            "dangling_out":  [e for e in all_edges if e["kind"] == "dangling"],
+        }
+        flows = execute(
+            """SELECT id, incoming_edge_id, outgoing_edge_id, confidence
+               FROM flows WHERE component_id = %s::uuid""",
+            (component_id,),
+        )
+        resources = execute(
+            """SELECT r.id, r.plane, r.resource_type, r.identifier, r.status
+               FROM resource_component_agents rca
+               JOIN resources r ON r.id = rca.resource_id
+               WHERE rca.component_id = %s::uuid""",
+            (component_id,),
+        )
+        return {
+            "component": component,
+            "attributions": attributions,
+            "edges": edges,
+            "flows": flows,
+            "resources": resources,
+        }
+
     # --- GRAPH VIEW (Phase 3.5) ---
 
     @app.get("/api/graph")
