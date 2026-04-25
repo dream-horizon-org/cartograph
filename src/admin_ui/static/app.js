@@ -824,8 +824,12 @@ function renderCommunications() {
       : '';
     // Phase 5.4: 📌 pill on persistent broadcasts so admins can tell at
     // a glance which broadcasts are standing policy vs forward-only.
-    const persistentPill = (m.type === 'broadcast' && m.is_persistent)
-      ? ` <span class="pill persistent-pill" title="Persistent — applies to agents spawned later">📌 persistent</span>`
+    // Phase 5.7: also a clickable toggle to flip is_persistent on the fly.
+    const persistentPill = m.type === 'broadcast'
+      ? ` <button class="pill persistence-toggle ${m.is_persistent ? 'persistent-pill' : 'forward-only-pill'}"
+            data-bcast-id="${m.id}" data-persistent="${m.is_persistent ? '1' : '0'}"
+            title="Click to ${m.is_persistent ? 'make forward-only' : 'mark persistent'}"
+        >${m.is_persistent ? '📌 persistent' : '↪ forward-only'}</button>`
       : '';
     li.innerHTML = `
       <div class="comm-head">
@@ -838,9 +842,45 @@ function renderCommunications() {
       </div>
       <div class="comm-body">${escapeHtml(excerpt)}${excerpt.length >= 120 ? '…' : ''}</div>
     `;
-    li.addEventListener('click', () => selectCommunication(m));
+    li.addEventListener('click', e => {
+      // Phase 5.7: persistence toggle inside a row — handle it here, don't
+      // drill into the row's detail panel.
+      if (e.target.closest('.persistence-toggle')) {
+        e.stopPropagation();
+        const btn = e.target.closest('.persistence-toggle');
+        const id = btn.dataset.bcastId;
+        const next = btn.dataset.persistent !== '1';
+        toggleBroadcastPersistence(id, next);
+        return;
+      }
+      selectCommunication(m);
+    });
     $list.appendChild(li);
   });
+}
+
+async function toggleBroadcastPersistence(communicationId, persistent) {
+  try {
+    const res = await fetch(
+      `/api/broadcast/${encodeURIComponent(communicationId)}/persistence`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ persistent }),
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Failed to toggle persistence: ${err.detail || res.status}`);
+      return;
+    }
+    // Update local state and re-render to flip the pill instantly.
+    const row = commsState.messages.find(m => m.id === communicationId);
+    if (row) row.is_persistent = persistent;
+    renderCommunications();
+  } catch (e) {
+    console.error('toggleBroadcastPersistence failed:', e);
+  }
 }
 
 async function selectCommunication(comm) {

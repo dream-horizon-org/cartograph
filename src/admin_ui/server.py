@@ -843,6 +843,21 @@ def create_app() -> FastAPI:
         from shared.embedding_backfill import backfill_all
         return backfill_all()
 
+    class PersistenceBody(BaseModel):
+        persistent: bool
+
+    @app.post("/api/broadcast/{communication_id}/persistence")
+    def toggle_broadcast_persistence(communication_id: str, body: PersistenceBody):
+        """Phase 5.7: admin flips is_persistent on an existing broadcast.
+        Delegates to the MCP tool so validation + audit live in one place."""
+        from cartograph_mcp.tools import broadcast as _bc
+        try:
+            return _bc.update_broadcast_persistence(
+                "admin", communication_id, body.persistent
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @app.post("/api/broadcast")
     def send_broadcast_from_admin(body: BroadcastBody):
         """Admin broadcasts to all agents of a type.

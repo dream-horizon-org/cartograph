@@ -1,6 +1,7 @@
-"""Broadcast tools — send_broadcast, ack_broadcast, get_unacked_broadcasts."""
+"""Broadcast tools — send_broadcast, ack_broadcast, get_unacked_broadcasts,
+update_broadcast_persistence (Phase 5.7)."""
 
-from shared.db import execute, execute_returning, execute_mutate
+from shared.db import execute, execute_returning, execute_mutate, execute_one
 
 
 def send_broadcast(
@@ -60,8 +61,40 @@ def get_unacked_broadcasts(agent_id: str, agent_type: str) -> list[dict]:
     )
 
 
+def update_broadcast_persistence(
+    agent_id: str, communication_id: str, persistent: bool
+) -> dict:
+    """Phase 5.7: flip is_persistent on an existing broadcast.
+
+    Admin/orchestrator only. Lets admin re-classify a broadcast that
+    turned out to be standing policy (or vice versa) without re-sending.
+    Toggling OFF leaves existing acks alone — only the scanner's
+    forward-only filter changes for future agents.
+    """
+    if agent_id != "admin" and not _is_orchestrator(agent_id):
+        raise ValueError("Only orchestrator or admin can toggle broadcast persistence.")
+    row = execute_one(
+        "SELECT id, type FROM communications WHERE id = %s::uuid",
+        (communication_id,),
+    )
+    if row is None:
+        raise ValueError(f"Communication {communication_id} not found")
+    if row["type"] != "broadcast":
+        raise ValueError(
+            f"update_broadcast_persistence only applies to broadcasts; "
+            f"row {communication_id} is type '{row['type']}'."
+        )
+    updated = execute_returning(
+        """UPDATE communications
+           SET is_persistent = %s
+           WHERE id = %s::uuid AND type = 'broadcast'
+           RETURNING *""",
+        (persistent, communication_id),
+    )
+    return updated
+
+
 def _is_orchestrator(agent_id: str) -> bool:
-    from shared.db import execute_one
     row = execute_one(
         "SELECT 1 FROM agent_runs WHERE agent_id = %s AND agent_type = 'orchestrator'",
         (agent_id,),

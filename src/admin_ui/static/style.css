@@ -1301,3 +1301,13 @@ body {
 .persistent-pill {
   background: #d29922 !important; color: #0d1117 !important;
 }
+
+/* Phase 5.7: persistence-toggle button styling */
+.persistence-toggle {
+  cursor: pointer; border: none; padding: 1px 6px; border-radius: 3px;
+  font-size: 11px; font-family: inherit;
+}
+.forward-only-pill {
+  background: #6e7681 !important; color: #c9d1d9 !important;
+}
+.persistence-toggle:hover { filter: brightness(1.2); }

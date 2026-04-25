@@ -203,6 +203,22 @@ def get_unacked_broadcasts(agent_id: str) -> dict[str, list]:
     return {"messages": broadcast.get_unacked_broadcasts(agent_id, agent_type)}
 
 
+@mcp.tool()
+def update_broadcast_persistence(
+    agent_id: str, communication_id: str, persistent: bool
+) -> dict[str, Any]:
+    """Phase 5.7: flip is_persistent on an existing broadcast.
+
+    Admin/orchestrator only. Use when a broadcast that started as a
+    quick fix turns out to be standing policy (or vice versa).
+    Toggling OFF leaves existing acks intact — only future scanner
+    reads + newly-spawned agents see the change.
+
+    Returns the updated communication row.
+    """
+    return broadcast.update_broadcast_persistence(agent_id, communication_id, persistent)
+
+
 # ============ SECRETS ============
 
 @mcp.tool()
