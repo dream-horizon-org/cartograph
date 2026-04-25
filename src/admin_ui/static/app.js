@@ -640,6 +640,7 @@ function _applyRoute() {
     const knownTabs = {
       chat: 'chat', communications: 'comms', graph: 'graph',
       entities: 'entities', catalog: 'catalog', insights: 'insights',
+      globe: 'globe',
     };
     if (knownTabs[tab]) {
       switchTab(knownTabs[tab]);
@@ -703,11 +704,13 @@ function switchTab(name) {
   document.getElementById('catalog-view').classList.toggle('active', name === 'catalog');
   document.getElementById('insights-view').classList.toggle('active', name === 'insights');
   document.getElementById('graph-view').classList.toggle('active', name === 'graph');
+  document.getElementById('globe-view').classList.toggle('active', name === 'globe');
   if (name === 'comms') fetchCommunications();
   if (name === 'entities') fetchEntities();
   if (name === 'catalog') fetchCatalog();
   if (name === 'insights') fetchInsights();
   if (name === 'graph') initOrRefreshGraph();
+  if (name === 'globe') initOrRefreshGlobe();
   // Phase 5.1: push URL when the tab change came from a click/code path,
   // not from a routechange that already advanced the URL.
   if (!_navigatingFromRoute) {
@@ -3268,3 +3271,212 @@ document.getElementById('ins-items')?.addEventListener('click', async e => {
     console.error('triage failed:', err);
   }
 });
+
+
+// ================================================================
+// Phase 6: Globe — sphere-constrained graph view (experimental)
+// ================================================================
+//
+// All nodes live on the surface of an invisible sphere. The d3-force
+// simulator runs in 3D as usual; we project every node back to the
+// surface in onEngineTick, killing the radial component of velocity.
+// Result: tangent forces drive layout, nodes "slide" along the globe
+// like balls rolling on Earth.
+//
+// Sphere radius scales with N nodes: R = max(80, 30 * sqrt(N)).
+//
+// 6.1 ships the scaffold + sphere projection with straight links.
+// Curves (great-circle / ballistic), junctions, hover zones, LOS,
+// and stubs land in 6.2 — 6.4. Doc sync in 6.6 after user validation.
+
+let globeInstance = null;
+let globeRadius = 100;
+let globeSnapshot = { nodes: [], edges: [], flows: [], nodeById: {} };
+
+function _globeRadiusFor(nodeCount) {
+  return Math.max(80, 30 * Math.sqrt(Math.max(1, nodeCount)));
+}
+
+// Uniform-on-sphere seed: (θ, φ) = (2π·rand, acos(2·rand − 1)).
+// Avoids the polar clustering you get from naive (θ, φ) uniform.
+function _seedOnSphere(node, R) {
+  const theta = 2 * Math.PI * Math.random();
+  const phi   = Math.acos(2 * Math.random() - 1);
+  node.x = R * Math.sin(phi) * Math.cos(theta);
+  node.y = R * Math.sin(phi) * Math.sin(theta);
+  node.z = R * Math.cos(phi);
+}
+
+// Project a single node back to radius R. Also strip the radial
+// component of velocity so the constraint isn't fought by the
+// simulator (otherwise nodes "spring" outward forever, get re-clamped,
+// and visibly jitter).
+function _projectToSphere(node, R) {
+  const d = Math.hypot(node.x || 0, node.y || 0, node.z || 0) || 1;
+  const k = R / d;
+  node.x *= k; node.y *= k; node.z *= k;
+  if (node.vx == null) return;
+  // Unit radial vector at the (now-projected) position.
+  const rx = node.x / R, ry = node.y / R, rz = node.z / R;
+  const vRad = node.vx * rx + node.vy * ry + node.vz * rz;
+  node.vx -= vRad * rx;
+  node.vy -= vRad * ry;
+  node.vz -= vRad * rz;
+}
+
+async function initOrRefreshGlobe() {
+  let data;
+  try {
+    const res = await fetch('/api/graph');
+    data = await res.json();
+  } catch (e) {
+    console.error('initOrRefreshGlobe fetch failed:', e);
+    return;
+  }
+  // For 6.1 we only render the active component nodes + bound edges;
+  // junctions, catalogs, danglings, flows arrive in later sub-phases.
+  // Catalog/dangling rows are just dropped from the link set for now —
+  // they will become radial spikes in 6.3.
+  const rawNodes = data.nodes || [];
+  const rawEdges = data.edges || [];
+  const flows = data.flows || [];
+
+  const N = rawNodes.length;
+  globeRadius = _globeRadiusFor(N);
+
+  // Build node objects compatible with 3d-force-graph.
+  const nodes = rawNodes.map(n => ({
+    id: n.id,
+    name: n.canonical_name || n.id,
+    type: n.component_type || 'application',
+    color: nodeColor(n),
+    planes: n.planes || [],
+    component_doc_md: n.component_doc_md,
+    source_slice: n.source_slice,
+  }));
+  // Seed every node uniformly on the sphere so the simulator starts
+  // from a sensible spread (otherwise everything bunches at origin).
+  nodes.forEach(n => _seedOnSphere(n, globeRadius));
+
+  // For 6.1, only render bound edges as straight links. Catalog +
+  // dangling come in 6.3 (radial spikes).
+  const links = rawEdges
+    .filter(e => e.kind === 'bound' && e.source_id && e.target_id)
+    .map(e => ({
+      source: e.source_id,
+      target: e.target_id,
+      edge_type: e.edge_type,
+      identifier: e.identifier,
+      kind: e.kind,
+    }));
+
+  globeSnapshot = {
+    nodes, links, flows, edges: rawEdges,
+    nodeById: Object.fromEntries(nodes.map(n => [n.id, n])),
+  };
+
+  // Stats sidebar.
+  document.getElementById('globe-comp-count').textContent = String(N);
+  document.getElementById('globe-edge-count').textContent = String(links.length);
+  document.getElementById('globe-radius').textContent = String(Math.round(globeRadius));
+
+  const canvas = document.getElementById('globe-canvas');
+  if (!globeInstance) {
+    globeInstance = ForceGraph3D()(canvas)
+      .backgroundColor('#050505')
+      .nodeLabel(n => `${n.name} (${n.type})`)
+      .nodeThreeObject(makeNodeMesh)
+      .nodeThreeObjectExtend(false)
+      .linkColor(() => '#9ca3af')
+      .linkWidth(0.6)
+      .linkOpacity(0.55)
+      .linkDirectionalArrowLength(2.5)
+      .linkDirectionalArrowRelPos(1)
+      .onNodeClick(n => showGlobeNodeDetail(n));
+
+    // Force tuning: weaker charge so tangent forces dominate the
+    // projection; long-ish link distance so the surface doesn't
+    // collapse into one cluster.
+    const chargeForce = globeInstance.d3Force('charge');
+    if (chargeForce && typeof chargeForce.strength === 'function') {
+      chargeForce.strength(-90);
+    }
+    const linkForce = globeInstance.d3Force('link');
+    if (linkForce && typeof linkForce.distance === 'function') {
+      linkForce.distance(50);
+    }
+    // Disable d3-force's default "center" — we already have an origin
+    // (the sphere's center). Center force fights radial projection.
+    globeInstance.d3Force('center', null);
+
+    // The projection. Runs after every physics step.
+    globeInstance.onEngineTick(() => {
+      const gd = globeInstance.graphData();
+      gd.nodes.forEach(n => _projectToSphere(n, globeRadius));
+    });
+
+    // Lighting — same Lambert + bright key/fill setup as Graph so
+    // node meshes read solidly even when the sphere itself is invisible.
+    requestAnimationFrame(() => {
+      try {
+        const scene = globeInstance.scene();
+        // Don't re-add lights on subsequent reloads.
+        if (!scene.userData._globeLitOnce) {
+          scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+          const key = new THREE.DirectionalLight(0xffffff, 0.7);
+          key.position.set(1, 1, 1);
+          scene.add(key);
+          const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+          fill.position.set(-1, -0.3, -1);
+          scene.add(fill);
+          scene.userData._globeLitOnce = true;
+        }
+      } catch (_e) { /* scene not ready yet — fine */ }
+    });
+
+    // Camera: orbit-only. Distance clamp prevents flying through the
+    // surface or losing the sphere off-screen.
+    requestAnimationFrame(() => {
+      try {
+        globeInstance.cameraPosition({ x: 0, y: 0, z: globeRadius * 2.5 });
+        const controls = globeInstance.controls();
+        if (controls) {
+          controls.minDistance = globeRadius * 1.2;
+          controls.maxDistance = globeRadius * 6;
+          controls.enablePan = false;
+        }
+      } catch (_e) { /* fine */ }
+    });
+  } else {
+    // Re-radius on reload so adding components grows the sphere.
+    requestAnimationFrame(() => {
+      try {
+        const controls = globeInstance.controls();
+        if (controls) {
+          controls.minDistance = globeRadius * 1.2;
+          controls.maxDistance = globeRadius * 6;
+        }
+      } catch (_e) {}
+    });
+  }
+
+  globeInstance.graphData({ nodes, links });
+}
+
+function showGlobeNodeDetail(node) {
+  const $body = document.getElementById('globe-hover-doc');
+  const planes = (node.planes || []).map(p =>
+    `<span class="plane-pill plane-${p}">${p}</span>`).join(' ');
+  const doc = node.component_doc_md
+    ? DOMPurify.sanitize(marked.parse(node.component_doc_md))
+    : '<p class="empty">No component_doc_md.</p>';
+  $body.innerHTML = `
+    <h4>${escapeHtml(node.name)}</h4>
+    <div class="muted">${node.type}</div>
+    <div>${planes || '<span class="muted">no attributions</span>'}</div>
+    <hr>
+    <div class="cat-doc">${doc}</div>
+  `;
+}
+
+document.getElementById('globe-refresh')?.addEventListener('click', initOrRefreshGlobe);
