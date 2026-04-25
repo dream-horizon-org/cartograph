@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cartograph Admin</title>
-  <link rel="stylesheet" href="/style.css?v=54">
+  <link rel="stylesheet" href="/style.css?v=55">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -31,6 +31,7 @@
         <button class="tab" data-tab="entities">Entities</button>
         <button class="tab" data-tab="catalog">Catalog</button>
         <button class="tab" data-tab="graph">Graph</button>
+        <button class="tab" data-tab="insights">Insights</button>
       </div>
       <button id="broadcast-btn" title="Broadcast to all agents of a type">📢 Broadcast</button>
     </nav>
@@ -309,6 +310,64 @@
       </aside>
     </section>
 
+    <!-- INSIGHTS VIEW (Phase 5.9) -->
+    <section id="insights-view" class="view">
+      <aside id="insights-filter">
+        <h2>Filters</h2>
+
+        <label>Status
+          <select id="ins-status">
+            <option value="open" selected>open</option>
+            <option value="investigating">investigating</option>
+            <option value="promoted">promoted</option>
+            <option value="wontfix">wontfix</option>
+            <option value="">All</option>
+          </select>
+        </label>
+
+        <label>Kind
+          <select id="ins-kind">
+            <option value="">All</option>
+            <option value="prompt_gap">prompt_gap</option>
+            <option value="tactic_win">tactic_win</option>
+            <option value="tool_gap">tool_gap</option>
+            <option value="doc_confusing">doc_confusing</option>
+            <option value="workflow_friction">workflow_friction</option>
+          </select>
+        </label>
+
+        <label>Target
+          <input id="ins-target" placeholder="agent type, tool, doc path" autocomplete="off">
+        </label>
+
+        <label>Agent
+          <input id="ins-agent" placeholder="agent_id" autocomplete="off"
+                 list="agent-options">
+        </label>
+
+        <div class="filter-actions">
+          <button id="ins-apply">Apply</button>
+          <button id="ins-reset" class="secondary">Reset</button>
+        </div>
+
+        <p class="hint">
+          Agents call <code>record_insight()</code> to surface prompt gaps,
+          tactic wins, tool gaps, doc confusion, and workflow friction.
+          Triage from here.
+        </p>
+      </aside>
+
+      <main id="insights-list-pane">
+        <header>
+          <h2>Insights</h2>
+          <span id="ins-count"></span>
+        </header>
+        <ul id="ins-items">
+          <li class="empty">Loading…</li>
+        </ul>
+      </main>
+    </section>
+
     <!-- GRAPH VIEW (Phase 3.5) -->
     <section id="graph-view" class="view">
       <aside id="graph-sidebar">
@@ -398,6 +457,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=54"></script>
+  <script src="/app.js?v=55"></script>
 </body>
 </html>

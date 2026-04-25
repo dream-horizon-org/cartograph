@@ -55,6 +55,25 @@ EDGE (dependency between components):
   "Component A calls Component B at GET /X" or "A writes to DB B".
   One edge per specific call/query, discovered by SMEs during
   Edge Discovery.
+
+== SELF-IMPROVEMENT LOOP — record_insight ==
+If you discover a smart tactic, hit a prompt gap, miss a tool you
+wish existed, find an on-disk doc misleading, or the multi-step
+workflow felt awkward — call record_insight(kind, target, body,
+evidence?). Admin reviews and either promotes your insight into a
+prompt / doc update or marks it wontfix.
+
+  kind: 'prompt_gap' | 'tactic_win' | 'tool_gap' |
+        'doc_confusing' | 'workflow_friction'
+  target: what it's about — agent type, tool name, doc path, phase.
+          e.g. 'sme.materialisation', 'transfer_edges',
+          'TRIGGER-MANAGEMENT.md §1.1b'.
+  body: be specific (what + why).
+  evidence: optional pointers — {{task_ids, comm_ids, file_paths}}.
+
+DON'T over-report. One insight per genuinely-new finding, not every
+mild irritation. This channel exists to make Cartograph better; keep
+the signal high.
 """
 
 

@@ -639,7 +639,7 @@ function _applyRoute() {
     const tab = segments[0] || 'chat';
     const knownTabs = {
       chat: 'chat', communications: 'comms', graph: 'graph',
-      entities: 'entities', catalog: 'catalog',
+      entities: 'entities', catalog: 'catalog', insights: 'insights',
     };
     if (knownTabs[tab]) {
       switchTab(knownTabs[tab]);
@@ -701,10 +701,12 @@ function switchTab(name) {
   document.getElementById('comms-view').classList.toggle('active', name === 'comms');
   document.getElementById('entities-view').classList.toggle('active', name === 'entities');
   document.getElementById('catalog-view').classList.toggle('active', name === 'catalog');
+  document.getElementById('insights-view').classList.toggle('active', name === 'insights');
   document.getElementById('graph-view').classList.toggle('active', name === 'graph');
   if (name === 'comms') fetchCommunications();
   if (name === 'entities') fetchEntities();
   if (name === 'catalog') fetchCatalog();
+  if (name === 'insights') fetchInsights();
   if (name === 'graph') initOrRefreshGraph();
   // Phase 5.1: push URL when the tab change came from a click/code path,
   // not from a routechange that already advanced the URL.
@@ -3063,4 +3065,127 @@ document.getElementById('cat-reset')?.addEventListener('click', () => {
 });
 document.getElementById('cat-detail-close')?.addEventListener('click', () => {
   Router.navigate('/catalog');
+});
+
+
+// ================================================================
+// Phase 5.9: Insights tab — agent self-improvement triage
+// ================================================================
+
+const insightsState = { rows: [] };
+
+function _readInsightFiltersFromUrl() {
+  const q = Router.current().query;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+  setVal('ins-status', q.status === undefined ? 'open' : q.status);
+  setVal('ins-kind', q.kind);
+  setVal('ins-target', q.target);
+  setVal('ins-agent', q.agent_id);
+}
+
+function _writeInsightFiltersToUrl() {
+  const get = id => (document.getElementById(id) || {}).value || '';
+  Router.navigate('/insights', {
+    set: {
+      status: get('ins-status'),
+      kind: get('ins-kind'),
+      target: get('ins-target'),
+      agent_id: get('ins-agent'),
+    },
+  });
+}
+
+async function fetchInsights() {
+  _readInsightFiltersFromUrl();
+  const q = Router.current().query;
+  const params = new URLSearchParams();
+  ['status', 'kind', 'target', 'agent_id'].forEach(k => {
+    if (q[k]) params.set(k, q[k]);
+  });
+  // Default: show open if no filter set in URL.
+  if (!q.status && !params.has('status')) params.set('status', 'open');
+  params.set('limit', '200');
+  try {
+    const res = await fetch(`/api/insights?${params}`);
+    const data = await res.json();
+    insightsState.rows = data.insights || [];
+    renderInsights();
+  } catch (e) {
+    console.error('fetchInsights failed:', e);
+    document.getElementById('ins-items').innerHTML =
+      '<li class="empty">Failed to load insights.</li>';
+  }
+}
+
+function renderInsights() {
+  const $items = document.getElementById('ins-items');
+  const $count = document.getElementById('ins-count');
+  $count.textContent = `${insightsState.rows.length}`;
+  if (!insightsState.rows.length) {
+    $items.innerHTML = '<li class="empty">No insights match the filters.</li>';
+    return;
+  }
+  $items.innerHTML = '';
+  for (const r of insightsState.rows) {
+    const li = document.createElement('li');
+    li.className = `ins-row ins-status-${r.status}`;
+    const evidenceHtml = r.evidence
+      ? `<details><summary>evidence</summary><pre>${escapeHtml(JSON.stringify(r.evidence, null, 2))}</pre></details>`
+      : '';
+    const triageHtml = `
+      <div class="ins-triage">
+        <button data-action="investigating" data-id="${r.id}" title="Mark investigating">🔍</button>
+        <button data-action="promoted"     data-id="${r.id}" title="Promoted into prompt/doc">✅</button>
+        <button data-action="wontfix"      data-id="${r.id}" title="Won't fix">🚫</button>
+        <button data-action="open"         data-id="${r.id}" title="Reopen">↩</button>
+      </div>`;
+    const triageNote = r.triage_note
+      ? `<div class="ins-note"><b>note</b>: ${escapeHtml(r.triage_note)}</div>`
+      : '';
+    li.innerHTML = `
+      <div class="ins-row-top">
+        <span class="ins-kind ins-kind-${r.kind}">${r.kind}</span>
+        <span class="ins-status-pill">${r.status}</span>
+        <span class="ins-target">${escapeHtml(r.target)}</span>
+        <span class="ins-agent">${escapeHtml(r.agent_id)}</span>
+        <span class="ins-ts">${new Date(r.created_at).toLocaleString()}</span>
+      </div>
+      <div class="ins-body">${escapeHtml(r.body)}</div>
+      ${evidenceHtml}
+      ${triageNote}
+      ${triageHtml}
+    `;
+    $items.appendChild(li);
+  }
+}
+
+document.getElementById('ins-apply')?.addEventListener('click', _writeInsightFiltersToUrl);
+document.getElementById('ins-reset')?.addEventListener('click', () => {
+  Router.navigate('/insights', { clear: ['status', 'kind', 'target', 'agent_id'] });
+});
+
+// Delegated triage clicks.
+document.getElementById('ins-items')?.addEventListener('click', async e => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const action = btn.dataset.action;
+  const note = action === 'wontfix' || action === 'promoted'
+    ? prompt(`Optional note for status='${action}':`, '') || null
+    : null;
+  try {
+    const res = await fetch(`/api/insight/${encodeURIComponent(id)}/triage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: action, triage_note: note }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Failed: ${err.detail || res.status}`);
+      return;
+    }
+    fetchInsights();
+  } catch (err) {
+    console.error('triage failed:', err);
+  }
 });

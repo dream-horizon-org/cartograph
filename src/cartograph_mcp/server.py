@@ -32,6 +32,7 @@ from cartograph_mcp.tools import notifications as notifications_tool
 from cartograph_mcp.tools import proxy as proxy_tool
 from cartograph_mcp.tools import search as search_tool
 from cartograph_mcp.tools import sleep as sleep_tool
+from cartograph_mcp.tools import insights as insights_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1466,6 +1467,42 @@ def reset_agent(agent_id: str, target_agent_id: str) -> dict[str, Any]:
         )
     logger.info("Orchestrator %s force-reset agent %s", agent_id, target_agent_id)
     return {"reset": True, "agent_id": target_agent_id}
+
+
+# ============ AGENT INSIGHTS (Phase 5.9) ============
+
+
+@mcp.tool()
+def record_insight(
+    agent_id: str,
+    kind: str,
+    target: str,
+    body: str,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Record an insight from your own agent's perspective.
+
+    Call this when you discover something worth feeding back into the
+    system: a clever tactic, a prompt gap, a missing tool, a misleading
+    on-disk doc, or workflow friction. Admin reviews these and either
+    promotes them into prompt updates or marks them wontfix.
+
+    Args:
+      kind: 'prompt_gap'        — something missing or confusing in the prompt
+            'tactic_win'        — a smart approach worth sharing
+            'tool_gap'          — a tool that doesn't exist but should
+            'doc_confusing'     — an on-disk doc misled you
+            'workflow_friction' — multi-step dance felt awkward
+      target: what the insight is about — agent type, tool name, doc
+              path, phase. Examples: 'sme.materialisation',
+              'transfer_edges', 'TRIGGER-MANAGEMENT.md §1.1b'.
+      body: the insight itself (what + why). Be specific.
+      evidence: optional pointers — {task_ids, comm_ids, file_paths}.
+
+    Don't over-report — one insight per genuinely-new finding, not
+    every mild irritation.
+    """
+    return insights_tool.record_insight(agent_id, kind, target, body, evidence)
 
 
 # ============ ENTRY POINT ============

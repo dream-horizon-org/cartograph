@@ -716,6 +716,36 @@ def run_migrations() -> None:
                 "metadata JSONB NOT NULL DEFAULT '{}'"
             )
 
+            # Phase 5.9: agent_insights — self-improvement loop.
+            # Agents call record_insight() to flag prompt gaps, tactic
+            # wins, tool gaps, doc confusion, workflow friction. Admin
+            # triages from the UI; "promoted" entries inform prompt /
+            # doc updates. Append-only from the agent side; status flips
+            # via admin triage.
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS agent_insights (
+                    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    agent_id    TEXT NOT NULL REFERENCES agent_runs(agent_id) ON DELETE CASCADE,
+                    kind        TEXT NOT NULL CHECK (kind IN (
+                                  'prompt_gap',
+                                  'tactic_win',
+                                  'tool_gap',
+                                  'doc_confusing',
+                                  'workflow_friction'
+                                )),
+                    target      TEXT NOT NULL,
+                    body        TEXT NOT NULL,
+                    evidence    JSONB,
+                    status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN (
+                                  'open', 'investigating', 'promoted', 'wontfix'
+                                )),
+                    triaged_by  TEXT,
+                    triaged_at  TIMESTAMPTZ,
+                    triage_note TEXT,
+                    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                )"""
+            )
+
             # --- Indexes ---
             _create_indexes(cur)
 
@@ -808,6 +838,11 @@ def _create_indexes(cur) -> None:
         # Proxy items
         "CREATE INDEX IF NOT EXISTS idx_proxy_surviving ON proxy_items(surviving_agent_id) WHERE status = 'pending'",
         "CREATE INDEX IF NOT EXISTS idx_proxy_decom ON proxy_items(decommissioned_agent_id)",
+
+        # Phase 5.9: Agent insights
+        "CREATE INDEX IF NOT EXISTS idx_insights_agent ON agent_insights(agent_id)",
+        "CREATE INDEX IF NOT EXISTS idx_insights_status ON agent_insights(status)",
+        "CREATE INDEX IF NOT EXISTS idx_insights_target ON agent_insights(target)",
     ]
     for idx in indexes:
         cur.execute(idx)

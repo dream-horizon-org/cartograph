@@ -413,6 +413,35 @@ def create_app() -> FastAPI:
         )
         return {"clarification": row, "thread": thread}
 
+    # --- INSIGHTS (Phase 5.9) ---
+
+    class TriageBody(BaseModel):
+        status: str = Field(..., pattern="^(open|investigating|promoted|wontfix)$")
+        triage_note: Optional[str] = None
+
+    @app.get("/api/insights")
+    def list_insights_endpoint(
+        status: Optional[str] = Query(None),
+        kind: Optional[str] = Query(None),
+        target: Optional[str] = Query(None),
+        agent_id: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+    ):
+        from cartograph_mcp.tools import insights as _ins
+        return {"insights": _ins.list_insights(
+            status=status, kind=kind, target=target, agent_id=agent_id, limit=limit,
+        )}
+
+    @app.post("/api/insight/{insight_id}/triage")
+    def triage_insight_endpoint(insight_id: str, body: TriageBody):
+        from cartograph_mcp.tools import insights as _ins
+        try:
+            return _ins.triage_insight(
+                insight_id, body.status, "admin", body.triage_note
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     # --- ENTITIES VIEW (Phase 5.2) ---
 
     _ENTITY_KINDS = {"task", "consolidation", "clarification", "broadcast"}
