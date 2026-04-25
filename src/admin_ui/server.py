@@ -197,7 +197,13 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat/{agent_id}")
     def send_chat(agent_id: str, body: SendChatBody):
-        """Admin sends a message to an agent."""
+        """Admin sends a message to an agent.
+
+        Phase 5.8: also clears `sleep_until` so admin chat wakes a
+        sleeping agent — same semantic the MCP `send_chat` tool gives
+        agents. The admin UI bypasses MCP for this write (HLD §10.3),
+        so the wake side-effect has to live here too.
+        """
         # Validate agent exists
         agent = execute_one(
             "SELECT agent_id FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
@@ -214,6 +220,12 @@ def create_app() -> FastAPI:
                VALUES ('admin', %s, 'chat', %s)
                RETURNING *""",
             (agent_id, body.message),
+        )
+        # Wake the agent if it was sleeping. Awake agents see no change.
+        execute_mutate(
+            "UPDATE agent_runs SET sleep_until = NULL "
+            "WHERE agent_id = %s AND sleep_until IS NOT NULL",
+            (agent_id,),
         )
         return row
 
