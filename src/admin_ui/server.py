@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from shared.db import execute, execute_one, execute_mutate, execute_returning
@@ -513,10 +513,34 @@ def create_app() -> FastAPI:
             agent_type=body.agent_type,
         )
 
-    # --- STATIC FILES ---
+    # --- STATIC FILES + SPA FALLBACK (Phase 5.1) ---
+    #
+    # All /api/* routes registered above take precedence (FastAPI matches in
+    # registration order). The catch-all below first tries to serve a real
+    # file from STATIC_DIR; if no file exists at the requested path, it
+    # falls back to index.html so client-side routes like /chat/sme-foo,
+    # /entities/task/<uuid>, /catalog/component/<uuid> etc. all hit the
+    # SPA's history-API router. We don't use StaticFiles' html=True mount
+    # any more because it can't fall back to index.html for non-existent
+    # paths — it 404s instead, which broke deep-links.
 
-    if STATIC_DIR.exists():
-        app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+    @app.get("/{full_path:path}")
+    def spa_or_static(full_path: str):
+        # Genuine /api/ misses must 404 — never fall back to index.html.
+        # FastAPI's path-param catch-all otherwise eats every unknown
+        # /api/* path, masking real backend bugs.
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
+        if full_path:
+            candidate = (STATIC_DIR / full_path).resolve()
+            try:
+                # Reject path traversal: candidate must be inside STATIC_DIR.
+                candidate.relative_to(STATIC_DIR.resolve())
+                if candidate.is_file():
+                    return FileResponse(candidate)
+            except ValueError:
+                pass  # fall through to index.html
+        return FileResponse(STATIC_DIR / "index.html")
 
     return app
 

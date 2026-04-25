@@ -1,3 +1,75 @@
+// ================================================================
+// Phase 5.1: URL routing — History API + query-param preservation
+// ================================================================
+//
+// All FE state changes that should be deep-linkable go through Router.navigate().
+// Existing query params are preserved by default; opt-in to clear via
+// {clear: ['key']} or {set: {key: undefined}}.
+//
+// URL scheme:
+//   /                                       — default (chat tab)
+//   /chat/:agent_id?q=&group=               — chat with agent
+//   /communications?agent=&type=&...        — communications panel
+//   /graph                                  — graph view
+//   /graph/component/:id                    — component selected in graph
+//   /entities[?type=&status=&...]           — entities list (Phase 5.2)
+//   /entities/{kind}/:id                    — entity drill-down
+//   /catalog[?type=&plane=&status=&...]     — components list (Phase 5.3)
+//   /catalog/component/:id                  — component drill-down
+//   /agent/:id/chain                        — merge lineage view
+//   /broadcast/new                          — open broadcast dialog
+//
+// Filter / search state lives in query params so it survives navigation
+// and is shareable. The invariant: navigate(path) preserves all existing
+// query keys unless explicitly cleared/replaced via opts.set/opts.clear.
+
+const Router = (() => {
+  function buildUrl(path, set, clear) {
+    const url = new URL(path, window.location.origin);
+    const incoming = new URLSearchParams(window.location.search);
+    // Preserve existing query unless the new path already specifies the key.
+    incoming.forEach((v, k) => {
+      if (!url.searchParams.has(k)) url.searchParams.set(k, v);
+    });
+    if (set) {
+      Object.entries(set).forEach(([k, v]) => {
+        if (v === null || v === undefined || v === '') url.searchParams.delete(k);
+        else url.searchParams.set(k, String(v));
+      });
+    }
+    if (clear) clear.forEach(k => url.searchParams.delete(k));
+    const qs = url.searchParams.toString();
+    return url.pathname + (qs ? '?' + qs : '');
+  }
+
+  function navigate(path, opts = {}) {
+    const target = buildUrl(path, opts.set, opts.clear);
+    const fullCurrent = window.location.pathname + window.location.search;
+    if (target === fullCurrent) return; // no-op when URL is unchanged
+    if (opts.replace) history.replaceState({}, '', target);
+    else history.pushState({}, '', target);
+    window.dispatchEvent(new CustomEvent('routechange'));
+  }
+
+  function current() {
+    const path = window.location.pathname;
+    const query = Object.fromEntries(new URLSearchParams(window.location.search));
+    const segments = path.split('/').filter(Boolean);
+    return { path, segments, query };
+  }
+
+  window.addEventListener('popstate', () => {
+    window.dispatchEvent(new CustomEvent('routechange'));
+  });
+
+  return { navigate, current, buildUrl };
+})();
+
+// Recursion guard — when routechange triggers switchTab/selectAgent we
+// don't want them to call Router.navigate again and bounce. The flag
+// short-circuits the navigate call inside those mutators.
+let _navigatingFromRoute = false;
+
 const state = {
   agents: [],
   selectedAgentId: null,
@@ -287,6 +359,14 @@ function _mountDecommissionedToggle() {
 async function selectAgent(agentId) {
   if (state.pollInterval) clearInterval(state.pollInterval);
 
+  // Phase 5.1: push URL so the chosen agent is deep-linkable. Done up
+  // front (before the network round-trip) so the URL reflects user intent
+  // immediately. Skip when the call originated from a routechange to
+  // avoid bouncing back through Router.navigate.
+  if (!_navigatingFromRoute && state.selectedAgentId !== agentId) {
+    Router.navigate(`/chat/${encodeURIComponent(agentId)}`);
+  }
+
   state.selectedAgentId = agentId;
   state.messages = [];
   state.oldestTimestamp = null;
@@ -540,6 +620,52 @@ _mountDecommissionedToggle();
 fetchAgents();
 state.agentRefreshInterval = setInterval(fetchAgents, 5000);
 
+// Phase 5.1: routechange handler + initial bootstrap from URL.
+//
+// The handler maps a URL onto FE state by calling switchTab and (where
+// relevant) selectAgent. Sets _navigatingFromRoute so those mutators
+// don't bounce back through Router.navigate.
+function _applyRoute() {
+  const { segments, query } = Router.current();
+  _navigatingFromRoute = true;
+  try {
+    const tab = segments[0] || 'chat';
+    const knownTabs = {
+      chat: 'chat', communications: 'comms', graph: 'graph',
+      entities: 'entities', catalog: 'catalog',
+    };
+    if (knownTabs[tab]) {
+      switchTab(knownTabs[tab]);
+      if (tab === 'chat' && segments[1]) {
+        selectAgent(decodeURIComponent(segments[1]));
+      }
+      // 5.2 / 5.3 will hook entity / component drill-down rendering here
+      // once those tabs land.
+    } else if (tab === 'broadcast' && segments[1] === 'new') {
+      switchTab('comms');
+      const dlg = document.getElementById('broadcast-dialog');
+      if (dlg && !dlg.open) dlg.showModal();
+    } else if (tab === 'agent' && segments[2] === 'chain') {
+      // /agent/:id/chain — open chat tab on that agent (the existing
+      // selectAgent already renders the chain panel above the chat pane
+      // when the selected agent is decommissioned).
+      switchTab('chat');
+      selectAgent(decodeURIComponent(segments[1]));
+    } else {
+      // Unknown route → default to chat.
+      switchTab('chat');
+    }
+  } finally {
+    _navigatingFromRoute = false;
+  }
+}
+
+window.addEventListener('routechange', _applyRoute);
+// Initial dispatch — kicks off after the synchronous bootstrap above.
+// selectAgent works even before fetchAgents resolves; the chat header
+// fills in once the agent list arrives.
+setTimeout(_applyRoute, 0);
+
 
 // ================================================================
 // Tab switching + Communications panel + Broadcast (Phase 2.4)
@@ -569,6 +695,12 @@ function switchTab(name) {
   document.getElementById('graph-view').classList.toggle('active', name === 'graph');
   if (name === 'comms') fetchCommunications();
   if (name === 'graph') initOrRefreshGraph();
+  // Phase 5.1: push URL when the tab change came from a click/code path,
+  // not from a routechange that already advanced the URL.
+  if (!_navigatingFromRoute) {
+    const urlName = name === 'comms' ? 'communications' : name;
+    Router.navigate(`/${urlName}`);
+  }
 }
 
 // --- Communications list ---
