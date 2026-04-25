@@ -3808,20 +3808,19 @@ function _globeLinkParticles(_link) {
 
 function _refreshGlobeLinkVisuals() {
   if (!globeInstance) return;
-  // Custom tube meshes built via linkThreeObject are NOT recoloured by
-  // the library when .linkColor changes (the accessor only drives
-  // default-rendered lines). Walk every link's __threeObj and update
-  // its material directly. Child arrows ride along.
   try {
     const gd = globeInstance.graphData();
+    let touched = 0, missing = 0;
     for (const l of (gd?.links || [])) {
       const tube = l.__threeObj;
-      if (!tube) continue;
+      if (!tube) { missing += 1; continue; }
       const color = _globeLinkColor(l);
       const opacity = _globeLinkOpacity(l);
       if (tube.material) {
         tube.material.color.set(color);
         tube.material.opacity = opacity;
+        // MeshBasicMaterial color/opacity changes propagate without
+        // needsUpdate, but we set it anyway for safety.
         tube.material.needsUpdate = true;
       }
       for (const child of (tube.children || [])) {
@@ -3831,9 +3830,10 @@ function _refreshGlobeLinkVisuals() {
           child.material.needsUpdate = true;
         }
       }
+      touched += 1;
     }
-    // Particles ARE recomputed by the library when accessor changes.
-    globeInstance.linkDirectionalParticles(l => _globeLinkParticles(l));
+    console.log('[globe] refresh visuals: touched=', touched, 'missing __threeObj=', missing,
+      'lit=', _globeLitEdgeIds.size, 'hover=', _globeHoverLitEdgeIds.size);
   } catch (e) {
     console.warn('refreshGlobeLinkVisuals failed:', e);
   }
@@ -3994,7 +3994,8 @@ function _globeEffectiveFlowIncomingsForEdge(edgeId) {
 }
 
 function _globeHover(link) {
-  // Clear previous hover lighting first.
+  // Diagnostic — temporary, helps confirm raycasting reaches the tubes.
+  if (link) console.log('[globe] hover', link.id, link.edge_type, link.identifier);
   _globeHoverLitEdgeIds = new Set();
   if (link) {
     _globeHoverLitEdgeIds.add(link.id);
@@ -4017,6 +4018,8 @@ function _globeHover(link) {
 }
 
 function _globeLightOfSight(link) {
+  console.log('[globe] LOS click on', link?.id, link?.edge_type, link?.identifier,
+    'junctionOut=', !!link?.isJunctionOut, 'junctionIn=', !!link?.isJunctionIn);
   _globeLosTimers.forEach(t => clearTimeout(t));
   _globeLosTimers = [];
   _globeLitEdgeIds = new Set();
