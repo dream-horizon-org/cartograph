@@ -3558,6 +3558,7 @@ async function initOrRefreshGlobe() {
         _refreshGlobeLinkVisuals();
       })
       .onLinkClick(l => _globeLightOfSight(l))
+      .onLinkHover(l => _globeHover(l))
       .onBackgroundClick(() => {
         _globeLosTimers.forEach(t => clearTimeout(t));
         _globeLosTimers = [];
@@ -3772,20 +3773,25 @@ function _ballisticPoints(p1, p2, R) {
 }
 
 // LOS / hover lit-edge sets — populated when user clicks an edge or
-// hovers a node; consumed by _globeLinkColor / _globeLinkOpacity.
+// hovers one; consumed by _globeLinkColor / _globeLinkOpacity.
+// Precedence (highest first): LOS-lit (amber) > hover-lit (cyan) >
+// async default (purple) > stub muted > sync default (slate).
 let _globeLitEdgeIds = new Set();
+let _globeHoverLitEdgeIds = new Set();
 let _globeLosTimers = [];
 
 function _globeLinkColor(link) {
-  if (_globeLitEdgeIds.has(link.id)) return '#fbbf24';  // LOS-lit amber
-  if (link.isStub)                    return '#475569';  // muted slate
-  if (link.curveMode === 'ballistic') return '#fbbf24';  // async always amber
-  return '#9ca3af';                                       // sync slate
+  if (_globeLitEdgeIds.has(link.id))      return '#fbbf24';  // LOS-lit amber
+  if (_globeHoverLitEdgeIds.has(link.id)) return '#22d3ee';  // hover cyan
+  if (link.isStub)                        return '#475569';  // muted slate
+  if (link.curveMode === 'ballistic')     return '#c084fc';  // async purple
+  return '#9ca3af';                                           // sync slate
 }
 
 function _globeLinkOpacity(link) {
-  if (_globeLitEdgeIds.has(link.id)) return 1.0;
-  if (link.isStub)                    return 0.45;
+  if (_globeLitEdgeIds.has(link.id))      return 1.0;
+  if (_globeHoverLitEdgeIds.has(link.id)) return 1.0;
+  if (link.isStub)                        return 0.45;
   return 0.7;
 }
 
@@ -3955,6 +3961,29 @@ function _globeEffectiveFlowIncomingsForEdge(edgeId) {
     }
   }
   return out;
+}
+
+function _globeHover(link) {
+  // Clear previous hover lighting first.
+  _globeHoverLitEdgeIds = new Set();
+  if (link) {
+    _globeHoverLitEdgeIds.add(link.id);
+    // Bundle-aware: hovering a junction trunk lights every bundled
+    // contributor; hovering a contributor lights the trunk + siblings.
+    if (link.isJunctionOut && link.groupEdgeIds) {
+      for (const id of link.groupEdgeIds) _globeHoverLitEdgeIds.add(id);
+    } else if (link.isJunctionIn) {
+      const meta = globeSnapshot.junctionOutById || {};
+      for (const [outId, out] of Object.entries(meta)) {
+        if (out.groupEdgeIds.includes(link.id)) {
+          _globeHoverLitEdgeIds.add(outId);
+          for (const id of out.groupEdgeIds) _globeHoverLitEdgeIds.add(id);
+          break;
+        }
+      }
+    }
+  }
+  _refreshGlobeLinkVisuals();
 }
 
 function _globeLightOfSight(link) {
