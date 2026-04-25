@@ -3711,7 +3711,7 @@ async function initOrRefreshGlobe() {
         const gd = globeInstance.graphData();
         let withMesh = 0, withoutMesh = 0;
         for (const l of (gd?.links || [])) {
-          if (l.__threeObj) withMesh += 1; else withoutMesh += 1;
+          if (l.__lineObj || l.__threeObj) withMesh += 1; else withoutMesh += 1;
         }
         _globeDebug(`init done: nodes=${nodes.length} links=${links.length} withMesh=${withMesh} withoutMesh=${withoutMesh}`);
       } catch (e) {
@@ -3844,15 +3844,17 @@ function _refreshGlobeLinkVisuals() {
     const gd = globeInstance.graphData();
     let touched = 0, missing = 0;
     for (const l of (gd?.links || [])) {
-      const tube = l.__threeObj;
+      // 3d-force-graph stores LINK meshes under __lineObj (nodes use
+      // __threeObj). Earlier draft used __threeObj and silently
+      // failed for every link — the diagnostic in v=67 confirmed
+      // missing=64 for 64 links.
+      const tube = l.__lineObj || l.__threeObj;
       if (!tube) { missing += 1; continue; }
       const color = _globeLinkColor(l);
       const opacity = _globeLinkOpacity(l);
       if (tube.material) {
         tube.material.color.set(color);
         tube.material.opacity = opacity;
-        // MeshBasicMaterial color/opacity changes propagate without
-        // needsUpdate, but we set it anyway for safety.
         tube.material.needsUpdate = true;
       }
       for (const child of (tube.children || [])) {
