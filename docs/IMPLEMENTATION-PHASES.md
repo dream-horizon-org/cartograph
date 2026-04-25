@@ -2316,21 +2316,147 @@ Total: ~38 new. Target final count: ~421 (from 383).
 
 ---
 
-## Phase 6+: Future phases (planned, not started)
+## Phase 6: Globe — sphere-constrained graph view (experimental, deletable)
 
-**Phase 6 — Phase-flow completion** (orchestrator-driven sweeps):
+A NEW top-nav tab that renders the same `/api/graph` payload on a sphere instead of in free 3D space. Deliberately additive — the existing Graph tab stays untouched so the Globe can be deleted without regression risk.
+
+**Concept:** all component nodes lie on the surface of an invisible sphere (like cities on Earth). Edges either travel ALONG the surface (great-circle arcs) or OVER the surface (ballistic / missile-trajectory arcs). Sphere radius scales with node count. Force-directed simulation runs as usual but every tick projects each node back to the surface — radial forces cancel, only tangent components matter, so connected nodes "slide" along the globe toward each other.
+
+**Why a separate tab, not a toggle inside Graph:**
+- Trivially deletable if the layout doesn't pan out — one tab + one JS module + a CSS block come out cleanly.
+- Independent from the Graph tab's tuning surface (charge strengths, junction pinning, frozen stub offsets) — experiments can't regress the working view.
+- Reuses `/api/graph` so zero backend work.
+
+### 6.0 Backend
+
+NONE. Graph payload (`/api/graph` from Phase 3.10) carries everything needed: nodes, edges (with `kind` discriminator), flows. Globe is a pure rendering experiment.
+
+### 6.1 Tab + view shell
+
+- New top-nav button **Globe** (between Graph and Insights, or after Graph — tbd).
+- New `<section id="globe-view" class="view">` in `index.html` mirroring the Graph view's [sidebar | canvas] grid.
+- Sidebar: same plane legend + component/edge counts + hover/click panel as Graph (shared design language; just a different layout engine on the right).
+- URL routing: `/globe` and `/globe/component/:id` registered alongside the existing `/graph` routes; same Router.navigate machinery.
+
+### 6.2 Sphere projection (the core trick)
+
+Use 3d-force-graph as the simulator (don't fight the library; clamp its output). Add a per-tick projection in `onEngineTick`:
+
+```js
+function projectToSphere(node, R) {
+  const d = Math.hypot(node.x, node.y, node.z) || 1;
+  const k = R / d;
+  node.x *= k; node.y *= k; node.z *= k;
+  // also kill radial velocity so the node doesn't bounce off:
+  // remove the component of (vx, vy, vz) along the radial direction.
+  const r = { x: node.x/R, y: node.y/R, z: node.z/R };
+  const vRad = node.vx*r.x + node.vy*r.y + node.vz*r.z;
+  node.vx -= vRad*r.x; node.vy -= vRad*r.y; node.vz -= vRad*r.z;
+}
+```
+
+Run `projectToSphere(n, R)` for every node every tick. Result: nodes constrained to surface, tangent forces drive layout, no "into the sphere" possible.
+
+**Sphere radius:** `R = max(80, 30 * Math.sqrt(N))` where N is active component count. 33 nodes → R ≈ 170; 200 nodes → R ≈ 420.
+
+**Initial seed:** scatter nodes randomly on the sphere via `(θ, φ) = (2π·rand, acos(2·rand − 1))` (uniform spherical distribution) so the simulator starts from a reasonable spread.
+
+### 6.3 Edge geometry — two modes
+
+Per-edge picked by `edge_type`:
+- **Great-circle ("via sphere") — sync deps:**  edges with `edge_type ∈ {calls, reads_from, writes_to, runs_on}` follow a great-circle arc at radius R + ε (slight elevation prevents z-fighting between overlapping edges).
+- **Ballistic arc ("over sphere") — async fan-out:** edges with `edge_type ∈ {publishes_to, consumes_from, triggers}` rise off the surface like a missile trajectory. Apex height ∝ chord length; max apex around 0.4·R so it stays visually within the scene.
+
+Implementation: `linkThreeObject(link)` returns a `THREE.Line` built from a sampled curve:
+- Great-circle: spherical-linear interpolation (slerp) between source and target unit vectors, sampled to 32 segments, scaled to R + ε.
+- Ballistic: 3-point quadratic Bézier with control point at the chord midpoint pushed radially outward by `apex(chord)`. Sampled to 32 segments.
+
+### 6.4 Feature parity with Graph tab — MUST keep all of these
+
+User explicitly called out that all original-Graph features must work on the Globe:
+
+| Feature | Globe approach |
+|---|---|
+| **Bundled incoming edges (junction nodes when N≥2 share `(target, edge_type, identifier)`)** | Same data preprocessing as Graph. Junction node lives ON the sphere surface, positioned at a great-circle midpoint between target and the centroid of its callers. Junction-in / junction-out edges still use great-circle arcs. |
+| **3-zone hover (caller / target / convergence)** | Same hover handlers — zone detection from cursor position along the curve. Caller zone glows incoming flows, target zone glows outgoing flows, convergence zone (junction body) glows all contributors. Identical to Graph tab. |
+| **Light-of-sight (LOS) — strict forward BFS through flows + catalog bridging** | Identical algorithm; only the rendering changes. Layered 220ms stagger animates the lit set. Lit edges glow amber + 4 directional particles (same as Graph). |
+| **Dangling outgoing (`X → ?`)** | Render as a short radial spike pointing OUTWARD from the source node (away from sphere center). Length ≈ 0.15·R. Stub `?` placeholder at the spike's tip. Hover the stub → "unknown target" tooltip. |
+| **Dangling/orphan catalog (`? → X`)** | Render as a short radial spike pointing OUTWARD from the target node. Stub `?` placeholder at the spike's tip. Hover the stub → "no known caller" tooltip. |
+| **Catalog WITH bound caller** | Hidden (implicit, same as Graph). |
+| **Component drill-down sidebar** | Same Doc / Slice / Catalog / Bindings in / Bindings out / Flows tabs. Same renderers — wire to new selection event. |
+| **Click-to-light persistence** | Persists until another edge or empty space is clicked. Identical UX. |
+| **Per-type node mesh (sphere/cylinder/torus/cone/octahedron/icosahedron/tetrahedron/box/flat-slab)** | Same `makeNodeMesh` factory. Nodes appear as small per-type icons sitting on the sphere surface. |
+| **Plane palette (RGB blend across multi-plane components)** | Identical color logic. |
+
+### 6.5 Camera + interaction
+
+- **Orbit camera:** centered on the sphere's origin (always fixed), distance starts at ≈ 2.5·R. Drag = orbit (rotate the globe). Scroll = zoom in/out (clamp distance to [1.2·R, 6·R] so user can't get lost or fly through the surface).
+- **Hover:** raycast against link curves + nodes, same 3-zone logic.
+- **Click on background:** clears LOS lit state.
+- **No pan** — orbit-only feels right for a globe; panning breaks the mental model.
+
+### 6.6 Files touched
+
+- `src/admin_ui/static/index.html` — new tab button + new `<section id="globe-view">`. Cache-bust.
+- `src/admin_ui/static/app.js` — new `globeView` module (router hookup + initOrRefreshGlobe + sphere projection + edge geometry + sidebar bindings).
+- `src/admin_ui/static/style.css` — `#globe-view.active` grid + sidebar styling (mostly reuses Graph's classes).
+
+NO changes to `src/admin_ui/server.py`, MCP tools, schema, or agent prompts.
+
+### 6.7 Tests
+
+Backend: none (no new endpoints). Manual verification:
+- Tab loads, nodes pop onto a sphere.
+- Drag rotates the globe; scroll zooms.
+- Hover over an edge highlights flow neighbors per the 3-zone rule.
+- Click an edge → LOS BFS lights up the chain.
+- Stubs render as radial spikes and tooltip correctly.
+- Bundling: when ≥2 callers share a target endpoint, a junction appears on the surface with great-circle convergence.
+- Re-tab away and back → state persists, no flicker.
+
+### 6.8 Sub-phase ordering + commit cadence
+
+```
+6.1  routing + tab shell + sphere mesh + projection scaffolding
+6.2  great-circle + ballistic edge curves
+6.3  feature-parity port: junctions, hover zones, LOS, stubs
+6.4  drill-down sidebar wiring + node interaction
+6.5  polish (camera limits, lighting, palette tuning)
+6.6  doc + memory sync (AFTER user validates)
+```
+
+Each sub-phase = its own commit + push. Doc sync intentionally LAST per user's gate ("once I'm satisfied I'll give you go ahead").
+
+### 6.9 Known unknowns (decide during implementation)
+
+- Apex height curve for ballistic arcs — linear-in-chord vs sqrt(chord) vs sigmoid. Start linear, tune by feel.
+- Whether to draw a faint sphere wireframe to anchor depth perception, or stay invisible per the spec. Default: invisible. Toggle later if depth reads ambiguous.
+- Junction visibility: tiny tetrahedron like Graph, or invisible (just a routing waypoint)? Default: tiny + same slate color.
+
+### 6.10 Out of scope (explicitly NOT shipped in Phase 6)
+
+- Backend changes / new endpoints.
+- Affecting the existing Graph tab in any way.
+- Editing graph state from the Globe (selection only — no drag-to-pin, no add/remove).
+- Mobile / touch support (desktop only, like Graph).
+
+---
+
+## Phase 7+: Future phases (planned, not started)
+
+**Phase 7 — Phase-flow completion** (orchestrator-driven sweeps):
 - **Resolution phase orchestration** — wake config-SMEs to resolve `unresolved` table rows; re-run cosine ladder against now-consolidated component registry.
 - **Edge Discovery phase orchestration** — dedicated bidirectional-validation pass + telemetry trace edge injection.
 - **User Feedback phase** — admin UI workflows for "merge these two" / "missed this" / "this doesn't exist anymore" → orchestrator routes to the right SME(s).
 
-**Phase 7 — Observability + cost controls** (HLD §11):
+**Phase 8 — Observability + cost controls** (HLD §11):
 - Dashboard on `agent_runs`: token usage, phase progress, unresolved count, blocker count, B1/B2/R/M/MD/D/F counts.
 - `max_turns` per agent per phase, embedding budget caps, consolidation max-rounds.
 
-**Phase 8 — DM between agents** (HLD §11.2):
+**Phase 9 — DM between agents** (HLD §11.2):
 - Lighter-weight than consolidation for one-off SME↔SME clarifications.
 
-**Phase 9 — Knowledge pool** (HLD §11.3):
+**Phase 10 — Knowledge pool** (HLD §11.3):
 - Shared facts table any agent can read/write ("all dream11 services use `{service}.dream11.local`").
 
 ---

@@ -640,6 +640,7 @@ function _applyRoute() {
     const knownTabs = {
       chat: 'chat', communications: 'comms', graph: 'graph',
       entities: 'entities', catalog: 'catalog', insights: 'insights',
+      globe: 'globe',
     };
     if (knownTabs[tab]) {
       switchTab(knownTabs[tab]);
@@ -703,11 +704,13 @@ function switchTab(name) {
   document.getElementById('catalog-view').classList.toggle('active', name === 'catalog');
   document.getElementById('insights-view').classList.toggle('active', name === 'insights');
   document.getElementById('graph-view').classList.toggle('active', name === 'graph');
+  document.getElementById('globe-view').classList.toggle('active', name === 'globe');
   if (name === 'comms') fetchCommunications();
   if (name === 'entities') fetchEntities();
   if (name === 'catalog') fetchCatalog();
   if (name === 'insights') fetchInsights();
   if (name === 'graph') initOrRefreshGraph();
+  if (name === 'globe') initOrRefreshGlobe();
   // Phase 5.1: push URL when the tab change came from a click/code path,
   // not from a routechange that already advanced the URL.
   if (!_navigatingFromRoute) {
@@ -3266,5 +3269,1376 @@ document.getElementById('ins-items')?.addEventListener('click', async e => {
     fetchInsights();
   } catch (err) {
     console.error('triage failed:', err);
+  }
+});
+
+
+// ================================================================
+// Phase 6: Globe — sphere-constrained graph view (experimental)
+// ================================================================
+//
+// All nodes live on the surface of an invisible sphere. The d3-force
+// simulator runs in 3D as usual; we project every node back to the
+// surface in onEngineTick, killing the radial component of velocity.
+// Result: tangent forces drive layout, nodes "slide" along the globe
+// like balls rolling on Earth.
+//
+// Sphere radius scales with N nodes: R = max(80, 30 * sqrt(N)).
+//
+// 6.1 ships the scaffold + sphere projection with straight links.
+// Curves (great-circle / ballistic), junctions, hover zones, LOS,
+// and stubs land in 6.2 — 6.4. Doc sync in 6.6 after user validation.
+
+let globeInstance = null;
+let globeRadius = 100;
+let globeSnapshot = { nodes: [], edges: [], flows: [], nodeById: {} };
+
+function _globeRadiusFor(nodeCount) {
+  return Math.max(80, 30 * Math.sqrt(Math.max(1, nodeCount)));
+}
+
+// Uniform-on-sphere seed: (θ, φ) = (2π·rand, acos(2·rand − 1)).
+// Avoids the polar clustering you get from naive (θ, φ) uniform.
+function _seedOnSphere(node, R) {
+  const theta = 2 * Math.PI * Math.random();
+  const phi   = Math.acos(2 * Math.random() - 1);
+  node.x = R * Math.sin(phi) * Math.cos(theta);
+  node.y = R * Math.sin(phi) * Math.sin(theta);
+  node.z = R * Math.cos(phi);
+}
+
+// Project a single node back to radius R. Also strip the radial
+// component of velocity so the constraint isn't fought by the
+// simulator (otherwise nodes "spring" outward forever, get re-clamped,
+// and visibly jitter).
+function _projectToSphere(node, R) {
+  const d = Math.hypot(node.x || 0, node.y || 0, node.z || 0) || 1;
+  const k = R / d;
+  node.x *= k; node.y *= k; node.z *= k;
+  if (node.vx == null) return;
+  // Unit radial vector at the (now-projected) position.
+  const rx = node.x / R, ry = node.y / R, rz = node.z / R;
+  const vRad = node.vx * rx + node.vy * ry + node.vz * rz;
+  node.vx -= vRad * rx;
+  node.vy -= vRad * ry;
+  node.vz -= vRad * rz;
+}
+
+async function initOrRefreshGlobe() {
+  let data;
+  try {
+    const res = await fetch('/api/graph');
+    data = await res.json();
+  } catch (e) {
+    console.error('initOrRefreshGlobe fetch failed:', e);
+    return;
+  }
+  // For 6.1 we only render the active component nodes + bound edges;
+  // junctions, catalogs, danglings, flows arrive in later sub-phases.
+  // Catalog/dangling rows are just dropped from the link set for now —
+  // they will become radial spikes in 6.3.
+  const rawNodes = data.nodes || [];
+  const rawEdges = data.edges || [];
+  const flows = data.flows || [];
+
+  const N = rawNodes.length;
+  globeRadius = _globeRadiusFor(N);
+
+  // Build node objects compatible with 3d-force-graph + the same shape
+  // the detail-panel renderer expects (canonical / doc / slice).
+  const nodes = rawNodes.map(n => ({
+    id: n.id,
+    name: n.canonical_name || n.id,
+    canonical: n.canonical_name || n.id,
+    type: n.component_type || 'application',
+    color: nodeColor(n.planes || []),
+    planes: n.planes || [],
+    doc: n.component_doc_md,
+    slice: n.source_slice,
+  }));
+  // Seed every node uniformly on the sphere so the simulator starts
+  // from a sensible spread (otherwise everything bunches at origin).
+  nodes.forEach(n => _seedOnSphere(n, globeRadius));
+
+  // 6.3: full preprocessing — junctions for shared targets, stubs
+  // for orphan catalogs + outgoing danglings. Same data shape as
+  // Graph's preprocessing; adapted for sphere geometry.
+  const boundEdges = rawEdges.filter(e => e.kind === 'bound' && e.source_id && e.target_id);
+
+  // ---- Junction bundling: N≥2 callers sharing (target, type, id) ----
+  const convergenceGroups = {};
+  for (const e of boundEdges) {
+    const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
+    (convergenceGroups[key] ||= []).push(e);
+  }
+  const junctionNodes = [];
+  const junctionOutLinks = [];
+  const junctionOutById = {};
+  const bundledEdgeIds = new Set();
+  for (const [key, group] of Object.entries(convergenceGroups)) {
+    if (group.length < 2) continue;
+    const junctionId = `__junction__${key}`;
+    junctionNodes.push({
+      id: junctionId,
+      isJunction: true,
+      name: `⌖ ${group.length} callers → ${group[0].edge_type} ${group[0].identifier}`,
+      type: 'junction',
+      planes: [],
+      color: '#94a3b8',
+      junctionTargetId: group[0].target_id,
+      junctionCallerIds: group.map(e => e.source_id),
+    });
+    const sample = group[0];
+    const outId = `__junction_out__${key}`;
+    junctionOutLinks.push({
+      id: outId,
+      source: junctionId,
+      target: sample.target_id,
+      edge_type: sample.edge_type,
+      identifier: sample.identifier,
+      kind: 'bound',
+      curveMode: _curveModeForEdgeType(sample.edge_type),
+      isJunctionOut: true,
+      groupEdgeIds: group.map(e => e.id),
+    });
+    junctionOutById[outId] = {
+      groupEdgeIds: group.map(e => e.id),
+      target_id: sample.target_id,
+      edge_type: sample.edge_type,
+      identifier: sample.identifier,
+    };
+    for (const e of group) bundledEdgeIds.add(e.id);
+  }
+
+  // ---- Build link list: bundled edges → junction-in, others → direct ----
+  const links = [];
+  for (const e of boundEdges) {
+    if (bundledEdgeIds.has(e.id)) {
+      const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
+      links.push({
+        id: e.id,
+        source: e.source_id,
+        target: `__junction__${key}`,
+        edge_type: e.edge_type,
+        identifier: e.identifier,
+        kind: 'bound',
+        curveMode: _curveModeForEdgeType(e.edge_type),
+        isJunctionIn: true,
+      });
+    } else {
+      links.push({
+        id: e.id,
+        source: e.source_id,
+        target: e.target_id,
+        edge_type: e.edge_type,
+        identifier: e.identifier,
+        kind: 'bound',
+        curveMode: _curveModeForEdgeType(e.edge_type),
+      });
+    }
+  }
+  links.push(...junctionOutLinks);
+
+  // ---- Dangling stubs: orphan catalogs + outgoing danglings ----
+  // Stubs live as small "?" placeholders OFF the surface, sticking
+  // radially outward from their anchor. Multiple stubs per anchor
+  // get distinct tangent-plane offsets so they don't stack.
+  const boundKeySet = new Set(
+    boundEdges.map(e => `${e.target_id}|${e.edge_type}|${e.identifier}`)
+  );
+  const pendingStubs = [];
+  for (const e of rawEdges) {
+    if (e.kind === 'catalog') {
+      const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
+      if (boundKeySet.has(key)) continue;  // implicit — bound row represents it
+      pendingStubs.push({ e, stubKind: 'inbound', anchorId: e.target_id });
+    } else if (e.kind === 'dangling') {
+      pendingStubs.push({ e, stubKind: 'outbound', anchorId: e.source_id });
+    }
+  }
+  // Group by anchor so siblings get distinct offset directions.
+  const anchorBuckets = {};
+  for (const p of pendingStubs) (anchorBuckets[p.anchorId] ||= []).push(p);
+  const stubNodes = [];
+  const stubLinks = [];
+  const stubEdgeIds = new Set();
+  const STUB_DIST = Math.max(15, globeRadius * 0.18);  // distance OFF the surface
+  for (const [anchorId, list] of Object.entries(anchorBuckets)) {
+    const k = list.length;
+    for (let i = 0; i < k; i++) {
+      // Each stub gets a unit direction; final position pinned each
+      // tick at (anchor + radial_outward + tangent_offset). Tangent
+      // offset is chosen per-sibling so multiple stubs of one anchor
+      // don't overlap. The stub's `stubTangentSeed` indexes into a
+      // ring around the anchor's tangent plane.
+      list[i].tangentSeed = i;
+      list[i].siblingCount = k;
+    }
+  }
+  for (const { e, stubKind, anchorId, tangentSeed, siblingCount } of pendingStubs) {
+    const stubId = stubKind === 'inbound' ? `__stub_in__${e.id}` : `__stub_out__${e.id}`;
+    stubNodes.push({
+      id: stubId,
+      isStub: true,
+      stubKind,
+      stubAnchorId: anchorId,
+      stubTangentSeed: tangentSeed,
+      stubSiblingCount: siblingCount,
+      stubDist: STUB_DIST,
+      name: '?',
+      type: 'stub',
+      planes: [],
+      color: '#475569',
+    });
+    const linkRow = stubKind === 'inbound'
+      ? { source: stubId, target: anchorId }
+      : { source: anchorId, target: stubId };
+    stubLinks.push({
+      id: e.id,
+      ...linkRow,
+      edge_type: e.edge_type,
+      identifier: e.identifier,
+      kind: e.kind,
+      isStub: true,
+      stubKind,
+      // Stubs render as straight radial line, not a great-circle curve.
+      curveMode: 'radial',
+    });
+    stubEdgeIds.add(e.id);
+  }
+  links.push(...stubLinks);
+  nodes.push(...junctionNodes);
+  nodes.push(...stubNodes);
+
+  // edgeById / metadata maps for hover + LOS.
+  const edgeById = {};
+  for (const e of rawEdges) edgeById[e.id] = e;
+
+  globeSnapshot = {
+    nodes, links, flows, edges: rawEdges,
+    nodeById: Object.fromEntries(nodes.map(n => [n.id, n])),
+    edgeById,
+    junctionOutById,
+    bundledEdgeIds,
+    stubEdgeIds,
+  };
+
+  // Stats sidebar.
+  document.getElementById('globe-comp-count').textContent = String(N);
+  document.getElementById('globe-edge-count').textContent = String(links.length);
+  document.getElementById('globe-radius').textContent = String(Math.round(globeRadius));
+
+  const canvas = document.getElementById('globe-canvas');
+  if (!globeInstance) {
+    globeInstance = ForceGraph3D()(canvas)
+      .backgroundColor('#050505')
+      .nodeLabel(n => `${n.name} (${n.type})`)
+      .nodeThreeObject(_globeNodeMesh)
+      .nodeThreeObjectExtend(false)
+      // Phase 6.2: custom edge geometry. linkThreeObject builds the
+      // line; linkPositionUpdate refills its buffer per frame from the
+      // current source/target positions on the sphere.
+      .linkThreeObject(_globeLinkObject)
+      .linkPositionUpdate(_globeLinkPositionUpdate)
+      // The library's built-in arrow renderer assumes a straight chord
+      // from source to target — it would float in space, missing our
+      // curve. We render our own arrow as a child cone of each tube
+      // (see _globeLinkObject), positioned from the actual curve
+      // tangent each frame. So disable the library's arrows entirely.
+      .linkDirectionalArrowLength(0)
+      .linkDirectionalParticles(l => _globeLinkParticles(l))
+      .linkDirectionalParticleSpeed(0.008)
+      .linkDirectionalParticleWidth(2.5)
+      .linkDirectionalParticleColor(() => '#fbbf24')
+      .linkLabel(l => `${l.edge_type}: ${l.identifier}`)
+      .onNodeClick(n => {
+        if (n.isJunction || n.isStub) return;
+        showGlobeNodeDetail(n);
+        _globeLitEdgeIds = new Set();
+        _refreshGlobeLinkVisuals();
+      })
+      .onLinkClick(l => _globeLightOfSight(l))
+      .onLinkHover(l => _globeHover(l))
+      .onBackgroundClick(() => {
+        _globeLosTimers.forEach(t => clearTimeout(t));
+        _globeLosTimers = [];
+        _globeLitEdgeIds = new Set();
+        _globeRevealStart.clear();
+        _refreshGlobeLinkVisuals();
+      });
+
+    // Start the curve-following particle animator. Runs forever; only
+    // works on lit edges so cost is bounded.
+    _startGlobeAnimLoop();
+
+    // 3-zone hover: canvas mousemove finds cursor's t along the
+    // hovered link's curve, classifies caller / target / convergence,
+    // glows the appropriate flow neighbours.
+    _wireGlobeMouseMove();
+
+    // Force tuning: weaker charge so tangent forces dominate the
+    // projection; long-ish link distance so the surface doesn't
+    // collapse into one cluster.
+    const chargeForce = globeInstance.d3Force('charge');
+    if (chargeForce && typeof chargeForce.strength === 'function') {
+      chargeForce.strength(-90);
+    }
+    const linkForce = globeInstance.d3Force('link');
+    if (linkForce && typeof linkForce.distance === 'function') {
+      linkForce.distance(50);
+    }
+    // Disable d3-force's default "center" — we already have an origin
+    // (the sphere's center). Center force fights radial projection.
+    globeInstance.d3Force('center', null);
+
+    // The projection + per-tick pinning of junctions and stubs.
+    globeInstance.onEngineTick(() => {
+      const gd = globeInstance.graphData();
+      if (!gd || !gd.nodes) return;
+      const byId = {};
+      for (const n of gd.nodes) byId[n.id] = n;
+      // 1. Project regular component nodes onto the sphere surface.
+      for (const n of gd.nodes) {
+        if (n.isJunction || n.isStub) continue;
+        _projectToSphere(n, globeRadius);
+      }
+      // 2. Junction pinning: place each junction visibly OUT from
+      // its target so the bundle reads as a real convergence point,
+      // not "just edges to the same node". Position is on the sphere
+      // surface, stepped along the (target → callers' centroid)
+      // direction, then re-projected to radius. Step is now ~22%
+      // of R (was 6% — too close, looked like spaghetti). Trunk is
+      // long enough that contributors clearly merge at one point
+      // before the trunk continues to the target.
+      for (const n of gd.nodes) {
+        if (!n.isJunction) continue;
+        const target = byId[n.junctionTargetId];
+        if (!target || target.x == null) continue;
+        let cx = 0, cy = 0, cz = 0, count = 0;
+        for (const cid of (n.junctionCallerIds || [])) {
+          const c = byId[cid];
+          if (c && c.x != null) { cx += c.x; cy += c.y; cz += c.z; count += 1; }
+        }
+        if (count === 0) continue;
+        cx /= count; cy /= count; cz /= count;
+        const dx = cx - target.x, dy = cy - target.y, dz = cz - target.z;
+        const dlen = Math.hypot(dx, dy, dz) || 1;
+        const step = globeRadius * 0.22;   // visibly out from the target
+        let jx = target.x + (dx / dlen) * step;
+        let jy = target.y + (dy / dlen) * step;
+        let jz = target.z + (dz / dlen) * step;
+        const jlen = Math.hypot(jx, jy, jz) || 1;
+        const k = globeRadius / jlen;
+        n.fx = jx * k; n.fy = jy * k; n.fz = jz * k;
+      }
+      // 3. Stub pinning: each "?" sits OFF the surface — anchor + radial
+      // outward × stubDist + small tangent offset per sibling so multiple
+      // stubs of one anchor fan out and don't overlap.
+      for (const n of gd.nodes) {
+        if (!n.isStub) continue;
+        const a = byId[n.stubAnchorId];
+        if (!a || a.x == null) continue;
+        const r = Math.hypot(a.x, a.y, a.z) || globeRadius;
+        const ux = a.x / r, uy = a.y / r, uz = a.z / r;
+        // Build a tangent basis (any two unit vectors perpendicular to u).
+        const refUp = Math.abs(uz) < 0.9 ? [0, 0, 1] : [0, 1, 0];
+        const tx1 = uy * refUp[2] - uz * refUp[1];
+        const ty1 = uz * refUp[0] - ux * refUp[2];
+        const tz1 = ux * refUp[1] - uy * refUp[0];
+        const t1len = Math.hypot(tx1, ty1, tz1) || 1;
+        const t1 = [tx1 / t1len, ty1 / t1len, tz1 / t1len];
+        const t2 = [
+          uy * t1[2] - uz * t1[1],
+          uz * t1[0] - ux * t1[2],
+          ux * t1[1] - uy * t1[0],
+        ];
+        // Per-sibling angle around the local tangent ring.
+        const k = n.stubSiblingCount || 1;
+        const theta = k > 1 ? (n.stubTangentSeed / k) * 2 * Math.PI : 0;
+        const tangentMag = (k > 1 ? globeRadius * 0.05 : 0);
+        const ox = Math.cos(theta) * tangentMag * t1[0] + Math.sin(theta) * tangentMag * t2[0];
+        const oy = Math.cos(theta) * tangentMag * t1[1] + Math.sin(theta) * tangentMag * t2[1];
+        const oz = Math.cos(theta) * tangentMag * t1[2] + Math.sin(theta) * tangentMag * t2[2];
+        n.fx = a.x + ux * n.stubDist + ox;
+        n.fy = a.y + uy * n.stubDist + oy;
+        n.fz = a.z + uz * n.stubDist + oz;
+      }
+    });
+
+    // Lighting — same Lambert + bright key/fill setup as Graph so
+    // node meshes read solidly even when the sphere itself is invisible.
+    requestAnimationFrame(() => {
+      try {
+        const scene = globeInstance.scene();
+        // Don't re-add lights on subsequent reloads.
+        if (!scene.userData._globeLitOnce) {
+          scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+          const key = new THREE.DirectionalLight(0xffffff, 0.7);
+          key.position.set(1, 1, 1);
+          scene.add(key);
+          const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+          fill.position.set(-1, -0.3, -1);
+          scene.add(fill);
+          scene.userData._globeLitOnce = true;
+        }
+      } catch (_e) { /* scene not ready yet — fine */ }
+    });
+
+    // Camera: orbit-only. Distance clamp prevents flying through the
+    // surface or losing the sphere off-screen.
+    requestAnimationFrame(() => {
+      try {
+        globeInstance.cameraPosition({ x: 0, y: 0, z: globeRadius * 2.5 });
+        const controls = globeInstance.controls();
+        if (controls) {
+          controls.minDistance = globeRadius * 1.2;
+          controls.maxDistance = globeRadius * 6;
+          controls.enablePan = false;
+        }
+      } catch (_e) { /* fine */ }
+    });
+  } else {
+    // Re-radius on reload so adding components grows the sphere.
+    requestAnimationFrame(() => {
+      try {
+        const controls = globeInstance.controls();
+        if (controls) {
+          controls.minDistance = globeRadius * 1.2;
+          controls.maxDistance = globeRadius * 6;
+        }
+      } catch (_e) {}
+    });
+  }
+
+  globeInstance.graphData({ nodes, links });
+
+  // Post-init diagnostic — confirm linkThreeObject got called and
+  // __threeObj refs are populated. Run on next frame so the library
+  // has a chance to build the meshes.
+  requestAnimationFrame(() => {
+    setTimeout(() => {
+      try {
+        const gd = globeInstance.graphData();
+        let withMesh = 0, withoutMesh = 0;
+        for (const l of (gd?.links || [])) {
+          if (l.__lineObj || l.__threeObj) withMesh += 1; else withoutMesh += 1;
+        }
+        _globeDebug(`init done: nodes=${nodes.length} links=${links.length} withMesh=${withMesh} withoutMesh=${withoutMesh}`);
+      } catch (e) {
+        _globeDebug(`init done: error reading meshes ${e.message}`);
+      }
+    }, 500);
+  });
+}
+
+// ----- 6.2: edge curves --------------------------------------------------
+
+// Sync deps hug the surface (great-circle slerp); async fan-out arcs
+// over the surface (ballistic Bézier with apex pushed outward). Picked
+// per-edge by edge_type.
+const _GREAT_CIRCLE_TYPES = new Set(['calls', 'reads_from', 'writes_to', 'runs_on']);
+const _BALLISTIC_TYPES    = new Set(['publishes_to', 'consumes_from', 'triggers']);
+
+function _curveModeForEdgeType(t) {
+  if (_BALLISTIC_TYPES.has(t)) return 'ballistic';
+  return 'great-circle';
+}
+
+const _GLOBE_CURVE_SEGMENTS = 32;
+
+function _greatCirclePoints(p1, p2, R) {
+  const THREE = window.THREE;
+  // Slerp source/target unit vectors along the sphere; render at
+  // R + ε so multiple overlapping edges don't z-fight.
+  const elev = R * 1.005;
+  const u = new THREE.Vector3(p1.x, p1.y, p1.z).normalize();
+  const v = new THREE.Vector3(p2.x, p2.y, p2.z).normalize();
+  const dot = Math.max(-1, Math.min(1, u.dot(v)));
+  const omega = Math.acos(dot);
+  const sinO = Math.sin(omega);
+  const out = [];
+  if (sinO < 1e-6) {
+    out.push(u.multiplyScalar(elev));
+    out.push(v.multiplyScalar(elev));
+    return out;
+  }
+  for (let i = 0; i <= _GLOBE_CURVE_SEGMENTS; i++) {
+    const t = i / _GLOBE_CURVE_SEGMENTS;
+    const a = Math.sin((1 - t) * omega) / sinO;
+    const b = Math.sin(t * omega) / sinO;
+    out.push(new THREE.Vector3(
+      (a * u.x + b * v.x) * elev,
+      (a * u.y + b * v.y) * elev,
+      (a * u.z + b * v.z) * elev,
+    ));
+  }
+  return out;
+}
+
+function _ballisticPoints(p1, p2, R) {
+  const THREE = window.THREE;
+  // Quadratic Bézier: control point at chord midpoint pushed radially
+  // outward. Apex height ∝ chord length, capped at 0.4·R.
+  const mid = new THREE.Vector3(
+    (p1.x + p2.x) / 2,
+    (p1.y + p2.y) / 2,
+    (p1.z + p2.z) / 2,
+  );
+  const midLen = Math.hypot(mid.x, mid.y, mid.z) || R;
+  const chord = Math.hypot(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
+  const apexExtra = Math.min(0.4 * R, chord * 0.45);
+  const ctrl = mid.clone().multiplyScalar((midLen + apexExtra) / midLen);
+  const out = [];
+  for (let i = 0; i <= _GLOBE_CURVE_SEGMENTS; i++) {
+    const t = i / _GLOBE_CURVE_SEGMENTS;
+    const oneMinus = 1 - t;
+    out.push(new THREE.Vector3(
+      oneMinus * oneMinus * p1.x + 2 * oneMinus * t * ctrl.x + t * t * p2.x,
+      oneMinus * oneMinus * p1.y + 2 * oneMinus * t * ctrl.y + t * t * p2.y,
+      oneMinus * oneMinus * p1.z + 2 * oneMinus * t * ctrl.z + t * t * p2.z,
+    ));
+  }
+  return out;
+}
+
+// LOS / hover lit-edge sets — populated when user clicks an edge or
+// hovers one; consumed by _globeLinkColor / _globeLinkOpacity.
+// Precedence (highest first): LOS-lit (amber) > hover-lit (cyan) >
+// async default (purple) > stub muted > sync default (slate).
+let _globeLitEdgeIds = new Set();
+let _globeHoverLitEdgeIds = new Set();
+let _globeLosTimers = [];
+
+// Debug sink — POSTs diagnostic strings to /api/debug/log so the
+// developer can grep /tmp/cartograph_fe_debug.log instead of asking
+// the user to copy from browser devtools.
+function _globeDebug(msg) {
+  try { console.log('[globe]', msg); } catch (_e) {}
+  try {
+    fetch('/api/debug/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msg }),
+    });
+  } catch (_e) {}
+}
+
+function _globeLinkColor(link) {
+  if (_globeLitEdgeIds.has(link.id))      return '#fbbf24';  // LOS-lit amber
+  if (_globeHoverLitEdgeIds.has(link.id)) return '#22d3ee';  // hover cyan
+  if (link.isStub)                        return '#475569';  // muted slate
+  if (link.curveMode === 'ballistic')     return '#c084fc';  // async purple
+  return '#9ca3af';                                           // sync slate
+}
+
+function _globeLinkOpacity(link) {
+  if (_globeLitEdgeIds.has(link.id))      return 1.0;
+  if (_globeHoverLitEdgeIds.has(link.id)) return 1.0;
+  if (link.isStub)                        return 0.45;
+  return 0.7;
+}
+
+function _globeLinkParticles(_link) {
+  // 3d-force-graph's built-in particles beam along the straight chord
+  // between nodes, cutting through the globe — useless for sphere
+  // edges. Disabled here; we run our own curve-following particle
+  // animator (see _globeAnimTick) that samples positions along each
+  // lit tube's stored curve every frame.
+  return 0;
+}
+
+// ----- Curve-following particle animator + per-edge reveal --------------
+//
+// For every LOS-lit edge we attach _PARTICLES_PER_EDGE small amber
+// spheres as children of the tube. Each sphere has its own t (0..1)
+// parameter; on every animation frame we advance t and reposition
+// the sphere along the tube's stored curve. Result: a comet-like
+// stream of particles flowing source → target along the actual curve.
+//
+// We also track per-edge "reveal progress" so newly-lit edges
+// animate in (color/opacity ramp source-side → target-side over
+// ~400ms) instead of blinking instantly.
+
+const _PARTICLES_PER_EDGE = 4;
+const _PARTICLE_SPEED_PER_MS = 0.0009;     // t-progress per millisecond
+const _REVEAL_MS = 420;                    // per-edge reveal animation
+let _globeAnimRaf = null;
+let _globeAnimLastTick = null;
+const _globeRevealStart = new Map();       // linkId → ms when LOS lit it
+
+function _ensureLinkParticles(tube) {
+  if (tube.userData._particles?.length === _PARTICLES_PER_EDGE) return;
+  for (const p of (tube.userData._particles || [])) {
+    tube.remove(p);
+    if (p.geometry) p.geometry.dispose();
+    if (p.material) p.material.dispose();
+  }
+  const THREE = window.THREE;
+  const arr = [];
+  for (let i = 0; i < _PARTICLES_PER_EDGE; i++) {
+    const geom = new THREE.SphereGeometry(1.1, 10, 10);
+    const mat = new THREE.MeshBasicMaterial({
+      color: '#fbbf24',
+      transparent: true,
+      opacity: 1.0,
+    });
+    const s = new THREE.Mesh(geom, mat);
+    s.frustumCulled = false;
+    s.userData._isParticle = true;
+    s.userData._t = i / _PARTICLES_PER_EDGE;
+    s.raycast = () => {};
+    tube.add(s);
+    arr.push(s);
+  }
+  tube.userData._particles = arr;
+}
+
+function _removeLinkParticles(tube) {
+  if (!tube.userData._particles?.length) return;
+  for (const p of tube.userData._particles) {
+    tube.remove(p);
+    if (p.geometry) p.geometry.dispose();
+    if (p.material) p.material.dispose();
+  }
+  tube.userData._particles = null;
+}
+
+function _startGlobeAnimLoop() {
+  if (_globeAnimRaf) return;
+  _globeAnimLastTick = performance.now();
+  function tick() {
+    if (_globeAnimRaf == null) return;
+    _globeAnimTick();
+    _globeAnimRaf = requestAnimationFrame(tick);
+  }
+  _globeAnimRaf = requestAnimationFrame(tick);
+}
+
+function _globeAnimTick() {
+  if (!globeInstance) return;
+  const now = performance.now();
+  const dt = now - (_globeAnimLastTick || now);
+  _globeAnimLastTick = now;
+
+  const gd = globeInstance.graphData();
+  for (const l of (gd?.links || [])) {
+    const tube = l.__lineObj;
+    if (!tube) continue;
+    const isLit = _globeLitEdgeIds.has(l.id);
+
+    // Per-edge reveal animation: literally GROW the tube from source
+    // to target by clamping the geometry's drawRange. TubeGeometry
+    // indexes are laid out path-segment-major, so the first N indices
+    // correspond to the source-end portion. drawRange(0, N) shows
+    // the tube up to a fraction of its length. As revealT animates
+    // 0→1, the tube paints itself from source to target.
+    if (isLit) {
+      const revealStart = _globeRevealStart.get(l.id) || now;
+      if (!_globeRevealStart.has(l.id)) _globeRevealStart.set(l.id, now);
+      const revealT = Math.min(1, (now - revealStart) / _REVEAL_MS);
+      if (tube.geometry?.index) {
+        const total = tube.geometry.index.count;
+        // Quantise to whole rings (radialSegments * 6 indices/ring) so
+        // the growing front always reads as a clean radial cap, not a
+        // jagged half-ring slice.
+        const indicesPerRing = _GLOBE_TUBE_RADIAL_SEGMENTS * 6;
+        const ringsTotal = total / indicesPerRing;
+        const ringsToShow = Math.max(1, Math.ceil(revealT * ringsTotal));
+        tube.geometry.setDrawRange(0, ringsToShow * indicesPerRing);
+      }
+      if (tube.material) tube.material.opacity = 1.0;
+
+      // Particles: ensure they exist + advance t along the curve.
+      _ensureLinkParticles(tube);
+      const curve = tube.userData._curve;
+      if (curve) {
+        for (const p of tube.userData._particles) {
+          p.userData._t = (p.userData._t + dt * _PARTICLE_SPEED_PER_MS) % 1;
+          const pos = curve.getPoint(p.userData._t);
+          p.position.copy(pos);
+        }
+      }
+    } else {
+      // Edge no longer lit — restore full draw range, drop particles,
+      // clear reveal state.
+      if (tube.geometry?.index) {
+        tube.geometry.setDrawRange(0, Infinity);
+      }
+      if (tube.userData._particles?.length) _removeLinkParticles(tube);
+      _globeRevealStart.delete(l.id);
+    }
+  }
+}
+
+function _refreshGlobeLinkVisuals() {
+  if (!globeInstance) return;
+  try {
+    const gd = globeInstance.graphData();
+    let touched = 0, missing = 0;
+    for (const l of (gd?.links || [])) {
+      // 3d-force-graph stores LINK meshes under __lineObj (nodes use
+      // __threeObj). Earlier draft used __threeObj and silently
+      // failed for every link — the diagnostic in v=67 confirmed
+      // missing=64 for 64 links.
+      const tube = l.__lineObj || l.__threeObj;
+      if (!tube) { missing += 1; continue; }
+      const color = _globeLinkColor(l);
+      const opacity = _globeLinkOpacity(l);
+      if (tube.material) {
+        tube.material.color.set(color);
+        tube.material.opacity = opacity;
+        tube.material.needsUpdate = true;
+      }
+      for (const child of (tube.children || [])) {
+        if (child.userData?._isArrow && child.material) {
+          child.material.color.set(color);
+          child.material.opacity = Math.min(1, opacity + 0.25);
+          child.material.needsUpdate = true;
+        }
+      }
+      touched += 1;
+    }
+    _globeDebug(`refresh touched=${touched} missing=${missing} lit=${_globeLitEdgeIds.size} hover=${_globeHoverLitEdgeIds.size}`);
+  } catch (e) {
+    console.warn('refreshGlobeLinkVisuals failed:', e);
+  }
+}
+
+function _globeNodeMesh(node) {
+  // Wraps Graph's makeNodeMesh. Junctions on the Globe are rendered
+  // ~5× their Graph size so they're visibly the bundling point at
+  // sphere distances (Graph uses 0.3 — invisible at R≈170).
+  const THREE = window.THREE;
+  if (!THREE) return makeNodeMesh(node);
+  if (node.isJunction) {
+    const geom = new THREE.OctahedronGeometry(2.5);
+    const mat = new THREE.MeshLambertMaterial({
+      color: '#94a3b8',
+      transparent: true,
+      opacity: 0.85,
+    });
+    return new THREE.Mesh(geom, mat);
+  }
+  return makeNodeMesh(node);
+}
+
+function _radialPoints(p1, p2) {
+  // Straight-line interpolation — used for stub edges (anchor → "?")
+  // which stick OFF the surface and shouldn't bend.
+  const THREE = window.THREE;
+  const out = [];
+  for (let i = 0; i <= _GLOBE_CURVE_SEGMENTS; i++) {
+    const t = i / _GLOBE_CURVE_SEGMENTS;
+    out.push(new THREE.Vector3(
+      p1.x + (p2.x - p1.x) * t,
+      p1.y + (p2.y - p1.y) * t,
+      p1.z + (p2.z - p1.z) * t,
+    ));
+  }
+  return out;
+}
+
+function _curvePointsForLink(link, start, end) {
+  if (link.curveMode === 'radial')    return _radialPoints(start, end);
+  if (link.curveMode === 'ballistic') return _ballisticPoints(start, end, globeRadius);
+  return _greatCirclePoints(start, end, globeRadius);
+}
+
+// Tube radius is small enough to read as a line, large enough that the
+// raycaster (used by the library for hover labels + onLinkClick) hits
+// reliably. THREE.Line at 1px effectively never gets a hover.
+const _GLOBE_TUBE_RADIUS = 0.55;
+const _GLOBE_TUBE_RADIAL_SEGMENTS = 6;
+
+function _globeLinkObject(link) {
+  const THREE = window.THREE;
+  if (!THREE) return null;
+  // Tube mesh as the line body — raycastable, looks like a slim rod.
+  // Geometry is a placeholder unit segment; replaced per frame in
+  // linkPositionUpdate by a real curve-shaped tube.
+  const placeholderCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(1, 0, 0),
+  ]);
+  const geom = new THREE.TubeGeometry(
+    placeholderCurve,
+    _GLOBE_CURVE_SEGMENTS,
+    _GLOBE_TUBE_RADIUS,
+    _GLOBE_TUBE_RADIAL_SEGMENTS,
+    false,
+  );
+  const mat = new THREE.MeshBasicMaterial({
+    color: _globeLinkColor(link),
+    transparent: true,
+    opacity: _globeLinkOpacity(link),
+  });
+  const tube = new THREE.Mesh(geom, mat);
+  tube.frustumCulled = false;
+
+  // Manual arrow-head cone at the link's target end, following the
+  // actual curve tangent (the library's own arrows assume a straight
+  // chord and would float in space). Junction-in contributors have no
+  // arrow — the trunk's arrow represents the bundle.
+  if (!link.isJunctionIn && !link.isStub) {
+    const arrowGeom = new THREE.ConeGeometry(2.5, 6, 10);
+    const arrowMat = new THREE.MeshBasicMaterial({
+      color: _globeLinkColor(link),
+      transparent: true,
+      opacity: 0.95,
+    });
+    const arrow = new THREE.Mesh(arrowGeom, arrowMat);
+    arrow.frustumCulled = false;
+    arrow.userData._isArrow = true;
+    arrow.userData._arrowT = 0.92;
+    // CRITICAL: child arrows must NOT participate in raycasting,
+    // otherwise Three.js (and 3d-force-graph's hover/click handlers)
+    // hit the cone first instead of the tube body, swallowing the
+    // event with no link reference. Empty raycast = invisible to
+    // the raycaster, fully visible visually.
+    arrow.raycast = () => {};
+    tube.add(arrow);
+  }
+  return tube;
+}
+
+function _globeLinkPositionUpdate(obj, { start, end }, link) {
+  if (!obj) return false;
+  const THREE = window.THREE;
+  const points = _curvePointsForLink(link, start, end);
+  // Rebuild the tube geometry from the new curve. CatmullRomCurve3 +
+  // TubeGeometry handles all the orientation math (tangents, normals,
+  // binormals) so the tube reads cleanly even as the curve twists.
+  const curve = new THREE.CatmullRomCurve3(points);
+  const newGeom = new THREE.TubeGeometry(
+    curve,
+    _GLOBE_CURVE_SEGMENTS,
+    _GLOBE_TUBE_RADIUS,
+    _GLOBE_TUBE_RADIAL_SEGMENTS,
+    false,
+  );
+  // Dispose the old geometry to avoid GPU leak on every tick.
+  if (obj.geometry) obj.geometry.dispose();
+  obj.geometry = newGeom;
+
+  // Phase 6 polish: stash the curve on the mesh so the particle
+  // animator can sample positions along it without re-deriving from
+  // node positions every frame.
+  obj.userData._curve = curve;
+
+  // Re-apply the reveal-progress drawRange after the geometry rebuild.
+  // Without this, the rebuild would reset drawRange to full every
+  // tick — fighting the reveal animation on long-running graphs.
+  if (_globeLitEdgeIds.has(link.id) && _globeRevealStart.has(link.id)) {
+    const now = performance.now();
+    const revealT = Math.min(1, (now - _globeRevealStart.get(link.id)) / _REVEAL_MS);
+    if (newGeom.index) {
+      const indicesPerRing = _GLOBE_TUBE_RADIAL_SEGMENTS * 6;
+      const ringsTotal = newGeom.index.count / indicesPerRing;
+      const ringsToShow = Math.max(1, Math.ceil(revealT * ringsTotal));
+      newGeom.setDrawRange(0, ringsToShow * indicesPerRing);
+    }
+  }
+
+  // Position arrow head if present: per-arrow t (set at creation time
+  // — 0.94 for regular edges, 0.7 for short trunks) and orient it
+  // along the local tangent.
+  for (const child of obj.children) {
+    if (!child.userData?._isArrow) continue;
+    const tEnd = child.userData._arrowT ?? 0.94;
+    const pos = curve.getPoint(tEnd);
+    const tangent = curve.getTangent(tEnd).normalize();
+    child.position.copy(pos);
+    const up = new THREE.Vector3(0, 1, 0);
+    const quat = new THREE.Quaternion().setFromUnitVectors(up, tangent);
+    child.quaternion.copy(quat);
+  }
+  return true;
+}
+
+
+// ----- 6.3: LOS — strict forward BFS through flows + catalog bridging --
+
+function _globeEffectiveFlowIncomingsForEdge(edgeId) {
+  // Catalog bridging — see Graph's effectiveFlowIncomingsForEdge.
+  // A bound edge "A calls B at /x" is fired by B's catalog row "B
+  // exposes /x" — flows on B reference the catalog id, not the bound
+  // id. So treat bound + matching catalog as equivalent incomings.
+  const e = globeSnapshot.edgeById[edgeId];
+  if (!e || !e.target_id) return [edgeId];
+  const out = [edgeId];
+  for (const cat of globeSnapshot.edges) {
+    if (cat.kind === 'catalog'
+        && cat.target_id === e.target_id
+        && cat.edge_type === e.edge_type
+        && cat.identifier === e.identifier) {
+      out.push(cat.id);
+    }
+  }
+  return out;
+}
+
+// 3-zone hover. The cursor's position along the hovered link's curve
+// determines whether we're in:
+//   caller      (first ~33% — anchored at source end)
+//   middle      (33–66% — convergence zone for junctions)
+//   target      (last ~66–100% — anchored at target end)
+// Zone-specific glow:
+//   caller   → light up flows feeding into this edge (caller's incoming
+//              edges whose flow outgoing is this edge)
+//   target   → light up flows fired by this edge (callee's outgoing
+//              edges whose flow incoming is this edge or its catalog)
+//   middle   → at a junction: all bundle siblings + trunk converge here
+//              elsewhere: just the hovered edge
+let _globeLastHoveredLink = null;
+let _globeLastZone = null;
+
+function _globeHover(link) {
+  // Library-level onLinkHover fires when cursor enters/leaves a link
+  // mesh. We capture the link here; the actual zone work happens in
+  // the canvas mousemove handler (which has cursor coords).
+  _globeLastHoveredLink = link;
+  if (!link) {
+    _globeLastZone = null;
+    if (_globeHoverLitEdgeIds.size > 0) {
+      _globeHoverLitEdgeIds = new Set();
+      _refreshGlobeLinkVisuals();
+    }
+  }
+}
+
+function _globeCursorZoneForLink(link, cursorX, cursorY, canvas, camera) {
+  // Project the link's stashed curve to screen space, find the sample
+  // closest to the cursor, return its t value.
+  const tube = link.__lineObj;
+  const curve = tube?.userData?._curve;
+  if (!curve) return null;
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  const SAMPLES = 24;
+  let bestT = 0, bestDist = Infinity;
+  for (let i = 0; i <= SAMPLES; i++) {
+    const t = i / SAMPLES;
+    const p = curve.getPoint(t).clone().project(camera);
+    const sx = (p.x + 1) * 0.5 * w;
+    const sy = (1 - p.y) * 0.5 * h;
+    const d = (sx - cursorX) ** 2 + (sy - cursorY) ** 2;
+    if (d < bestDist) { bestDist = d; bestT = t; }
+  }
+  return bestT;
+}
+
+function _globeZoneFromT(link, t) {
+  // Junction-aware: at a bundle, the middle third reads as
+  // "convergence" with junction-specific glow; outside that, normal
+  // caller / target split.
+  const isBundle = link.isJunctionIn || link.isJunctionOut;
+  if (isBundle && t >= 0.33 && t <= 0.66) return 'convergence';
+  if (t < 0.33) return 'caller';
+  if (t > 0.66) return 'target';
+  return 'middle';
+}
+
+function _globeHoverEdgeIdsForZone(link, zone) {
+  const ids = new Set();
+  ids.add(link.id);
+
+  if (zone === 'convergence') {
+    if (link.isJunctionOut && link.groupEdgeIds) {
+      for (const id of link.groupEdgeIds) ids.add(id);
+    } else if (link.isJunctionIn) {
+      const meta = globeSnapshot.junctionOutById || {};
+      for (const [outId, out] of Object.entries(meta)) {
+        if (out.groupEdgeIds.includes(link.id)) {
+          ids.add(outId);
+          for (const id of out.groupEdgeIds) ids.add(id);
+          break;
+        }
+      }
+    }
+    return ids;
+  }
+
+  // For zone = 'caller': light up CALLER's incoming flows that have
+  // THIS edge as their outgoing. (Conceptually: "what feeds into this
+  // call?")
+  // For zone = 'target': light up CALLEE's outgoing flows that have
+  // THIS edge — or its bridging catalog — as their incoming.
+  // ("what does this call trigger downstream?")
+  const underlyingId = link.isJunctionOut
+    ? (link.groupEdgeIds?.[0])
+    : link.id;
+  const underlying = globeSnapshot.edgeById[underlyingId];
+  if (!underlying) return ids;
+
+  if (zone === 'caller') {
+    const callerId = underlying.source_id;
+    if (!callerId) return ids;
+    for (const f of globeSnapshot.flows) {
+      if (f.component_id !== callerId) continue;
+      if (f.outgoing_edge_id !== underlyingId) continue;
+      // The matching incoming is on the caller — light it up if it's
+      // a known edge in the snapshot.
+      ids.add(f.incoming_edge_id);
+    }
+  } else if (zone === 'target') {
+    const calleeId = underlying.target_id;
+    if (!calleeId) return ids;
+    // Catalog bridging: a bound edge "X calls Y at /z" is fired by Y's
+    // catalog "Y exposes /z"; flows on Y reference the catalog id.
+    const incomingIds = _globeEffectiveFlowIncomingsForEdge(underlyingId);
+    for (const f of globeSnapshot.flows) {
+      if (f.component_id !== calleeId) continue;
+      if (!incomingIds.includes(f.incoming_edge_id)) continue;
+      ids.add(f.outgoing_edge_id);
+    }
+  }
+  return ids;
+}
+
+function _globeApplyHover(cursorX, cursorY) {
+  if (!_globeLastHoveredLink) {
+    if (_globeHoverLitEdgeIds.size > 0) {
+      _globeHoverLitEdgeIds = new Set();
+      _refreshGlobeLinkVisuals();
+    }
+    _globeLastZone = null;
+    return;
+  }
+  const camera = globeInstance.camera();
+  const canvas = document.getElementById('globe-canvas');
+  const t = _globeCursorZoneForLink(_globeLastHoveredLink, cursorX, cursorY, canvas, camera);
+  if (t == null) return;
+  const zone = _globeZoneFromT(_globeLastHoveredLink, t);
+  if (zone === _globeLastZone && _globeHoverLitEdgeIds.size > 0) return;
+  _globeLastZone = zone;
+  const ids = _globeHoverEdgeIdsForZone(_globeLastHoveredLink, zone);
+  // Avoid redraw if the set is identical.
+  if (ids.size === _globeHoverLitEdgeIds.size
+      && [...ids].every(id => _globeHoverLitEdgeIds.has(id))) return;
+  _globeHoverLitEdgeIds = ids;
+  _refreshGlobeLinkVisuals();
+}
+
+function _wireGlobeMouseMove() {
+  const canvas = document.getElementById('globe-canvas');
+  if (!canvas || canvas.dataset.hoverWired) return;
+  canvas.dataset.hoverWired = '1';
+  // The 3d-force-graph canvas is actually an inner <canvas> child;
+  // the hover events bubble up through #globe-canvas.
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    _globeApplyHover(e.clientX - rect.left, e.clientY - rect.top);
+  });
+  canvas.addEventListener('mouseleave', () => {
+    if (_globeHoverLitEdgeIds.size > 0) {
+      _globeHoverLitEdgeIds = new Set();
+      _globeLastZone = null;
+      _refreshGlobeLinkVisuals();
+    }
+  });
+}
+
+function _globeLightOfSight(link) {
+  _globeDebug(`LOS click id=${link?.id} type=${link?.edge_type} ident=${link?.identifier} junctionOut=${!!link?.isJunctionOut} junctionIn=${!!link?.isJunctionIn}`);
+  _globeLosTimers.forEach(t => clearTimeout(t));
+  _globeLosTimers = [];
+  _globeLitEdgeIds = new Set();
+  _globeRevealStart.clear();   // reset reveal-progress for the new chain
+  _refreshGlobeLinkVisuals();
+
+  // Resolve seed edges. Bundle-aware: clicking a junction trunk OR any
+  // bundled contributor seeds the whole bundle in layer 0.
+  let seedEdges = [];
+  const seedVisualIds = new Set();
+  if (link.isJunctionOut && link.groupEdgeIds) {
+    seedVisualIds.add(link.id);
+    for (const id of link.groupEdgeIds) {
+      const e = globeSnapshot.edgeById[id];
+      if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+    }
+  } else if (link.isJunctionIn) {
+    const meta = globeSnapshot.junctionOutById || {};
+    for (const [outId, out] of Object.entries(meta)) {
+      if (out.groupEdgeIds.includes(link.id)) {
+        seedVisualIds.add(outId);
+        for (const id of out.groupEdgeIds) {
+          const e = globeSnapshot.edgeById[id];
+          if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+        }
+        break;
+      }
+    }
+    if (seedEdges.length === 0) {
+      const e = globeSnapshot.edgeById[link.id];
+      if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+    }
+  } else {
+    const e = globeSnapshot.edgeById[link.id];
+    if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+  }
+
+  // Forward BFS — same algorithm as Graph's lightOfSight. Each edge's
+  // destination component is examined for flows whose incoming matches
+  // the edge (or its catalog bridge); each such flow's outgoing becomes
+  // a layer-N+1 seed.
+  const layers = [[...seedVisualIds]];
+  const visitedPairs = new Set();
+  const visitedOutgoing = new Set();
+  seedEdges.forEach(e => visitedOutgoing.add(e.id));
+
+  let currentEdges = seedEdges;
+  for (let depth = 1; depth < 100; depth++) {
+    const nextOutgoingIds = new Set();
+    for (const e of currentEdges) {
+      const destComponentId = e.target_id;
+      if (!destComponentId) continue;
+      const flowIncomings = _globeEffectiveFlowIncomingsForEdge(e.id);
+      let alreadySeen = false;
+      for (const fi of flowIncomings) {
+        if (visitedPairs.has(destComponentId + '|' + fi)) { alreadySeen = true; break; }
+      }
+      if (alreadySeen) continue;
+      for (const fi of flowIncomings) {
+        visitedPairs.add(destComponentId + '|' + fi);
+      }
+      for (const f of globeSnapshot.flows) {
+        if (f.component_id !== destComponentId) continue;
+        if (!flowIncomings.includes(f.incoming_edge_id)) continue;
+        if (!visitedOutgoing.has(f.outgoing_edge_id)) {
+          nextOutgoingIds.add(f.outgoing_edge_id);
+          visitedOutgoing.add(f.outgoing_edge_id);
+        }
+      }
+    }
+    if (nextOutgoingIds.size === 0) break;
+    const layerEdges = [];
+    const layerVisual = [];
+    for (const oid of nextOutgoingIds) {
+      const oEdge = globeSnapshot.edgeById[oid];
+      if (!oEdge) continue;
+      layerEdges.push(oEdge);
+      // If the outgoing is itself bundled, light its junction trunk too.
+      if (globeSnapshot.bundledEdgeIds.has(oid)) {
+        for (const [outId, out] of Object.entries(globeSnapshot.junctionOutById)) {
+          if (out.groupEdgeIds.includes(oid)) { layerVisual.push(outId); break; }
+        }
+      }
+      layerVisual.push(oid);
+    }
+    layers.push(layerVisual);
+    currentEdges = layerEdges;
+  }
+
+  // Animate the reveal — 220ms stagger per layer (same as Graph).
+  layers.forEach((layer, depth) => {
+    const t = setTimeout(() => {
+      layer.forEach(id => _globeLitEdgeIds.add(id));
+      _refreshGlobeLinkVisuals();
+    }, depth * 220);
+    _globeLosTimers.push(t);
+  });
+}
+
+
+// ----- 6.4: drill-down sidebar with full Graph-parity tabs ---------------
+//
+// Renderers live in the Globe block (read globeSnapshot directly) so
+// the module stays self-contained — Graph code is untouched.
+
+let activeGlobeDetailNodeId = null;
+let activeGlobeDetailTab = 'doc';
+
+function _globeRenderEdgeList(edges, opts) {
+  return edges.map(e => {
+    let sideHtml = '';
+    if (opts.showSide === 'caller') {
+      const srcNode = globeSnapshot.nodeById[e.source_id];
+      sideHtml = `<span class="edge-from">from ${escapeHtml(srcNode?.name || (e.source_id || '').slice(0, 8))}</span>`;
+    } else if (opts.showSide === 'callee') {
+      if (e.target_id) {
+        const tgtNode = globeSnapshot.nodeById[e.target_id];
+        sideHtml = `<span class="edge-to">to ${escapeHtml(tgtNode?.name || e.target_id.slice(0, 8))}</span>`;
+      } else {
+        sideHtml = `<span class="edge-to dangling">dangling (to unresolved)</span>`;
+      }
+    }
+    const conf = e.confidence != null ? ` · conf ${Number(e.confidence).toFixed(2)}` : '';
+    return `
+      <div class="edge-row" data-edge-id="${e.id}">
+        <div class="edge-head">
+          <span class="edge-type">${escapeHtml(e.edge_type)}</span>
+          <code class="edge-identifier">${escapeHtml(e.identifier)}</code>
+        </div>
+        <div class="edge-sub">${sideHtml}${conf}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function _globeRenderFlowList(flows) {
+  const byIncoming = {};
+  for (const f of flows) (byIncoming[f.incoming_edge_id] ||= []).push(f);
+  return Object.entries(byIncoming).map(([incomingId, rows]) => {
+    const incoming = globeSnapshot.edgeById[incomingId];
+    const outgoings = rows.map(r => globeSnapshot.edgeById[r.outgoing_edge_id]).filter(Boolean);
+    const incHead = incoming
+      ? `${escapeHtml(incoming.edge_type)} <code>${escapeHtml(incoming.identifier)}</code>`
+      : `<em>missing edge ${incomingId.slice(0, 8)}</em>`;
+    const outList = outgoings.map(o => {
+      const tgt = o.target_id ? globeSnapshot.nodeById[o.target_id]?.name : 'dangling';
+      return `<li>${escapeHtml(o.edge_type)} <code>${escapeHtml(o.identifier)}</code> <span class="edge-to">→ ${escapeHtml(tgt || 'dangling')}</span></li>`;
+    }).join('');
+    return `
+      <div class="flow-block">
+        <div class="flow-incoming">${incHead}</div>
+        <ul class="flow-outgoings">${outList}</ul>
+      </div>
+    `;
+  }).join('');
+}
+
+function _globeRenderCatalogList(catalogs) {
+  return catalogs.map(e => {
+    const callers = globeSnapshot.edges.filter(b =>
+      b.kind === 'bound'
+      && b.target_id === e.target_id
+      && b.edge_type === e.edge_type
+      && b.identifier === e.identifier
+    );
+    let sideHtml;
+    if (callers.length === 0) {
+      sideHtml = `<span class="edge-from catalog">exposed — no caller bound yet</span>`;
+    } else {
+      const names = callers.map(c => {
+        const n = globeSnapshot.nodeById[c.source_id];
+        return escapeHtml(n?.name || c.source_id.slice(0, 8));
+      });
+      sideHtml = `<span class="edge-from">${callers.length} caller(s): ${names.join(', ')}</span>`;
+    }
+    const conf = e.confidence != null ? ` · conf ${Number(e.confidence).toFixed(2)}` : '';
+    return `
+      <div class="edge-row" data-edge-id="${e.id}">
+        <div class="edge-head">
+          <span class="edge-type">${escapeHtml(e.edge_type)}</span>
+          <code class="edge-identifier">${escapeHtml(e.identifier)}</code>
+        </div>
+        <div class="edge-sub">${sideHtml}${conf}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function showGlobeNodeDetail(node) {
+  const $doc = document.getElementById('globe-hover-doc');
+  if (!node) {
+    activeGlobeDetailNodeId = null;
+    $doc.innerHTML = '<p class="empty">Click a component on the globe to inspect it.</p>';
+    return;
+  }
+  activeGlobeDetailNodeId = node.id;
+  activeGlobeDetailTab = 'doc';
+  renderGlobeDetailPanel();
+}
+
+function renderGlobeDetailPanel() {
+  const $doc = document.getElementById('globe-hover-doc');
+  if (!activeGlobeDetailNodeId) {
+    $doc.innerHTML = '<p class="empty">Click a component on the globe to inspect it.</p>';
+    return;
+  }
+  const node = globeSnapshot.nodeById[activeGlobeDetailNodeId];
+  if (!node) {
+    $doc.innerHTML = '<p class="empty">Component no longer in graph.</p>';
+    return;
+  }
+  const planesArr = node.planes || [];
+  const planes = planesArr.length
+    ? planesArr.map(p =>
+        `<span class="plane-pill" style="background:${PLANE_COLORS[p] || NO_PLANE_COLOR}22;color:${PLANE_COLORS[p] || NO_PLANE_COLOR}">${p}</span>`
+      ).join('')
+    : '<span class="plane-pill">no attributions</span>';
+
+  const incoming_bound = globeSnapshot.edges.filter(
+    e => e.kind === 'bound' && e.target_id === node.id
+  );
+  const incoming_catalog = globeSnapshot.edges.filter(
+    e => e.kind === 'catalog' && e.target_id === node.id
+  );
+  const outgoing_bound = globeSnapshot.edges.filter(
+    e => e.kind === 'bound' && e.source_id === node.id
+  );
+  const outgoing_dangling = globeSnapshot.edges.filter(
+    e => e.kind === 'dangling' && e.source_id === node.id
+  );
+  const flows = globeSnapshot.flows.filter(f => f.component_id === node.id);
+
+  const tabs = [
+    {id: 'doc',     label: 'Doc'},
+    {id: 'slice',   label: 'Slice'},
+    {id: 'catalog', label: `Catalog (${incoming_catalog.length})`},
+    {id: 'in',      label: `Bindings in (${incoming_bound.length})`},
+    {id: 'out',     label: `Bindings out (${outgoing_bound.length + outgoing_dangling.length})`},
+    {id: 'flows',   label: `Flows (${flows.length})`},
+  ];
+  const tabHtml = tabs.map(t =>
+    `<button class="detail-tab ${t.id === activeGlobeDetailTab ? 'active' : ''}"
+             data-tab="${t.id}">${escapeHtml(t.label)}</button>`
+  ).join('');
+
+  let body = '';
+  if (activeGlobeDetailTab === 'doc') {
+    body = node.doc
+      ? renderMarkdown(node.doc)
+      : '<p class="empty">No doc written yet.</p>';
+  } else if (activeGlobeDetailTab === 'slice') {
+    const sliceHtml = renderSourceSlice(node.slice);
+    body = sliceHtml || '<p class="empty">No source_slice — single-resource component.</p>';
+  } else if (activeGlobeDetailTab === 'catalog') {
+    body = incoming_catalog.length
+      ? _globeRenderCatalogList(incoming_catalog)
+      : '<p class="empty">No catalog rows.</p>';
+  } else if (activeGlobeDetailTab === 'in') {
+    body = incoming_bound.length
+      ? _globeRenderEdgeList(incoming_bound, {showSide: 'caller'})
+      : '<p class="empty">No inbound bindings.</p>';
+  } else if (activeGlobeDetailTab === 'out') {
+    const merged = [...outgoing_bound, ...outgoing_dangling];
+    body = merged.length
+      ? _globeRenderEdgeList(merged, {showSide: 'callee'})
+      : '<p class="empty">No outbound edges.</p>';
+  } else if (activeGlobeDetailTab === 'flows') {
+    body = flows.length
+      ? _globeRenderFlowList(flows)
+      : '<p class="empty">No flows recorded.</p>';
+  }
+
+  $doc.innerHTML = `
+    <div class="graph-node-head">
+      <b>${escapeHtml(node.name)}</b>
+      <div class="kv-row"><span>canonical</span><code>${escapeHtml(node.canonical)}</code></div>
+      <div class="kv-row"><span>type</span><code>${escapeHtml(node.type)}</code></div>
+      <div class="plane-pills">${planes}</div>
+    </div>
+    <div class="detail-tabs">${tabHtml}</div>
+    <div class="detail-body">${body}</div>
+  `;
+
+  $doc.querySelectorAll('.detail-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeGlobeDetailTab = btn.dataset.tab;
+      renderGlobeDetailPanel();
+    });
+  });
+}
+
+document.getElementById('globe-refresh')?.addEventListener('click', initOrRefreshGlobe);
+
+// Resize the renderer when the window changes and the Globe tab is visible.
+window.addEventListener('resize', () => {
+  if (globeInstance && document.getElementById('globe-view')?.classList.contains('active')) {
+    const canvas = document.getElementById('globe-canvas');
+    try {
+      globeInstance.width(canvas.clientWidth).height(canvas.clientHeight);
+    } catch (_e) { /* fine */ }
   }
 });
