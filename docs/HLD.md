@@ -1353,13 +1353,17 @@ GET /api/graph                        → {nodes, edges}   (Phase 3.5)
 
 Entities + Catalog + Insights endpoints (Phase 5):
 ```
-GET /api/entities?kind=&status=&participant=&q=&open_only=&before=&limit=
-  → {entities: [{kind, id, status, participant_a, participant_b,
+GET /api/entities?type=&status=&participant=&q=&open_only=&before=&limit=
+  → {entities: [{type, id, status, participant_a, participant_b,
                  summary, last_activity, extra}], has_more}
   UNION over tasks / consolidations / clarifications / broadcasts.
+  Naming: `type` is the canonical term across both Communications
+  (communications.type) and Entities (entity-row type). The earlier
+  `kind` parameter was renamed end-to-end in Phase 5.12 for FE
+  consistency.
 
-GET /api/entity/{kind}/{id}
-  → {kind, entity, thread, extras?}
+GET /api/entity/{type}/{id}
+  → {type, entity, thread, extras?}
   Unified drill-down. Broadcast extras include the per-agent ack roster.
 
 GET /api/components?type=&plane=&status=&q=&before=&limit=
@@ -1399,7 +1403,7 @@ Canonical URL scheme:
 /chat/:agent_id?q=&group=
 /communications?q=&type=&from_agent=&to_agent=&participant=&before=&limit=
 /graph              /graph/component/:id
-/entities?q=&type=&status=&participant=&open_only=     /entities/{kind}/:id
+/entities?q=&type=&status=&participant=&open_only=     /entities/{type}/:id
 /catalog?q=&type=&plane=&status=                       /catalog/component/:id
 /insights?status=&kind=&target=&agent_id=
 /agent/:id/chain    /broadcast/new
@@ -1437,6 +1441,12 @@ Communications tab:
   `is_persistent` on the broadcast in place via
   `POST /api/broadcast/:id/persistence`. Existing acks stay intact;
   only future scanner reads / new agents change behaviour.
+- **Phase 5.12:** every non-chat row gains a small `type/<short-id>`
+  pill that SPA-navigates to `/entities/{type}/{id}` so admin can
+  jump straight from a thread message to the owning entity's
+  drill-down. For task / consolidation / clarification the pill uses
+  `source_id`; for broadcast it uses the comm row's own id (broadcast
+  IS the entity).
 
 Entities tab (Phase 5.2):
 - Three-panel grid: [filter | list | detail].
@@ -1444,8 +1454,12 @@ Entities tab (Phase 5.2):
   broadcast) at one-row-per-entity granularity. Type-aware status filter
   (BW/BO/WD/TC for tasks, B1/B2/R/M/MD/D/F for consolidations, B1/B2/QR/QC/CC
   for clarifications, persistent/forward-only for broadcasts).
-- Filters: kind, status, participant (either side), search on summary,
-  open-only (hides terminal states across all kinds).
+- Filters: type, status, participant (either side), search on summary,
+  open-only (hides terminal states across all types).
+- Each row carries a short ID badge (8-char prefix, full id in title)
+  for cross-tab cross-reference.
+- Phase 5.12: broadcast rows render the same 📌 / ↪ persistence toggle
+  as Communications — click flips `is_persistent` in place.
 - Detail panel renders the entity row + full thread (with state-transition
   pills + Phase 5.6 confidence-at-send pills on consolidation messages)
   + per-broadcast ack roster.
