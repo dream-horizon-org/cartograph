@@ -3358,8 +3358,9 @@ async function initOrRefreshGlobe() {
   // from a sensible spread (otherwise everything bunches at origin).
   nodes.forEach(n => _seedOnSphere(n, globeRadius));
 
-  // For 6.1, only render bound edges as straight links. Catalog +
-  // dangling come in 6.3 (radial spikes).
+  // For 6.1/6.2, only render bound edges. Catalog + dangling become
+  // radial spikes in 6.3. Each link is tagged with `curveMode` so the
+  // renderer knows great-circle vs ballistic.
   const links = rawEdges
     .filter(e => e.kind === 'bound' && e.source_id && e.target_id)
     .map(e => ({
@@ -3368,6 +3369,7 @@ async function initOrRefreshGlobe() {
       edge_type: e.edge_type,
       identifier: e.identifier,
       kind: e.kind,
+      curveMode: _curveModeForEdgeType(e.edge_type),
     }));
 
   globeSnapshot = {
@@ -3387,11 +3389,18 @@ async function initOrRefreshGlobe() {
       .nodeLabel(n => `${n.name} (${n.type})`)
       .nodeThreeObject(makeNodeMesh)
       .nodeThreeObjectExtend(false)
-      .linkColor(() => '#9ca3af')
+      // Phase 6.2: custom edge geometry. linkThreeObject builds the
+      // line; linkPositionUpdate refills its buffer per frame from the
+      // current source/target positions on the sphere.
+      .linkThreeObject(_globeLinkObject)
+      .linkPositionUpdate(_globeLinkPositionUpdate)
+      .linkColor(_globeLinkColor)            // arrow heads + fallback
       .linkWidth(0.6)
-      .linkOpacity(0.55)
-      .linkDirectionalArrowLength(2.5)
+      .linkOpacity(0.7)
+      .linkDirectionalArrowLength(3)
       .linkDirectionalArrowRelPos(1)
+      .linkDirectionalArrowColor(_globeLinkColor)
+      .linkLabel(l => `${l.edge_type}: ${l.identifier}`)
       .onNodeClick(n => showGlobeNodeDetail(n));
 
     // Force tuning: weaker charge so tangent forces dominate the
@@ -3462,6 +3471,118 @@ async function initOrRefreshGlobe() {
 
   globeInstance.graphData({ nodes, links });
 }
+
+// ----- 6.2: edge curves --------------------------------------------------
+
+// Sync deps hug the surface (great-circle slerp); async fan-out arcs
+// over the surface (ballistic Bézier with apex pushed outward). Picked
+// per-edge by edge_type.
+const _GREAT_CIRCLE_TYPES = new Set(['calls', 'reads_from', 'writes_to', 'runs_on']);
+const _BALLISTIC_TYPES    = new Set(['publishes_to', 'consumes_from', 'triggers']);
+
+function _curveModeForEdgeType(t) {
+  if (_BALLISTIC_TYPES.has(t)) return 'ballistic';
+  return 'great-circle';
+}
+
+const _GLOBE_CURVE_SEGMENTS = 32;
+
+function _greatCirclePoints(p1, p2, R) {
+  const THREE = window.THREE;
+  // Slerp source/target unit vectors along the sphere; render at
+  // R + ε so multiple overlapping edges don't z-fight.
+  const elev = R * 1.005;
+  const u = new THREE.Vector3(p1.x, p1.y, p1.z).normalize();
+  const v = new THREE.Vector3(p2.x, p2.y, p2.z).normalize();
+  const dot = Math.max(-1, Math.min(1, u.dot(v)));
+  const omega = Math.acos(dot);
+  const sinO = Math.sin(omega);
+  const out = [];
+  if (sinO < 1e-6) {
+    out.push(u.multiplyScalar(elev));
+    out.push(v.multiplyScalar(elev));
+    return out;
+  }
+  for (let i = 0; i <= _GLOBE_CURVE_SEGMENTS; i++) {
+    const t = i / _GLOBE_CURVE_SEGMENTS;
+    const a = Math.sin((1 - t) * omega) / sinO;
+    const b = Math.sin(t * omega) / sinO;
+    out.push(new THREE.Vector3(
+      (a * u.x + b * v.x) * elev,
+      (a * u.y + b * v.y) * elev,
+      (a * u.z + b * v.z) * elev,
+    ));
+  }
+  return out;
+}
+
+function _ballisticPoints(p1, p2, R) {
+  const THREE = window.THREE;
+  // Quadratic Bézier: control point at chord midpoint pushed radially
+  // outward. Apex height ∝ chord length, capped at 0.4·R.
+  const mid = new THREE.Vector3(
+    (p1.x + p2.x) / 2,
+    (p1.y + p2.y) / 2,
+    (p1.z + p2.z) / 2,
+  );
+  const midLen = Math.hypot(mid.x, mid.y, mid.z) || R;
+  const chord = Math.hypot(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
+  const apexExtra = Math.min(0.4 * R, chord * 0.45);
+  const ctrl = mid.clone().multiplyScalar((midLen + apexExtra) / midLen);
+  const out = [];
+  for (let i = 0; i <= _GLOBE_CURVE_SEGMENTS; i++) {
+    const t = i / _GLOBE_CURVE_SEGMENTS;
+    const oneMinus = 1 - t;
+    out.push(new THREE.Vector3(
+      oneMinus * oneMinus * p1.x + 2 * oneMinus * t * ctrl.x + t * t * p2.x,
+      oneMinus * oneMinus * p1.y + 2 * oneMinus * t * ctrl.y + t * t * p2.y,
+      oneMinus * oneMinus * p1.z + 2 * oneMinus * t * ctrl.z + t * t * p2.z,
+    ));
+  }
+  return out;
+}
+
+function _globeLinkColor(link) {
+  // Amber for ballistic (async, "loud"); slate for great-circle (sync).
+  return link.curveMode === 'ballistic' ? '#fbbf24' : '#9ca3af';
+}
+
+function _globeLinkObject(link) {
+  const THREE = window.THREE;
+  if (!THREE) return null;
+  const positions = new Float32Array((_GLOBE_CURVE_SEGMENTS + 1) * 3);
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const mat = new THREE.LineBasicMaterial({
+    color: _globeLinkColor(link),
+    transparent: true,
+    opacity: 0.7,
+  });
+  const line = new THREE.Line(geom, mat);
+  // Curves sweep through space; disable frustum culling so they don't
+  // pop in/out when the bounding box leaves view.
+  line.frustumCulled = false;
+  return line;
+}
+
+function _globeLinkPositionUpdate(obj, { start, end }, link) {
+  if (!obj || !obj.geometry) return false;
+  const points = link.curveMode === 'ballistic'
+    ? _ballisticPoints(start, end, globeRadius)
+    : _greatCirclePoints(start, end, globeRadius);
+  const attr = obj.geometry.getAttribute('position');
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    attr.array[i * 3]     = p.x;
+    attr.array[i * 3 + 1] = p.y;
+    attr.array[i * 3 + 2] = p.z;
+  }
+  attr.needsUpdate = true;
+  // Returning true tells 3d-force-graph we handled positioning — its
+  // own straight-line update is skipped.
+  return true;
+}
+
 
 function showGlobeNodeDetail(node) {
   const $body = document.getElementById('globe-hover-doc');
