@@ -123,9 +123,13 @@ def respond_clarification(
         "state_transition": {"from": current, "to": new_status},
         "role": "asker" if is_asker else "responder",
     }
+    # Phase 5.5: CC + QR are terminal — pre-stamp acked_at so the
+    # asker's inbox doesn't keep re-notifying about a closed clarification.
+    acked_clause = "now()" if new_status in ("CC", "QR") else "NULL"
     execute(
-        """INSERT INTO communications (from_agent, to_agent, type, source_id, text, metadata)
-           VALUES (%s, %s, 'clarification', %s, %s, %s::jsonb)""",
+        f"""INSERT INTO communications
+              (from_agent, to_agent, type, source_id, text, metadata, acked_at)
+           VALUES (%s, %s, 'clarification', %s, %s, %s::jsonb, {acked_clause})""",
         (agent_id, other, clarification_id, message, json.dumps(metadata)),
     )
     return updated

@@ -177,9 +177,14 @@ def respond_task(
     }
     if new_status == "BO" and blocker_detail:
         metadata["blocker_detail"] = blocker_detail
+    # Phase 5.5: when the new status is terminal for the recipient
+    # (TC closes both sides), pre-stamp acked_at so the survivor's
+    # inbox doesn't keep re-notifying about a closed task.
+    acked_clause = "now()" if new_status == "TC" else "NULL"
     execute_mutate(
-        """INSERT INTO communications (from_agent, to_agent, type, source_id, text, metadata)
-           VALUES (%s, %s, 'task', %s, %s, %s::jsonb)""",
+        f"""INSERT INTO communications
+              (from_agent, to_agent, type, source_id, text, metadata, acked_at)
+           VALUES (%s, %s, 'task', %s, %s, %s::jsonb, {acked_clause})""",
         (agent_id, other, task_id, message, _json.dumps(metadata)),
     )
 
