@@ -3540,12 +3540,12 @@ async function initOrRefreshGlobe() {
       // current source/target positions on the sphere.
       .linkThreeObject(_globeLinkObject)
       .linkPositionUpdate(_globeLinkPositionUpdate)
-      .linkColor(l => _globeLinkColor(l))
-      .linkWidth(0.6)
-      .linkOpacity(l => _globeLinkOpacity(l))
-      .linkDirectionalArrowLength(l => l.isJunctionIn ? 0 : 3)
-      .linkDirectionalArrowRelPos(1)
-      .linkDirectionalArrowColor(l => _globeLinkColor(l))
+      // The library's built-in arrow renderer assumes a straight chord
+      // from source to target — it would float in space, missing our
+      // curve. We render our own arrow as a child cone of each tube
+      // (see _globeLinkObject), positioned from the actual curve
+      // tangent each frame. So disable the library's arrows entirely.
+      .linkDirectionalArrowLength(0)
       .linkDirectionalParticles(l => _globeLinkParticles(l))
       .linkDirectionalParticleSpeed(0.008)
       .linkDirectionalParticleWidth(2.5)
@@ -3797,56 +3797,40 @@ function _globeLinkParticles(link) {
 
 function _refreshGlobeLinkVisuals() {
   if (!globeInstance) return;
-  // Custom THREE.Line meshes built via linkThreeObject are NOT
-  // re-rendered when the .linkColor accessor changes — the library
-  // only uses .linkColor for default-rendered lines. So we walk every
-  // link's stored mesh and update its material color directly.
+  // Custom tube meshes built via linkThreeObject are NOT recoloured by
+  // the library when .linkColor changes (the accessor only drives
+  // default-rendered lines). Walk every link's __threeObj and update
+  // its material directly. Child arrows ride along.
   try {
     const gd = globeInstance.graphData();
     for (const l of (gd?.links || [])) {
-      const mesh = l.__threeObj;
-      if (!mesh) continue;
-      // Curve line itself.
-      if (mesh.material) {
-        mesh.material.color.set(_globeLinkColor(l));
-        mesh.material.opacity = _globeLinkOpacity(l);
-        mesh.material.needsUpdate = true;
+      const tube = l.__threeObj;
+      if (!tube) continue;
+      const color = _globeLinkColor(l);
+      const opacity = _globeLinkOpacity(l);
+      if (tube.material) {
+        tube.material.color.set(color);
+        tube.material.opacity = opacity;
+        tube.material.needsUpdate = true;
       }
-      // 3d-force-graph stores the directional arrow + particle objects
-      // under predictable __ keys; update their colors so they sync
-      // with the lit state.
-      if (l.__arrowObj && l.__arrowObj.material) {
-        l.__arrowObj.material.color.set(_globeLinkColor(l));
+      for (const child of (tube.children || [])) {
+        if (child.userData?._isArrow && child.material) {
+          child.material.color.set(color);
+          child.material.opacity = Math.min(1, opacity + 0.25);
+          child.material.needsUpdate = true;
+        }
       }
     }
-    // Re-supply particle accessor — these ARE recomputed by the library.
+    // Particles ARE recomputed by the library when accessor changes.
     globeInstance.linkDirectionalParticles(l => _globeLinkParticles(l));
   } catch (e) {
     console.warn('refreshGlobeLinkVisuals failed:', e);
   }
 }
 
-function _globeLinkObject(link) {
-  const THREE = window.THREE;
-  if (!THREE) return null;
-  const positions = new Float32Array((_GLOBE_CURVE_SEGMENTS + 1) * 3);
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const mat = new THREE.LineBasicMaterial({
-    color: _globeLinkColor(link),
-    transparent: true,
-    opacity: 0.7,
-  });
-  const line = new THREE.Line(geom, mat);
-  // Curves sweep through space; disable frustum culling so they don't
-  // pop in/out when the bounding box leaves view.
-  line.frustumCulled = false;
-  return line;
-}
-
 function _radialPoints(p1, p2) {
   // Straight-line interpolation — used for stub edges (anchor → "?")
-  // which deliberately stick OFF the surface and shouldn't bend.
+  // which stick OFF the surface and shouldn't bend.
   const THREE = window.THREE;
   const out = [];
   for (let i = 0; i <= _GLOBE_CURVE_SEGMENTS; i++) {
@@ -3860,24 +3844,94 @@ function _radialPoints(p1, p2) {
   return out;
 }
 
+function _curvePointsForLink(link, start, end) {
+  if (link.curveMode === 'radial')    return _radialPoints(start, end);
+  if (link.curveMode === 'ballistic') return _ballisticPoints(start, end, globeRadius);
+  return _greatCirclePoints(start, end, globeRadius);
+}
+
+// Tube radius is small enough to read as a line, large enough that the
+// raycaster (used by the library for hover labels + onLinkClick) hits
+// reliably. THREE.Line at 1px effectively never gets a hover.
+const _GLOBE_TUBE_RADIUS = 0.55;
+const _GLOBE_TUBE_RADIAL_SEGMENTS = 6;
+
+function _globeLinkObject(link) {
+  const THREE = window.THREE;
+  if (!THREE) return null;
+  // Tube mesh as the line body — raycastable, looks like a slim rod.
+  // Geometry is a placeholder unit segment; replaced per frame in
+  // linkPositionUpdate by a real curve-shaped tube.
+  const placeholderCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(1, 0, 0),
+  ]);
+  const geom = new THREE.TubeGeometry(
+    placeholderCurve,
+    _GLOBE_CURVE_SEGMENTS,
+    _GLOBE_TUBE_RADIUS,
+    _GLOBE_TUBE_RADIAL_SEGMENTS,
+    false,
+  );
+  const mat = new THREE.MeshBasicMaterial({
+    color: _globeLinkColor(link),
+    transparent: true,
+    opacity: _globeLinkOpacity(link),
+  });
+  const tube = new THREE.Mesh(geom, mat);
+  tube.frustumCulled = false;
+
+  // Manual arrow-head cone at the link's target end. The library's
+  // own arrow renderer assumes a straight line and would point along
+  // the chord, missing the curve direction; this child cone follows
+  // our curve correctly each frame.
+  if (!link.isJunctionIn && !link.isStub) {
+    const arrowGeom = new THREE.ConeGeometry(2.5, 6, 10);
+    const arrowMat = new THREE.MeshBasicMaterial({
+      color: _globeLinkColor(link),
+      transparent: true,
+      opacity: 0.95,
+    });
+    const arrow = new THREE.Mesh(arrowGeom, arrowMat);
+    arrow.frustumCulled = false;
+    arrow.userData._isArrow = true;
+    tube.add(arrow);
+  }
+  return tube;
+}
+
 function _globeLinkPositionUpdate(obj, { start, end }, link) {
-  if (!obj || !obj.geometry) return false;
-  let points;
-  if (link.curveMode === 'radial') {
-    points = _radialPoints(start, end);
-  } else if (link.curveMode === 'ballistic') {
-    points = _ballisticPoints(start, end, globeRadius);
-  } else {
-    points = _greatCirclePoints(start, end, globeRadius);
+  if (!obj) return false;
+  const THREE = window.THREE;
+  const points = _curvePointsForLink(link, start, end);
+  // Rebuild the tube geometry from the new curve. CatmullRomCurve3 +
+  // TubeGeometry handles all the orientation math (tangents, normals,
+  // binormals) so the tube reads cleanly even as the curve twists.
+  const curve = new THREE.CatmullRomCurve3(points);
+  const newGeom = new THREE.TubeGeometry(
+    curve,
+    _GLOBE_CURVE_SEGMENTS,
+    _GLOBE_TUBE_RADIUS,
+    _GLOBE_TUBE_RADIAL_SEGMENTS,
+    false,
+  );
+  // Dispose the old geometry to avoid GPU leak on every tick.
+  if (obj.geometry) obj.geometry.dispose();
+  obj.geometry = newGeom;
+
+  // Position arrow head if present: place near the end (94% along the
+  // curve) and orient it along the local tangent.
+  for (const child of obj.children) {
+    if (!child.userData?._isArrow) continue;
+    const tEnd = 0.94;
+    const pos = curve.getPoint(tEnd);
+    const tangent = curve.getTangent(tEnd).normalize();
+    child.position.copy(pos);
+    // Cone's default orientation has its tip along +Y; align +Y with tangent.
+    const up = new THREE.Vector3(0, 1, 0);
+    const quat = new THREE.Quaternion().setFromUnitVectors(up, tangent);
+    child.quaternion.copy(quat);
   }
-  const attr = obj.geometry.getAttribute('position');
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i];
-    attr.array[i * 3]     = p.x;
-    attr.array[i * 3 + 1] = p.y;
-    attr.array[i * 3 + 2] = p.z;
-  }
-  attr.needsUpdate = true;
   return true;
 }
 
