@@ -3795,9 +3795,13 @@ function _globeLinkOpacity(link) {
   return 0.7;
 }
 
-function _globeLinkParticles(link) {
-  // Lit edges get directional particles, like Graph's LOS treatment.
-  if (_globeLitEdgeIds.has(link.id)) return 4;
+function _globeLinkParticles(_link) {
+  // Disabled on Globe: 3d-force-graph animates particles along the
+  // straight chord between source and target node positions — for
+  // curved sphere edges that means particles beam THROUGH the globe
+  // interior, which looks broken. The LOS amber color + full opacity
+  // already convey the chain; particles were a Graph-specific
+  // affordance that doesn't translate to sphere geometry.
   return 0;
 }
 
@@ -3890,9 +3894,16 @@ function _globeLinkObject(link) {
   // Manual arrow-head cone at the link's target end. The library's
   // own arrow renderer assumes a straight line and would point along
   // the chord, missing the curve direction; this child cone follows
-  // our curve correctly each frame.
+  // our curve correctly each frame. Junction trunks are SHORT (just
+  // past the target along the callers' centroid direction); a
+  // full-size arrow at t=0.94 would clip into the target mesh, so we
+  // shrink it. Junction-in contributors have no arrow (the trunk's
+  // arrow represents the bundle).
   if (!link.isJunctionIn && !link.isStub) {
-    const arrowGeom = new THREE.ConeGeometry(2.5, 6, 10);
+    const isTrunk = !!link.isJunctionOut;
+    const arrowGeom = isTrunk
+      ? new THREE.ConeGeometry(1.4, 3.5, 10)   // smaller for short trunks
+      : new THREE.ConeGeometry(2.5, 6, 10);
     const arrowMat = new THREE.MeshBasicMaterial({
       color: _globeLinkColor(link),
       transparent: true,
@@ -3901,6 +3912,7 @@ function _globeLinkObject(link) {
     const arrow = new THREE.Mesh(arrowGeom, arrowMat);
     arrow.frustumCulled = false;
     arrow.userData._isArrow = true;
+    arrow.userData._arrowT = isTrunk ? 0.7 : 0.94;
     tube.add(arrow);
   }
   return tube;
@@ -3925,15 +3937,15 @@ function _globeLinkPositionUpdate(obj, { start, end }, link) {
   if (obj.geometry) obj.geometry.dispose();
   obj.geometry = newGeom;
 
-  // Position arrow head if present: place near the end (94% along the
-  // curve) and orient it along the local tangent.
+  // Position arrow head if present: per-arrow t (set at creation time
+  // — 0.94 for regular edges, 0.7 for short trunks) and orient it
+  // along the local tangent.
   for (const child of obj.children) {
     if (!child.userData?._isArrow) continue;
-    const tEnd = 0.94;
+    const tEnd = child.userData._arrowT ?? 0.94;
     const pos = curve.getPoint(tEnd);
     const tangent = curve.getTangent(tEnd).normalize();
     child.position.copy(pos);
-    // Cone's default orientation has its tip along +Y; align +Y with tangent.
     const up = new THREE.Vector3(0, 1, 0);
     const quat = new THREE.Quaternion().setFromUnitVectors(up, tangent);
     child.quaternion.copy(quat);
