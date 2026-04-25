@@ -1964,7 +1964,22 @@ Single commit `59a6a4f` with 2 new tests (include_empty surfacing depth-2; trans
 
 ---
 
-## Phase 5: Tweaks & Improvements
+## Phase 5: Tweaks & Improvements ✅
+
+**Shipped 2026-04-25.** All 11 sub-phases landed across incremental commits:
+- `48dabf0` — 5.1 SPA routing foundation
+- `5310b3d` — 5.2 Entities tab + drill-downs
+- `d02a579` — 5.3 Catalog tab + drill-downs
+- `9ea62a7` — 5.4 sidebar component-search + persistence pill
+- `48399fe` — 5.5 auto-ack on terminal communications
+- `5278afb` — 5.6 per-message confidence stamping
+- `58bdd23` — 5.7 toggle broadcast persistence post-send
+- `28f25de` — 5.8 admin chat wakes from sleep fix
+- `1e0ecbc` — 5.9 record_insight + agent_insights + UI
+- `1e27f54` — 5.10 mcp_audit decorator + table
+- (this commit) — 5.11 doc + memory sync
+
+Final test count: ~510 (up from 383). MCP tool count: **79** (up from 77 — added `update_broadcast_persistence` + `record_insight`). Two new tables: `agent_insights`, `mcp_audit`.
 
 One bundle of admin-UI navigation, communication-hygiene fixes, and a self-improvement feedback loop for the agent system. Sub-numbered for commit cadence; all roll up to Phase 5. Ships incrementally — each sub-phase is its own commit + push.
 

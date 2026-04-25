@@ -372,7 +372,7 @@ TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
 
-> **Implementation status.** 65 tools live in `src/cartograph_mcp/server.py` (up from 58 with the Phase 3.9 edge protocol: `upsert_edge_catalog`, `upsert_edge_outbound`, `bind_edge`, `upsert_flow`, `get_component_edges`, `get_flow`, `get_flow_inverse`). Covers action_items, chat, broadcast, secrets, tasks, resources, agent_lifecycle, components (including asymmetric edge writes + flows), notifications, consolidation, clarification, vector_search. Mutation tools (execute_mutation, complete_consolidation, absorb_agent, spawn_child_agent, transfer_attributions, get_proxy_items, get_proxy_chats) are designed below but ship in Phase 4 — see `IMPLEMENTATION-PHASES.md` for phase gating.
+> **Implementation status.** 79 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 5.10). Covers action_items, chat, broadcast (incl. `update_broadcast_persistence` from 5.7), secrets, tasks, resources, agent_lifecycle, components (asymmetric edge writes + flows), notifications, consolidation (incl. `confidence_at_send` metadata stamping from 5.6), clarification, vector_search, mutation lifecycle (Phase 4 + 4.1 + 4.2: `execute_mutation`, `complete_consolidation`, `absorb_agent`, `spawn_child_agent`, `transfer_attributions`, `transfer_edges`, `transfer_flows`, `get_my_components`, `get_stale_edges`, `get_stale_flows`), proxy inheritance (`get_my_proxy_items`, `act_on_proxy_item`), and `record_insight` (Phase 5.9). Every tool is wrapped by `cartograph_mcp.audit.audited` (Phase 5.10).
 
 ### 3.1 Trigger Tools (what wakes me — read-only, used by trigger manager)
 
@@ -659,10 +659,32 @@ send_broadcast(from_agent_id, to_agent_type, message, persistent=False)
   send time see it. persistent=True → also applies to agents spawned
   later (standing policy).
 
+update_broadcast_persistence(agent_id, communication_id, persistent)  -- Phase 5.7
+  Admin/orchestrator only. Flips is_persistent on an existing broadcast.
+  Refuses non-broadcast rows. Toggling OFF leaves existing acks intact;
+  only future scanner reads / new agents change behaviour.
+
 ack_broadcast(agent_id, communication_id)
   Inserts row into broadcast_acks.
   Stops trigger manager from re-invoking this agent for this broadcast.
 ```
+
+**Self-improvement loop (Phase 5.9):**
+
+```
+record_insight(agent_id, kind, target, body, evidence?)
+  All active agents. Records prompt gaps, tactic wins, tool gaps, doc
+  confusion, workflow friction. Admin triages from the UI Insights tab.
+  kind ∈ {prompt_gap, tactic_win, tool_gap, doc_confusing, workflow_friction}.
+  evidence: optional {task_ids, comm_ids, file_paths}.
+```
+
+**Per-call audit (Phase 5.10) — not an agent tool, automatic.**
+
+The `cartograph_mcp.audit.audited` decorator wraps every `@mcp.tool()`
+registration via `install(mcp)`. Records (agent_id, tool_name,
+args_hash, result_status, error_msg, duration_ms) on every call to
+`mcp_audit`. Full payloads NOT stored. Audit-side failures swallowed.
 
 **Component graph acts (live as of Phase 2.2 — SME-scoped to own component. Embedding pipeline deferred to Phase 3 prep; embedding columns stay NULL for now):**
 

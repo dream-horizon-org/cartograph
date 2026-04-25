@@ -32,6 +32,8 @@ Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULAR
 
 **Scale sanity check:** a plane's resource count should be on the order of the number of *deployable services* in the org — hundreds to low thousands for a mid-size org, NOT tens of thousands. If >2× expected, granularity is wrong.
 
+**Self-improvement loop (Phase 5.9):** every agent type also gets a `== SELF-IMPROVEMENT LOOP ==` section in the shared mission block. If you discover a smart tactic, hit a prompt gap, miss a tool you wish existed, find an on-disk doc misleading, or the multi-step workflow felt awkward, call `record_insight(kind, target, body, evidence?)`. Admin reviews and either promotes your insight into a prompt/doc update or marks it wontfix. `kind` ∈ {prompt_gap, tactic_win, tool_gap, doc_confusing, workflow_friction}. One insight per genuinely-new finding — keep the signal high.
+
 ---
 
 ## 1. Orchestrator System Prompt

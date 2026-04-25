@@ -629,6 +629,81 @@ survivor's transitive merge chain. Lifecycle state lives on the
 underlying item rows (`tasks.status`, `communications.acked_at`,
 etc.); a proxy act via the router flips those naturally.
 
+### Phase 5.5 + 5.6 metadata additions on `communications`
+
+Two metadata keys are stamped at write time (no schema change — they
+ride inside the existing `metadata` JSONB column):
+
+- `metadata.confidence_at_send = {a, b, r}` (Phase 5.6) — written by
+  `nominate_consolidation`, `respond_consolidation`, `review_consolidation`.
+  Snapshot of all three confidence scores AS OF this message.
+  Consolidations row stays the source of truth for current scores;
+  the thread carries an immutable timeline.
+- `acked_at = now()` is now pre-stamped on the announcing comm row
+  when the new state is terminal for the recipient (Phase 5.5):
+  `respond_task → TC`, `review_consolidation → F`,
+  `complete_consolidation → D`, `respond_clarification → CC|QR`.
+  Stops the recipient's inbox from re-notifying about closed work.
+
+### `agent_insights` (Phase 5.9)
+
+Self-improvement loop. Agents call `record_insight(...)` to flag prompt
+gaps, tactic wins, tool gaps, doc confusion, workflow friction. Admin
+triages from the UI; "promoted" entries inform prompt + doc updates.
+
+```sql
+CREATE TABLE agent_insights (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id    TEXT NOT NULL REFERENCES agent_runs(agent_id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN (
+                  'prompt_gap', 'tactic_win', 'tool_gap',
+                  'doc_confusing', 'workflow_friction'
+                )),
+    target      TEXT NOT NULL,    -- 'sme.materialisation', 'transfer_edges', etc.
+    body        TEXT NOT NULL,
+    evidence    JSONB,            -- {task_ids, comm_ids, file_paths} optional
+    status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN (
+                  'open', 'investigating', 'promoted', 'wontfix'
+                )),
+    triaged_by  TEXT,
+    triaged_at  TIMESTAMPTZ,
+    triage_note TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_insights_agent  ON agent_insights(agent_id);
+CREATE INDEX idx_insights_status ON agent_insights(status);
+CREATE INDEX idx_insights_target ON agent_insights(target);
+```
+
+### `mcp_audit` (Phase 5.10)
+
+Blanket per-call audit log for every MCP tool invocation. Wrapped via
+the `cartograph_mcp.audit.audited` decorator, applied transparently to
+every `@mcp.tool()` registration via `install(mcp)`. Stores the args
+hash (sha1) only, not full payloads — keeps row size bounded as volume
+grows. Audit-side failures are swallowed so the tool's contract is
+never affected.
+
+```sql
+CREATE TABLE mcp_audit (
+    id            BIGSERIAL PRIMARY KEY,
+    agent_id      TEXT,
+    tool_name     TEXT NOT NULL,
+    args_hash     TEXT NOT NULL,    -- sha1 of canonicalised args+kwargs
+    result_status TEXT NOT NULL CHECK (result_status IN ('ok', 'error')),
+    error_msg     TEXT,             -- on error only
+    duration_ms   INTEGER NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_mcp_audit_agent_time ON mcp_audit(agent_id, created_at DESC);
+CREATE INDEX idx_mcp_audit_tool        ON mcp_audit(tool_name);
+CREATE INDEX idx_mcp_audit_created     ON mcp_audit(created_at DESC);
+```
+
+Single table for now; weekly partitioning + 30-day retention can be
+added later if volume warrants — TODO documented in
+IMPLEMENTATION-PHASES §5.10.
+
 ---
 
 ## Embedding Strategy
@@ -687,5 +762,7 @@ Model: **`mxbai-embed-large` via local Ollama** (1024 dims, Metal-accelerated on
 | broadcast_acks | done   |
 | proxy_audit    | done   |
 | resource_component_agents | done |
+| agent_insights | done   |
+| mcp_audit      | done   |
 
 

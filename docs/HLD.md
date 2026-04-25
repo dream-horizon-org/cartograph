@@ -203,15 +203,16 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `get_action_items_summary(agent_id)` | ✓ | ✓ | ✓ | ✓ | Returns counts for the caller only |
 | `get_action_items_detail(agent_id)`  | ✓ | ✓ | ✓ | ✓ | Same |
 
-#### Chat & Broadcast (live · Phase 0 + 2.5)
+#### Chat & Broadcast (live · Phase 0 + 2.5 + 5.7)
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `send_chat(from, to, message)` | ✓ | ✓ *→ admin only* | ✓ *→ admin only* | ✓ *→ admin only* | Non-admin agents may only message `admin`; admin may message anyone. Admin chat to a sleeping agent auto-wakes it. |
+| `send_chat(from, to, message)` | ✓ | ✓ *→ admin only* | ✓ *→ admin only* | ✓ *→ admin only* | Non-admin agents may only message `admin`; admin may message anyone. Admin chat to a sleeping agent auto-wakes it (also fixed in admin UI write path — Phase 5.8). |
 | `ack_chats(agent_id, ids[])` | ✓ | ✓ | ✓ | ✓ | Only acks rows where `to_agent = agent_id` |
 | `get_unacked_chats(agent_id)` | ✓ | ✓ | ✓ | ✓ | Own inbox |
 | `get_chat_history(agent_id, page, limit)` | ✓ | ✓ | ✓ | ✓ | Own history |
 | `send_broadcast(from, to_type, message, persistent=False)` | ✓ | — | — | — | Also admin. `persistent=True` makes it apply to agents spawned later too (standing policy). Default forward-only. |
+| `update_broadcast_persistence(agent_id, communication_id, persistent)` | ✓ | — | — | — | Also admin. Phase 5.7. Flips `is_persistent` on an existing broadcast. Refuses non-broadcast rows. Toggling OFF leaves existing acks intact. |
 | `ack_broadcast(agent_id, id)` | ✓ | ✓ | ✓ | ✓ | Per-agent ack record |
 | `get_unacked_broadcasts(agent_id, agent_type)` | ✓ | ✓ | ✓ | ✓ | Own inbox by type. Skips pre-spawn non-persistent broadcasts. |
 
@@ -332,6 +333,16 @@ Design notes (see IMPLEMENTATION-PHASES §Phase 4 for the full spec):
 - No `proxy_items` table. Inheritance derives from `agent_runs.merged_into_agent_id` at read time. Chain walked, never flattened — each deactivation's `deactivation_notes` stays historically accurate.
 - Shared helper `shared.actor_auth.require_active_agent()` gates every "actor must be active" check. Its `_PROXY_CTX` ContextVar is the only sanctioned relaxation (survivor-acts-as-proxy). Replaces 4 duplicated `_caller` helpers + 6 inline SELECTs.
 - Append-only `proxy_audit` log records who actually clicked (survivor) when an item ledger records the original owner. Admin UI joins on `(item_type, item_id)` for "via <survivor>" badges.
+
+#### Self-improvement loop (Phase 5.9 · shipped)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `record_insight(agent_id, kind, target, body, evidence?)` | ✓ | ✓ | ✓ | ✓ | All active agents. `kind` ∈ {prompt_gap, tactic_win, tool_gap, doc_confusing, workflow_friction}. Admin triages from the UI Insights tab — promoted entries inform prompt + doc updates. |
+
+#### Per-call audit (Phase 5.10 · shipped)
+
+Not an agent tool — automatically applied to every `@mcp.tool()` registration via `cartograph_mcp.audit.install(mcp)`. Records `(agent_id, tool_name, args_hash, result_status, error_msg, duration_ms)` to the `mcp_audit` table on every call. Full payloads NOT stored; sha1 hash only. Audit-side failures are swallowed so the wrapped tool's contract is never affected.
 
 ---
 
@@ -1340,14 +1351,66 @@ GET /api/graph                        → {nodes, edges}   (Phase 3.5)
   One query per tab entry; no pagination (O(thousands) scale).
 ```
 
+Entities + Catalog + Insights endpoints (Phase 5):
+```
+GET /api/entities?kind=&status=&participant=&q=&open_only=&before=&limit=
+  → {entities: [{kind, id, status, participant_a, participant_b,
+                 summary, last_activity, extra}], has_more}
+  UNION over tasks / consolidations / clarifications / broadcasts.
+
+GET /api/entity/{kind}/{id}
+  → {kind, entity, thread, extras?}
+  Unified drill-down. Broadcast extras include the per-agent ack roster.
+
+GET /api/components?type=&plane=&status=&q=&before=&limit=
+  → {components: [{id, canonical_name, display_name, component_type,
+                   status, planes[], attribution_count, edge_count:
+                   {bound, catalog, dangling}, owner_sme_id}], has_more}
+
+GET /api/component/{id}/drilldown
+  → {component, attributions, edges: {bound_in, bound_out, catalog,
+     dangling_out}, flows, resources}
+
+GET /api/insights?status=&kind=&target=&agent_id=&limit=
+POST /api/insight/{id}/triage     {status, triage_note?}
+
+POST /api/broadcast/{id}/persistence  {persistent}
+  Flip is_persistent on an existing broadcast (Phase 5.7).
+
+GET /api/mcp_audit?agent_id=&tool_name=&result_status=&limit=
+  Per-agent / per-tool activity timeline (Phase 5.10).
+```
+
+SPA fallback (Phase 5.1):
+```
+GET /{any non-/api/ path}
+  → static file from STATIC_DIR if it exists, else index.html
+  /api/* never falls back — genuine misses 404 as before.
+```
+
 ### 10.2 Frontend Behaviour
 
-Three tabs in the top nav: **Chat**, **Communications**, and **Graph**.
+Six tabs in the top nav: **Chat**, **Communications**, **Entities**, **Catalog**, **Graph**, **Insights** (Phase 5).
+
+URL routing across all tabs (Phase 5.1) — every state change pushes a URL via `Router.navigate()`. The History API router preserves existing query params by default, so sidebar search / filter state survives detail-panel navigations and the URL itself is shareable / deep-linkable. Genuinely-unknown `/api/*` paths still 404; everything else falls back to `index.html` so client-side routes resolve.
+
+Canonical URL scheme:
+```
+/chat/:agent_id?q=&group=
+/communications?q=&type=&from_agent=&to_agent=&participant=&before=&limit=
+/graph              /graph/component/:id
+/entities?q=&type=&status=&participant=&open_only=     /entities/{kind}/:id
+/catalog?q=&type=&plane=&status=                       /catalog/component/:id
+/insights?status=&kind=&target=&agent_id=
+/agent/:id/chain    /broadcast/new
+```
 
 Chat tab:
 - **Agent list panel:** fetched on load, refreshed every 5s. Now **grouped
   by agent_type** (orchestrator, resolver, iterator, sme) with a per-group
-  typable search input. Group count pill shows filtered/total.
+  typable search input. Group count pill shows filtered/total. Phase 5.4:
+  search predicate now also matches `component_canonical` + `component_display`
+  so SMEs are findable by what they own.
 - **Chat panel:** shows messages from `communications` where
   `(from_agent = selected_agent AND to_agent = 'admin')` OR
   `(from_agent = 'admin' AND to_agent = selected_agent)` AND `type = 'chat'`
@@ -1368,6 +1431,41 @@ Communications tab:
   blocker + the full thread with per-message state_transition pills.
 - **Broadcast button** in the top-right opens a dialog: pick target type
   + write message → admin broadcasts directly.
+- **Phase 5.4:** broadcast rows render a 📌 persistent / ↪ forward-only
+  pill so admins can tell standing policy from forward-only at a glance.
+- **Phase 5.7:** the persistence pill is clickable — flips
+  `is_persistent` on the broadcast in place via
+  `POST /api/broadcast/:id/persistence`. Existing acks stay intact;
+  only future scanner reads / new agents change behaviour.
+
+Entities tab (Phase 5.2):
+- Three-panel grid: [filter | list | detail].
+- Lists every workflow row (task / consolidation / clarification /
+  broadcast) at one-row-per-entity granularity. Type-aware status filter
+  (BW/BO/WD/TC for tasks, B1/B2/R/M/MD/D/F for consolidations, B1/B2/QR/QC/CC
+  for clarifications, persistent/forward-only for broadcasts).
+- Filters: kind, status, participant (either side), search on summary,
+  open-only (hides terminal states across all kinds).
+- Detail panel renders the entity row + full thread (with state-transition
+  pills + Phase 5.6 confidence-at-send pills on consolidation messages)
+  + per-broadcast ack roster.
+
+Catalog tab (Phase 5.3):
+- Three-panel grid: [filter | list | drill-down].
+- Paginated component list. Each row: canonical_name, display_name,
+  type, status, plane pills, attribution count, edge counts split by
+  kind (bound / catalog / dangling).
+- Filters: type, plane, status, search on canonical/display name.
+- Drill-down: doc, slice, attributions, edges (4 buckets per Phase 3.9
+  protocol — bound_in / bound_out / catalog / dangling_out), flows,
+  source resources via RCA.
+
+Insights tab (Phase 5.9):
+- Two-panel grid: [filter | list].
+- Lists every `agent_insights` row. Inline triage buttons (🔍 ✅ 🚫 ↩)
+  flip status (investigating / promoted / wontfix / open) with optional
+  triage_note. Promoted insights inform prompt + doc updates.
+- Filters: status, kind, target, agent_id.
 
 Graph tab (Phase 3.5 → upgraded in 3.10):
 - Two-panel grid: [sidebar | 3d-force-graph canvas].
