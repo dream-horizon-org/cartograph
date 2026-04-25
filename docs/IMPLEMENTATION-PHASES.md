@@ -1964,6 +1964,376 @@ Single commit `59a6a4f` with 2 new tests (include_empty surfacing depth-2; trans
 
 ---
 
+## Phase 5: Tweaks & Improvements
+
+One bundle of admin-UI navigation, communication-hygiene fixes, and a self-improvement feedback loop for the agent system. Sub-numbered for commit cadence; all roll up to Phase 5. Ships incrementally — each sub-phase is its own commit + push.
+
+### 5.0 Motivation
+
+Phase 4 + 4.1 + 4.2 closed out the mutation/proxy primitives and battle-tested them via DEMO41. Out of that demo + day-to-day usage, a backlog of small ergonomic gaps surfaced — none of them deserve a phase-flow rethink, but together they meaningfully lower the friction of running Cartograph at scale. Phase 5 collects them.
+
+Three themes:
+
+1. **Navigation**: the admin UI is currently four tabs (Chat / Communications / Graph) with no URL routing — every state lives in JS memory, can't be shared via link, and refreshes blow the state away. Two new views (Entities + Catalog) need to fit alongside, and routing must extend across all of them.
+2. **Communication hygiene**: small write-site additions (auto-ack on terminal states, per-message confidence stamping, persistence-toggle on broadcasts) that remove daily annoyances and unlock cleaner thread visualisations.
+3. **Self-improvement loop**: agents can already chat with admin and raise blockers, but there's no structured channel for "I figured out a clever tactic" or "this prompt section confused me." Adding it now starts the data flywheel for prompt refinement before the org grows past a manageable handful of SMEs.
+
+### 5.1 Routing foundation + URL scheme migration
+
+**Backend**: FastAPI catch-all serves `index.html` for any non-`/api/*` path — single-line route at the bottom of `src/admin_ui/server.py`:
+```python
+@app.get("/{full_path:path}")
+def spa_fallback(full_path: str): return FileResponse("static/index.html")
+```
+
+**Frontend**: vanilla History API router in `app.js`. New module-level `Router`:
+```js
+function navigate(path, {set, clear, replace} = {}) {
+  // Merge query: preserve existing params, apply set/clear, push state.
+  const url = buildUrl(path, set, clear);
+  history[replace ? 'replaceState' : 'pushState']({}, '', url);
+  dispatchEvent(new CustomEvent('routechange'));
+}
+function route() { /* parse location, return {tab, path, query} */ }
+window.addEventListener('popstate', () => dispatchEvent(new CustomEvent('routechange')));
+```
+
+**Invariant**: `navigate(path)` preserves existing query params by default. To clear, opt-in via `clear: ['q']` or `set: {q: undefined}`. This is what makes sidebar search / filter state survive across detail-panel navigations.
+
+**URL scheme** (canonical):
+```
+/chat/:agent_id?q=&group=
+/communications?q=&type=&from_agent=&to_agent=&participant=&before=&limit=
+/graph
+/graph/component/:id
+/entities?q=&type=&status=&participant=&before=&limit=
+/entities/{task|consolidation|clarification|chat|broadcast}/:id
+/catalog?q=&type=&plane=&status=&before=&limit=
+/catalog/component/:id
+/agent/:id/chain
+/broadcast/new
+```
+
+**Migration of existing tabs (Chat / Communications / Graph)**: every place today that calls `switchTab(name)` / `selectAgent(id)` / `applyFilter(...)` is replaced by a `navigate(...)` call. The actual rendering moves to a single `routechange` listener that reads `route()` and dispatches to the right view-renderer. URL is the source of truth; FE state objects shrink to "what's currently on screen for the active route."
+
+**Files touched:** `src/admin_ui/server.py` (catch-all route), `src/admin_ui/static/index.html` (no structural change but `<script>` cache-bust), `src/admin_ui/static/app.js` (router module + every `switchTab` / `selectAgent` / filter-apply rewritten).
+
+**Tests:** N/A (FE has no test harness; verified manually).
+
+**Effort:** S-M (router itself is ~80 lines; the rewrite touch-points are wide but mechanical).
+
+### 5.2 Entities tab + drill-downs
+
+**New tab in top nav**: Entities, sitting between Communications and Graph.
+
+**View**: list of every workflow-entity (task / consolidation / clarification / chat / broadcast) as one row each. Type pill, status pill (type-aware values), participants, last-activity timestamp. Click → drill-down panel showing full thread + entity-specific metadata.
+
+**Backend** — new endpoints (or one consolidated):
+- `GET /api/entities?type=&status=&participant=&q=&before=&limit=` — returns `{entities: [{kind, id, status, participants, last_activity, summary}], has_more}`. Implementation: type-discriminated UNION across `tasks` + `consolidations` + `clarifications` + `communications` (chat / broadcast as their own row-types). Default sort: most-recent activity first.
+- `GET /api/entity/:kind/:id` — returns `{entity: {...row}, thread: [...communications]}`. Already exists for task/consolidation/clarification — extend for chat (single message + replies) and broadcast (broadcast + per-agent ack roster).
+
+**Frontend**: `entitiesView` module with two sub-renderers (`renderList`, `renderDetail`). Type-aware status filter dropdown (BW/BO/WD/TC for tasks, B1/B2/R/M/MD/D/F for consolidations, B1/B2/QR/QC/CC for clarifications, "acked / unacked" for chat/broadcast). Pagination via `before=` cursor (same idiom as existing chat pagination).
+
+**Files touched:** `src/admin_ui/server.py` (new endpoints), `src/admin_ui/static/index.html` (new tab), `src/admin_ui/static/app.js` (entitiesView module), `src/admin_ui/static/style.css` (list/detail styling).
+
+**Tests:** `tests/admin_ui/test_entities_endpoint.py` (~6: empty list, type filter, status filter, participant filter, pagination cursor, drill-down per kind).
+
+**Effort:** M.
+
+### 5.3 Catalog tab + drill-downs
+
+**New tab in top nav**: Catalog, sitting alongside Graph (the spatial view) as the textual / scrollable counterpart.
+
+**View**: paginated component list. Each row: canonical_name, display_name, type (with mesh icon mirroring Graph palette), plane pills, owner SME (link), attribution count, edge count (broken into bound/catalog/dangling). Click → drill-down panel with tabs Doc / Slice / Attributions / Edges / Flows / Resources.
+
+**Backend** — new endpoints:
+- `GET /api/components?type=&plane=&status=&q=&before=&limit=` — returns `{components: [{id, canonical_name, display_name, component_type, status, planes[], owner_sme_id, attribution_count, edge_count: {bound, catalog, dangling}}], has_more}`. Default sort: canonical_name ASC. `q` LIKE-matches canonical_name + display_name + metadata.
+- `GET /api/component/:id/drilldown` — returns `{component, attributions: [...], edges: {bound_in, bound_out, catalog, dangling_out}, flows: [...], resources: [...]}`. One round-trip, lazy-loaded only when drill-down is opened.
+
+**Frontend**: `catalogView` module. Filter bar (type, plane, status, search). Lazy-load drill-down on row click. Tab navigation inside the drill-down panel mirrors Graph's sidebar tabs for consistency.
+
+**Files touched:** `src/admin_ui/server.py` (new endpoints), `src/admin_ui/static/index.html` (new tab), `src/admin_ui/static/app.js` (catalogView), `src/admin_ui/static/style.css`.
+
+**Tests:** `tests/admin_ui/test_catalog_endpoint.py` (~6: empty, type filter, plane filter, q search, pagination, drilldown shape).
+
+**Effort:** M.
+
+### 5.4 Sidebar agent search by component name + broadcast persistence pill
+
+**Sidebar agent search**: today's predicate filters `agent_id`. Extend to also match `component_canonical` + `component_display` (already in the `/api/agents` payload from Phase 4). Pure FE change, ~5 lines:
+```js
+const matches = q => a =>
+  a.agent_id.toLowerCase().includes(q) ||
+  (a.component_canonical || '').toLowerCase().includes(q) ||
+  (a.component_display  || '').toLowerCase().includes(q);
+```
+
+**Multi-component edge case (deferred)**: post-merge an SME may own multiple active components historically (1-active-component invariant ensures one *current*, but list_components_for_agent could return more if we extend RCA shape). When that becomes high-traffic, switch `/api/agents` to `array_agg(component_*)` and update the FE filter to scan arrays. Flagged, not implemented now.
+
+**Broadcast persistence pill**: render 📌 on persistent broadcast rows in the Communications tab. Backend already returns `is_persistent` on `/api/communications`; FE just needs the badge.
+
+**Files touched:** `src/admin_ui/static/app.js`, `src/admin_ui/static/style.css`.
+
+**Tests:** N/A (FE only).
+
+**Effort:** XS.
+
+### 5.5 Auto-ack on terminal communications
+
+**Problem**: when a task transitions to TC, a consolidation to D/F, or a clarification to CC, the announcing communication row stays unacked. Survivors / participants get re-notified for state they consider closed.
+
+**Fix at write site**: in `respond_task` / `respond_consolidation` / `review_consolidation` / `respond_clarification`, when the new state is terminal for the recipient role, stamp `acked_at = now()` on the freshly inserted communication row in the same transaction.
+
+Terminal-for-recipient mapping:
+- `tasks`: TC closes both worker + owner; auto-ack the comm sent to the non-actor.
+- `consolidations`: D / F close both agents + resolver; auto-ack the comms sent to non-actors.
+- `clarifications`: CC closes both asker + responder; auto-ack the comm sent to non-actor.
+
+**Why write-site over scanner**: scanner approach would have to re-scan terminal entities continually. Write-site is one INSERT that knows what just transitioned and can pre-stamp the ack.
+
+**Files touched:** `src/cartograph_mcp/tools/{tasks,consolidation,clarification}.py`.
+
+**Tests:** ~6 new — one per (tool, terminal-transition) combo verifying the comm row is created with `acked_at` set.
+
+**Effort:** S.
+
+### 5.6 Per-message confidence stamping on consolidation responses
+
+**Pattern**: same as the existing `metadata.state_transition = {from, to}` already stamped on `respond_consolidation` — add one more JSONB key.
+
+**Stamp at three write sites** in `tools/consolidation.py`:
+- `nominate_consolidation` → `metadata.confidence_at_send = {a: <a_conf_score>, b: null, r: null}`
+- `respond_consolidation` → `metadata.confidence_at_send = {a, b, r}` reflecting all three scores AS OF after this write.
+- `review_consolidation` → same shape after `r_conf_score` is updated.
+
+The `consolidations` row stays the single source of truth for current scores; the `communications` thread carries the immutable timeline.
+
+**Admin UI** consumes this for inline score pills on every thread message + a confidence sparkline at the top of the consolidation drill-down panel.
+
+**Files touched:** `src/cartograph_mcp/tools/consolidation.py`, `src/admin_ui/static/app.js` (consolidation detail renderer).
+
+**Tests:** 3 new — one per write site, asserting `metadata.confidence_at_send` keys + values match the consolidation row state after the call.
+
+**Effort:** XS.
+
+### 5.7 Toggle broadcast persistence post-send
+
+**Problem**: today `is_persistent` is set at send time. Admin sometimes realises after sending that a "quick fix" is actually a standing policy (or vice versa).
+
+**Tool**: `update_broadcast_persistence(agent_id, communication_id, persistent)` — admin/orchestrator only. Single UPDATE. Refuses on non-broadcast rows.
+
+**Admin UI**: 📌 toggle button inline on broadcast rows in the Communications tab. POST `/api/broadcast/:id/persistence` with `{persistent: bool}`.
+
+**Semantic**: toggling OFF leaves existing reads alone (already-acked agents stay acked); only future scanner reads / new agents change behaviour. Toggling ON makes the broadcast visible to future-spawned agents. No retroactive re-notification.
+
+**Files touched:** `src/cartograph_mcp/tools/broadcast.py`, `src/cartograph_mcp/server.py`, `src/admin_ui/server.py`, `src/admin_ui/static/app.js`.
+
+**Tests:** 4 new — toggle ON, toggle OFF, refuses non-broadcast, refuses non-admin.
+
+**Effort:** S.
+
+### 5.8 Verify + fix admin chat wakes from sleep
+
+**Reported**: admin chat to a sleeping agent doesn't wake the agent — but `send_chat` already clears `sleep_until` when `from_agent='admin'` (Phase 2.5).
+
+**Likely root cause**: the admin UI `POST /api/chat/:agent_id` endpoint writes directly to `communications` via `shared/db.py` (per HLD §10.3 — "direct DB access, not MCP"), bypassing the wake side-effect that lives inside `send_chat`.
+
+**Investigation**: `git grep "POST /api/chat" + read the endpoint`. If confirmed, fix at the FastAPI endpoint:
+```python
+# After INSERT into communications, also clear sleep_until.
+execute_mutate(
+  "UPDATE agent_runs SET sleep_until = NULL "
+  "WHERE agent_id = %s AND sleep_until IS NOT NULL",
+  (agent_id,),
+)
+```
+
+**Tests:** 2 new — admin UI chat to sleeping agent clears `sleep_until`; admin UI chat to awake agent leaves it alone.
+
+**Effort:** XS.
+
+### 5.9 `record_insight` MCP tool + agent_insights table + admin UI triage
+
+**Schema** — new table:
+```sql
+CREATE TABLE agent_insights (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id      TEXT NOT NULL REFERENCES agent_runs(agent_id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN (
+                  'prompt_gap',     -- something missing or confusing in the prompt
+                  'tactic_win',     -- I found a smart way to do X
+                  'tool_gap',       -- I needed a tool that doesn't exist
+                  'doc_confusing',  -- on-disk doc was misleading
+                  'workflow_friction' -- the multi-step dance is awkward
+                )),
+  target        TEXT NOT NULL,    -- what this is about: 'sme.materialisation', 'transfer_edges', 'TRIGGER-MANAGEMENT.md §1.1b'
+  body          TEXT NOT NULL,    -- the insight itself
+  evidence      JSONB,            -- {task_ids, comm_ids, file_paths} optional
+  status        TEXT NOT NULL DEFAULT 'open' CHECK (status IN (
+                  'open', 'investigating', 'promoted', 'wontfix'
+                )),
+  triaged_by    TEXT,             -- admin agent_id when status moves off 'open'
+  triaged_at    TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_insights_agent  ON agent_insights(agent_id);
+CREATE INDEX idx_insights_status ON agent_insights(status);
+CREATE INDEX idx_insights_target ON agent_insights(target);
+```
+
+**MCP tool** (open to all active agents):
+```
+record_insight(agent_id, kind, target, body, evidence?)
+  Inserts an open insight. Returns {id}.
+```
+
+**Agent prompts** — append to all four agent types:
+> If you discover a smart tactic, hit a prompt gap, miss a tool you wish existed, or find an on-disk doc misleading, call `record_insight(...)` with the relevant `kind` + `target`. Be specific in `body` and link evidence (task ids, file paths) where possible. Don't over-report — one insight per genuinely-new finding, not every mild irritation.
+
+**Admin UI** — new tab "Insights" or fold into a new "Meta" / "Ops" tab. Listable + filterable by `kind` / `target` / `status` / `agent_id`. Each row has triage actions: "promoted to prompt", "investigating", "wontfix", with a notes field.
+
+**Files touched:** `src/shared/migrations.py`, `src/cartograph_mcp/tools/insights.py` (new), `src/cartograph_mcp/server.py`, `src/agent_management/agent_types/{orchestrator,iterator,sme,resolver}.py`, `src/admin_ui/server.py`, `src/admin_ui/static/{index.html,app.js,style.css}`.
+
+**Tests:** ~6 — record happy path, kind validation, requires active agent, list endpoint with filters, triage UPDATE, prompt smoke test (each agent type prompt formats clean).
+
+**Effort:** M.
+
+### 5.10 MCP tool decorator audit (`mcp_audit` table)
+
+**Goal**: cheap blanket audit of every MCP tool call. Foundation for debugging + future replay.
+
+**Schema** (partitioned by week):
+```sql
+CREATE TABLE mcp_audit (
+  id           BIGSERIAL,
+  agent_id     TEXT NOT NULL,
+  tool_name    TEXT NOT NULL,
+  args_hash    TEXT NOT NULL,       -- sha1 of canonicalised args; full args NOT stored
+  result_status TEXT NOT NULL,      -- 'ok' | 'error'
+  error_msg    TEXT,                -- on error only
+  duration_ms  INT NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+-- Initial partition; rotation managed by a tiny weekly cron.
+```
+
+**Decorator** in `cartograph_mcp/server.py`:
+```python
+def audited(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        agent_id = kwargs.get('agent_id') or (args[0] if args else 'unknown')
+        t0 = time.monotonic()
+        try:
+            result = fn(*args, **kwargs)
+            _record_audit(agent_id, fn.__name__, args, kwargs, 'ok', None, t0)
+            return result
+        except Exception as e:
+            _record_audit(agent_id, fn.__name__, args, kwargs, 'error', repr(e)[:500], t0)
+            raise
+    return wrapper
+```
+
+Applied at the `@mcp.tool` registration site so it wraps every tool uniformly.
+
+**args_hash, not full payload**: keeps row size bounded. Audit answers "agent X called Y at time T and got result Z" not "what exactly did they pass." Investigations that need payloads have the underlying `tasks` / `communications` / etc. tables.
+
+**Retention**: 30 days. Tiny script `src/admin_ui/audit_rotate.py` drops partitions older than 4 weeks. Run from a daily cron or manually.
+
+**Admin UI** — per-agent activity timeline view inside the existing agent detail (Chat tab). "Last 24h: 47 tool calls, 2 errors. Most-used: get_action_items_summary (12), respond_task (8), ..."
+
+**Files touched:** `src/shared/migrations.py`, `src/cartograph_mcp/server.py` (decorator + apply to every `@mcp.tool`), `src/admin_ui/server.py` (timeline endpoint), `src/admin_ui/static/app.js`, `src/admin_ui/audit_rotate.py` (new).
+
+**Tests:** ~5 — decorator records on success, decorator records on exception, args_hash stable across equivalent calls, error_msg populated, timeline endpoint groups correctly.
+
+**Effort:** M.
+
+### 5.11 Doc + memory sync
+
+Update all six docs + memory to reflect Phase 5 surface:
+- **HLD.md** §2 (tool table — add `record_insight`, `update_broadcast_persistence`), §10 (admin UI — Entities + Catalog tabs, URL scheme, sidebar component-search, broadcast persistence pill), §10.1 (new API endpoints), §11 (move "list-view tab" out of future scope).
+- **SCHEMA.md** — `agent_insights` + `mcp_audit` tables, `communications.metadata.confidence_at_send` documented under category 4.
+- **TRIGGER-MANAGEMENT.md** §3 — add `record_insight` + `update_broadcast_persistence` to Act tools.
+- **AGENT-PROMPTS.md** §0 (mention insights channel) + per-type prompts (insight rule).
+- **IMPLEMENTATION-PHASES.md** — mark Phase 5 shipped with sub-commits + final test count.
+- **ONE-PAGER.md** — likely no change (high-level pitch); verify still accurate.
+- **memory/cartograph_state.md** — append Phase 5 summary.
+
+**Effort:** M.
+
+### 5.12 Ordering + commit cadence
+
+```
+5.1  routing foundation                     ← independent, ship FIRST (unblocks UI work)
+  │
+  ├─ 5.2  entities tab                      ← uses 5.1 router
+  └─ 5.3  catalog tab                       ← uses 5.1 router
+
+5.4  sidebar component-search + persistence pill   ← independent, can land anywhere after 5.1
+5.5  auto-ack terminal comms                       ← independent
+5.6  per-message confidence                        ← independent
+5.7  toggle broadcast persistence                  ← independent (UI button needs 5.4 / 5.1 ideally)
+5.8  admin-chat-wakes-from-sleep fix               ← independent
+5.9  record_insight                                ← independent
+5.10 mcp_audit decorator                           ← independent (defer until end of phase to capture all the new tools we added)
+5.11 doc + memory sync                             ← LAST
+```
+
+Each sub-phase = its own commit + push. Final `5.11` is a single doc-sync commit.
+
+### 5.13 Test budget
+
+| Sub-phase | New tests |
+|-----------|-----------|
+| 5.1 | 0 (FE only; manual) |
+| 5.2 | 6 |
+| 5.3 | 6 |
+| 5.4 | 0 (FE only) |
+| 5.5 | 6 |
+| 5.6 | 3 |
+| 5.7 | 4 |
+| 5.8 | 2 |
+| 5.9 | 6 |
+| 5.10 | 5 |
+
+Total: ~38 new. Target final count: ~421 (from 383).
+
+---
+
+## Phase 6+: Future phases (planned, not started)
+
+**Phase 6 — Phase-flow completion** (orchestrator-driven sweeps):
+- **Resolution phase orchestration** — wake config-SMEs to resolve `unresolved` table rows; re-run cosine ladder against now-consolidated component registry.
+- **Edge Discovery phase orchestration** — dedicated bidirectional-validation pass + telemetry trace edge injection.
+- **User Feedback phase** — admin UI workflows for "merge these two" / "missed this" / "this doesn't exist anymore" → orchestrator routes to the right SME(s).
+
+**Phase 7 — Observability + cost controls** (HLD §11):
+- Dashboard on `agent_runs`: token usage, phase progress, unresolved count, blocker count, B1/B2/R/M/MD/D/F counts.
+- `max_turns` per agent per phase, embedding budget caps, consolidation max-rounds.
+
+**Phase 8 — DM between agents** (HLD §11.2):
+- Lighter-weight than consolidation for one-off SME↔SME clarifications.
+
+**Phase 9 — Knowledge pool** (HLD §11.3):
+- Shared facts table any agent can read/write ("all dream11 services use `{service}.dream11.local`").
+
+---
+
+## Open chores (do alongside any phase)
+
+- **DEMO41 metadata purge** (`DELETE WHERE metadata->>'demo41'='true'`) — awaiting explicit say-so.
+- **DEMO41 adversarial tests** — scope-gating (#26-28), stale hygiene (#29-30), admin UI HTTP (#33-35).
+- **AGENT-PROMPTS.md §9 deferred** — evidence quality guidelines + per-type negative instruction sets.
+
+---
+
+## Parked indefinitely
+
+- Communications-tab "via `<survivor>`" badge fix on broadcast rows — DO NOT TOUCH without explicit say-so.
+
+---
+
 ## Validation Rules (enforced in ALL phases)
 
 ### Universal
