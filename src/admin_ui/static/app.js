@@ -3533,7 +3533,7 @@ async function initOrRefreshGlobe() {
     globeInstance = ForceGraph3D()(canvas)
       .backgroundColor('#050505')
       .nodeLabel(n => `${n.name} (${n.type})`)
-      .nodeThreeObject(makeNodeMesh)
+      .nodeThreeObject(_globeNodeMesh)
       .nodeThreeObjectExtend(false)
       // Phase 6.2: custom edge geometry. linkThreeObject builds the
       // line; linkPositionUpdate refills its buffer per frame from the
@@ -3592,10 +3592,14 @@ async function initOrRefreshGlobe() {
         if (n.isJunction || n.isStub) continue;
         _projectToSphere(n, globeRadius);
       }
-      // 2. Junction pinning: place each junction on the sphere surface,
-      // at the great-circle point along the (target → callers' centroid)
-      // direction, ε past the target. Same "just outside the target"
-      // semantic the Graph view has, adapted for the sphere.
+      // 2. Junction pinning: place each junction visibly OUT from
+      // its target so the bundle reads as a real convergence point,
+      // not "just edges to the same node". Position is on the sphere
+      // surface, stepped along the (target → callers' centroid)
+      // direction, then re-projected to radius. Step is now ~22%
+      // of R (was 6% — too close, looked like spaghetti). Trunk is
+      // long enough that contributors clearly merge at one point
+      // before the trunk continues to the target.
       for (const n of gd.nodes) {
         if (!n.isJunction) continue;
         const target = byId[n.junctionTargetId];
@@ -3607,12 +3611,9 @@ async function initOrRefreshGlobe() {
         }
         if (count === 0) continue;
         cx /= count; cy /= count; cz /= count;
-        // Direction from target toward callers' centroid.
         const dx = cx - target.x, dy = cy - target.y, dz = cz - target.z;
         const dlen = Math.hypot(dx, dy, dz) || 1;
-        // Step a small angle from target toward centroid, then re-project
-        // to the sphere surface.
-        const step = globeRadius * 0.06;
+        const step = globeRadius * 0.22;   // visibly out from the target
         let jx = target.x + (dx / dlen) * step;
         let jy = target.y + (dy / dlen) * step;
         let jz = target.z + (dz / dlen) * step;
@@ -3838,6 +3839,24 @@ function _refreshGlobeLinkVisuals() {
   }
 }
 
+function _globeNodeMesh(node) {
+  // Wraps Graph's makeNodeMesh. Junctions on the Globe are rendered
+  // ~5× their Graph size so they're visibly the bundling point at
+  // sphere distances (Graph uses 0.3 — invisible at R≈170).
+  const THREE = window.THREE;
+  if (!THREE) return makeNodeMesh(node);
+  if (node.isJunction) {
+    const geom = new THREE.OctahedronGeometry(2.5);
+    const mat = new THREE.MeshLambertMaterial({
+      color: '#94a3b8',
+      transparent: true,
+      opacity: 0.85,
+    });
+    return new THREE.Mesh(geom, mat);
+  }
+  return makeNodeMesh(node);
+}
+
 function _radialPoints(p1, p2) {
   // Straight-line interpolation — used for stub edges (anchor → "?")
   // which stick OFF the surface and shouldn't bend.
@@ -3891,19 +3910,12 @@ function _globeLinkObject(link) {
   const tube = new THREE.Mesh(geom, mat);
   tube.frustumCulled = false;
 
-  // Manual arrow-head cone at the link's target end. The library's
-  // own arrow renderer assumes a straight line and would point along
-  // the chord, missing the curve direction; this child cone follows
-  // our curve correctly each frame. Junction trunks are SHORT (just
-  // past the target along the callers' centroid direction); a
-  // full-size arrow at t=0.94 would clip into the target mesh, so we
-  // shrink it. Junction-in contributors have no arrow (the trunk's
-  // arrow represents the bundle).
+  // Manual arrow-head cone at the link's target end, following the
+  // actual curve tangent (the library's own arrows assume a straight
+  // chord and would float in space). Junction-in contributors have no
+  // arrow — the trunk's arrow represents the bundle.
   if (!link.isJunctionIn && !link.isStub) {
-    const isTrunk = !!link.isJunctionOut;
-    const arrowGeom = isTrunk
-      ? new THREE.ConeGeometry(1.4, 3.5, 10)   // smaller for short trunks
-      : new THREE.ConeGeometry(2.5, 6, 10);
+    const arrowGeom = new THREE.ConeGeometry(2.5, 6, 10);
     const arrowMat = new THREE.MeshBasicMaterial({
       color: _globeLinkColor(link),
       transparent: true,
@@ -3912,7 +3924,13 @@ function _globeLinkObject(link) {
     const arrow = new THREE.Mesh(arrowGeom, arrowMat);
     arrow.frustumCulled = false;
     arrow.userData._isArrow = true;
-    arrow.userData._arrowT = isTrunk ? 0.7 : 0.94;
+    arrow.userData._arrowT = 0.92;
+    // CRITICAL: child arrows must NOT participate in raycasting,
+    // otherwise Three.js (and 3d-force-graph's hover/click handlers)
+    // hit the cone first instead of the tube body, swallowing the
+    // event with no link reference. Empty raycast = invisible to
+    // the raycaster, fully visible visually.
+    arrow.raycast = () => {};
     tube.add(arrow);
   }
   return tube;
