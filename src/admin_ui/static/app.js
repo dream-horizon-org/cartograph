@@ -3571,6 +3571,11 @@ async function initOrRefreshGlobe() {
     // works on lit edges so cost is bounded.
     _startGlobeAnimLoop();
 
+    // 3-zone hover: canvas mousemove finds cursor's t along the
+    // hovered link's curve, classifies caller / target / convergence,
+    // glows the appropriate flow neighbours.
+    _wireGlobeMouseMove();
+
     // Force tuning: weaker charge so tangent forces dominate the
     // projection; long-ish link distance so the surface doesn't
     // collapse into one cluster.
@@ -4172,27 +4177,165 @@ function _globeEffectiveFlowIncomingsForEdge(edgeId) {
   return out;
 }
 
+// 3-zone hover. The cursor's position along the hovered link's curve
+// determines whether we're in:
+//   caller      (first ~33% — anchored at source end)
+//   middle      (33–66% — convergence zone for junctions)
+//   target      (last ~66–100% — anchored at target end)
+// Zone-specific glow:
+//   caller   → light up flows feeding into this edge (caller's incoming
+//              edges whose flow outgoing is this edge)
+//   target   → light up flows fired by this edge (callee's outgoing
+//              edges whose flow incoming is this edge or its catalog)
+//   middle   → at a junction: all bundle siblings + trunk converge here
+//              elsewhere: just the hovered edge
+let _globeLastHoveredLink = null;
+let _globeLastZone = null;
+
 function _globeHover(link) {
-  if (link) _globeDebug(`hover id=${link.id} type=${link.edge_type} ident=${link.identifier}`);
-  _globeHoverLitEdgeIds = new Set();
-  if (link) {
-    _globeHoverLitEdgeIds.add(link.id);
-    // Bundle-aware: hovering a junction trunk lights every bundled
-    // contributor; hovering a contributor lights the trunk + siblings.
+  // Library-level onLinkHover fires when cursor enters/leaves a link
+  // mesh. We capture the link here; the actual zone work happens in
+  // the canvas mousemove handler (which has cursor coords).
+  _globeLastHoveredLink = link;
+  if (!link) {
+    _globeLastZone = null;
+    if (_globeHoverLitEdgeIds.size > 0) {
+      _globeHoverLitEdgeIds = new Set();
+      _refreshGlobeLinkVisuals();
+    }
+  }
+}
+
+function _globeCursorZoneForLink(link, cursorX, cursorY, canvas, camera) {
+  // Project the link's stashed curve to screen space, find the sample
+  // closest to the cursor, return its t value.
+  const tube = link.__lineObj;
+  const curve = tube?.userData?._curve;
+  if (!curve) return null;
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  const SAMPLES = 24;
+  let bestT = 0, bestDist = Infinity;
+  for (let i = 0; i <= SAMPLES; i++) {
+    const t = i / SAMPLES;
+    const p = curve.getPoint(t).clone().project(camera);
+    const sx = (p.x + 1) * 0.5 * w;
+    const sy = (1 - p.y) * 0.5 * h;
+    const d = (sx - cursorX) ** 2 + (sy - cursorY) ** 2;
+    if (d < bestDist) { bestDist = d; bestT = t; }
+  }
+  return bestT;
+}
+
+function _globeZoneFromT(link, t) {
+  // Junction-aware: at a bundle, the middle third reads as
+  // "convergence" with junction-specific glow; outside that, normal
+  // caller / target split.
+  const isBundle = link.isJunctionIn || link.isJunctionOut;
+  if (isBundle && t >= 0.33 && t <= 0.66) return 'convergence';
+  if (t < 0.33) return 'caller';
+  if (t > 0.66) return 'target';
+  return 'middle';
+}
+
+function _globeHoverEdgeIdsForZone(link, zone) {
+  const ids = new Set();
+  ids.add(link.id);
+
+  if (zone === 'convergence') {
     if (link.isJunctionOut && link.groupEdgeIds) {
-      for (const id of link.groupEdgeIds) _globeHoverLitEdgeIds.add(id);
+      for (const id of link.groupEdgeIds) ids.add(id);
     } else if (link.isJunctionIn) {
       const meta = globeSnapshot.junctionOutById || {};
       for (const [outId, out] of Object.entries(meta)) {
         if (out.groupEdgeIds.includes(link.id)) {
-          _globeHoverLitEdgeIds.add(outId);
-          for (const id of out.groupEdgeIds) _globeHoverLitEdgeIds.add(id);
+          ids.add(outId);
+          for (const id of out.groupEdgeIds) ids.add(id);
           break;
         }
       }
     }
+    return ids;
   }
+
+  // For zone = 'caller': light up CALLER's incoming flows that have
+  // THIS edge as their outgoing. (Conceptually: "what feeds into this
+  // call?")
+  // For zone = 'target': light up CALLEE's outgoing flows that have
+  // THIS edge — or its bridging catalog — as their incoming.
+  // ("what does this call trigger downstream?")
+  const underlyingId = link.isJunctionOut
+    ? (link.groupEdgeIds?.[0])
+    : link.id;
+  const underlying = globeSnapshot.edgeById[underlyingId];
+  if (!underlying) return ids;
+
+  if (zone === 'caller') {
+    const callerId = underlying.source_id;
+    if (!callerId) return ids;
+    for (const f of globeSnapshot.flows) {
+      if (f.component_id !== callerId) continue;
+      if (f.outgoing_edge_id !== underlyingId) continue;
+      // The matching incoming is on the caller — light it up if it's
+      // a known edge in the snapshot.
+      ids.add(f.incoming_edge_id);
+    }
+  } else if (zone === 'target') {
+    const calleeId = underlying.target_id;
+    if (!calleeId) return ids;
+    // Catalog bridging: a bound edge "X calls Y at /z" is fired by Y's
+    // catalog "Y exposes /z"; flows on Y reference the catalog id.
+    const incomingIds = _globeEffectiveFlowIncomingsForEdge(underlyingId);
+    for (const f of globeSnapshot.flows) {
+      if (f.component_id !== calleeId) continue;
+      if (!incomingIds.includes(f.incoming_edge_id)) continue;
+      ids.add(f.outgoing_edge_id);
+    }
+  }
+  return ids;
+}
+
+function _globeApplyHover(cursorX, cursorY) {
+  if (!_globeLastHoveredLink) {
+    if (_globeHoverLitEdgeIds.size > 0) {
+      _globeHoverLitEdgeIds = new Set();
+      _refreshGlobeLinkVisuals();
+    }
+    _globeLastZone = null;
+    return;
+  }
+  const camera = globeInstance.camera();
+  const canvas = document.getElementById('globe-canvas');
+  const t = _globeCursorZoneForLink(_globeLastHoveredLink, cursorX, cursorY, canvas, camera);
+  if (t == null) return;
+  const zone = _globeZoneFromT(_globeLastHoveredLink, t);
+  if (zone === _globeLastZone && _globeHoverLitEdgeIds.size > 0) return;
+  _globeLastZone = zone;
+  const ids = _globeHoverEdgeIdsForZone(_globeLastHoveredLink, zone);
+  // Avoid redraw if the set is identical.
+  if (ids.size === _globeHoverLitEdgeIds.size
+      && [...ids].every(id => _globeHoverLitEdgeIds.has(id))) return;
+  _globeHoverLitEdgeIds = ids;
   _refreshGlobeLinkVisuals();
+}
+
+function _wireGlobeMouseMove() {
+  const canvas = document.getElementById('globe-canvas');
+  if (!canvas || canvas.dataset.hoverWired) return;
+  canvas.dataset.hoverWired = '1';
+  // The 3d-force-graph canvas is actually an inner <canvas> child;
+  // the hover events bubble up through #globe-canvas.
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    _globeApplyHover(e.clientX - rect.left, e.clientY - rect.top);
+  });
+  canvas.addEventListener('mouseleave', () => {
+    if (_globeHoverLitEdgeIds.size > 0) {
+      _globeHoverLitEdgeIds = new Set();
+      _globeLastZone = null;
+      _refreshGlobeLinkVisuals();
+    }
+  });
 }
 
 function _globeLightOfSight(link) {
