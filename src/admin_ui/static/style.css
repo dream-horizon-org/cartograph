@@ -1153,3 +1153,146 @@ body {
 
 #bcast-send { background: #238636; color: white; }
 #bcast-send:hover { background: #2ea043; }
+
+/* ============ Entities view (Phase 5.2) ============ */
+#entities-view.active {
+  display: grid;
+  grid-template-columns: 280px 1fr 420px;
+  grid-template-rows: minmax(0, 1fr);
+}
+#entities-filter, #entities-detail {
+  border-right: 1px solid #21262d; padding: 16px; overflow-y: auto;
+  background: #0d1117;
+}
+#entities-detail { border-right: none; border-left: 1px solid #21262d; }
+#entities-filter h2, #entities-detail h2 { margin: 0 0 12px; font-size: 14px; }
+#entities-filter label { display: block; margin-bottom: 12px; font-size: 12px; color: #8b949e; }
+#entities-filter select, #entities-filter input {
+  width: 100%; padding: 6px 8px; background: #161b22; color: #c9d1d9;
+  border: 1px solid #30363d; border-radius: 4px; font-size: 13px;
+}
+#entities-list-pane { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+#entities-list-pane > header {
+  padding: 12px 16px; border-bottom: 1px solid #21262d;
+  display: flex; align-items: baseline; gap: 12px;
+}
+#entities-list-pane > header h2 { margin: 0; font-size: 16px; }
+#ent-count { color: #8b949e; font-size: 12px; }
+#ent-items { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+.ent-row {
+  padding: 10px 16px; border-bottom: 1px solid #21262d; cursor: pointer;
+  transition: background 0.1s;
+}
+.ent-row:hover { background: #161b22; }
+.ent-row.selected { background: #1f2937; border-left: 3px solid #58a6ff; padding-left: 13px; }
+.ent-row-top {
+  display: flex; gap: 8px; align-items: center; margin-bottom: 4px;
+  font-size: 12px;
+}
+.ent-kind {
+  padding: 2px 6px; border-radius: 3px; font-weight: 600; font-size: 11px;
+  background: #30363d; color: #c9d1d9;
+}
+.ent-kind-task { background: #1f6feb; }
+.ent-kind-consolidation { background: #8957e5; }
+.ent-kind-clarification { background: #d2a8ff; color: #0d1117; }
+.ent-kind-broadcast { background: #d29922; color: #0d1117; }
+.ent-status { color: #8b949e; }
+.ent-ts { margin-left: auto; color: #6e7681; font-size: 11px; }
+.ent-summary { color: #c9d1d9; font-size: 13px; line-height: 1.4; }
+.ent-participants { color: #8b949e; font-size: 11px; margin-top: 4px; }
+.ent-detail-head {
+  display: grid; grid-template-columns: auto 1fr; gap: 4px 12px;
+  font-size: 12px; margin-bottom: 12px; color: #8b949e;
+}
+.ent-meta-table {
+  border-collapse: collapse; width: 100%; font-size: 12px;
+  margin-bottom: 16px;
+}
+.ent-meta-table th, .ent-meta-table td {
+  padding: 4px 8px; border-bottom: 1px solid #21262d; text-align: left;
+}
+.ent-meta-table th { color: #8b949e; font-weight: normal; width: 40%; }
+.ent-msg {
+  border: 1px solid #21262d; border-radius: 6px; padding: 8px;
+  margin-bottom: 8px;
+}
+.ent-msg-head {
+  display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px;
+  color: #8b949e; margin-bottom: 6px;
+}
+.ent-msg-body { font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+.state-pill, .conf-pill {
+  background: #30363d; color: #c9d1d9; padding: 1px 6px;
+  border-radius: 3px; font-size: 10px;
+}
+.conf-pill { background: #1f3a6e; }
+.ent-extras pre {
+  background: #161b22; padding: 8px; border-radius: 4px;
+  font-size: 11px; overflow-x: auto;
+}
+.filter-actions { display: flex; gap: 8px; margin-top: 12px; }
+.filter-actions button {
+  flex: 1; padding: 6px; cursor: pointer; border-radius: 4px;
+  background: #238636; color: white; border: none; font-size: 13px;
+}
+.filter-actions button.secondary { background: #21262d; color: #c9d1d9; }
+.checkbox-label { display: flex; align-items: center; gap: 8px; }
+.checkbox-label input { width: auto; }
+
+/* ============ Catalog view (Phase 5.3) ============ */
+#catalog-view.active {
+  display: grid;
+  grid-template-columns: 280px 1fr 480px;
+  grid-template-rows: minmax(0, 1fr);
+}
+#catalog-filter, #catalog-detail {
+  border-right: 1px solid #21262d; padding: 16px; overflow-y: auto;
+  background: #0d1117;
+}
+#catalog-detail { border-right: none; border-left: 1px solid #21262d; }
+#catalog-filter h2, #catalog-detail h2 { margin: 0 0 12px; font-size: 14px; }
+#catalog-filter label { display: block; margin-bottom: 12px; font-size: 12px; color: #8b949e; }
+#catalog-filter select, #catalog-filter input {
+  width: 100%; padding: 6px 8px; background: #161b22; color: #c9d1d9;
+  border: 1px solid #30363d; border-radius: 4px; font-size: 13px;
+}
+#catalog-list-pane { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+#catalog-list-pane > header {
+  padding: 12px 16px; border-bottom: 1px solid #21262d;
+  display: flex; align-items: baseline; gap: 12px;
+}
+#catalog-list-pane > header h2 { margin: 0; font-size: 16px; }
+#cat-count { color: #8b949e; font-size: 12px; }
+#cat-items { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+.cat-row {
+  padding: 10px 16px; border-bottom: 1px solid #21262d; cursor: pointer;
+  transition: background 0.1s;
+}
+.cat-row:hover { background: #161b22; }
+.cat-row.selected { background: #1f2937; border-left: 3px solid #58a6ff; padding-left: 13px; }
+.cat-row-top { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; }
+.cat-name { font-weight: 600; }
+.cat-type { color: #d2a8ff; font-size: 11px; }
+.cat-status { font-size: 11px; padding: 1px 4px; border-radius: 2px; }
+.status-active { background: #238636; color: white; }
+.status-decommissioned { background: #8b1538; color: white; }
+.cat-display { color: #8b949e; font-size: 12px; margin-bottom: 4px; }
+.cat-row-meta { font-size: 11px; color: #8b949e; display: flex; gap: 8px; flex-wrap: wrap; }
+.cat-row-meta .muted { color: #6e7681; }
+.plane-pill {
+  font-size: 10px; padding: 1px 4px; border-radius: 2px;
+  background: #30363d; color: #c9d1d9;
+}
+.plane-github    { background: #3fb950; color: #0d1117; }
+.plane-deploy    { background: #58a6ff; color: #0d1117; }
+.plane-cloud     { background: #f85149; color: white; }
+.plane-telemetry { background: #d2a8ff; color: #0d1117; }
+.plane-config    { background: #d29922; color: #0d1117; }
+.cat-doc { font-size: 13px; line-height: 1.5; }
+.cat-slice {
+  background: #161b22; padding: 8px; border-radius: 4px;
+  font-size: 11px; overflow-x: auto;
+}
+.cat-attrs { list-style: disc; padding-left: 20px; font-size: 12px; }
+.cat-attrs .muted { color: #6e7681; }

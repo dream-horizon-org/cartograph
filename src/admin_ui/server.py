@@ -401,6 +401,206 @@ def create_app() -> FastAPI:
         )
         return {"clarification": row, "thread": thread}
 
+    # --- ENTITIES VIEW (Phase 5.2) ---
+
+    _ENTITY_KINDS = {"task", "consolidation", "clarification", "broadcast"}
+    # Per-kind terminal-state set — drives the "open / closed" filter
+    # without forcing the FE to know each state machine's terminals.
+    _TERMINAL_BY_KIND = {
+        "task": {"TC"},
+        "consolidation": {"D", "F"},
+        "clarification": {"CC", "QR"},
+        "broadcast": set(),  # broadcasts have no terminal status
+    }
+
+    @app.get("/api/entities")
+    def list_entities(
+        kind: Optional[str] = Query(None),
+        status: Optional[str] = Query(None),
+        participant: Optional[str] = Query(None),
+        q: Optional[str] = Query(None),
+        open_only: bool = Query(False),
+        before: Optional[str] = Query(None),
+        limit: int = Query(50, ge=1, le=200),
+    ):
+        """Workflow-entity feed for the Entities tab.
+
+        Each row is one task / consolidation / clarification / broadcast,
+        normalised to a common shape so the FE can render a uniform list.
+        Filters AND together. Sort: most-recent activity first.
+        Cursor pagination via `before` (ISO timestamp on `last_activity`).
+        """
+        if kind is not None and kind not in _ENTITY_KINDS:
+            raise HTTPException(
+                400, f"Invalid kind (allowed: {sorted(_ENTITY_KINDS)})"
+            )
+
+        # Per-kind SELECTs, each producing the common columns:
+        # kind, id, status, participant_a, participant_b, summary, last_activity, extra
+        parts = []
+        params: list = []
+        if kind in (None, "task"):
+            parts.append(
+                "SELECT 'task' AS kind, t.id::text AS id, t.status, "
+                "       t.owner_agent_id AS participant_a, "
+                "       t.worker_agent_id AS participant_b, "
+                "       LEFT(t.description, 200) AS summary, "
+                "       t.updated_at AS last_activity, "
+                "       jsonb_build_object('blocker_detail', t.blocker_detail) AS extra "
+                "FROM tasks t"
+            )
+        if kind in (None, "consolidation"):
+            parts.append(
+                "SELECT 'consolidation' AS kind, c.id::text AS id, c.status, "
+                "       c.agent_a_id AS participant_a, "
+                "       c.agent_b_id AS participant_b, "
+                "       (c.nomination_type || ' ' || c.component_a_id::text) AS summary, "
+                "       c.updated_at AS last_activity, "
+                "       jsonb_build_object("
+                "         'nomination_type', c.nomination_type, "
+                "         'component_a_id', c.component_a_id, "
+                "         'component_b_id', c.component_b_id, "
+                "         'a_conf', c.a_conf_score, "
+                "         'b_conf', c.b_conf_score, "
+                "         'r_conf', c.r_conf_score, "
+                "         'mutation_assigned_to', c.mutation_assigned_to "
+                "       ) AS extra "
+                "FROM consolidations c"
+            )
+        if kind in (None, "clarification"):
+            parts.append(
+                "SELECT 'clarification' AS kind, cl.id::text AS id, cl.status, "
+                "       cl.asker_agent_id AS participant_a, "
+                "       cl.responder_agent_id AS participant_b, "
+                "       NULL AS summary, "
+                "       cl.updated_at AS last_activity, "
+                "       '{}'::jsonb AS extra "
+                "FROM clarifications cl"
+            )
+        if kind in (None, "broadcast"):
+            parts.append(
+                "SELECT 'broadcast' AS kind, b.id::text AS id, "
+                "       CASE WHEN b.is_persistent THEN 'persistent' "
+                "            ELSE 'forward-only' END AS status, "
+                "       b.from_agent AS participant_a, "
+                "       b.to_agent_type AS participant_b, "
+                "       LEFT(b.text, 200) AS summary, "
+                "       b.created_at AS last_activity, "
+                "       jsonb_build_object('is_persistent', b.is_persistent) AS extra "
+                "FROM communications b WHERE b.type = 'broadcast'"
+            )
+
+        union_sql = " UNION ALL ".join(parts)
+        # Outer filters (status / participant / q / open_only / before).
+        outer_where = []
+        if status:
+            outer_where.append("status = %s")
+            params.append(status)
+        if open_only:
+            # Build NOT-terminal conditions per-kind. If kind is filtered,
+            # use only that kind's terminals; otherwise OR across all.
+            if kind:
+                terminals = _TERMINAL_BY_KIND.get(kind, set())
+                if terminals:
+                    placeholder = ", ".join(["%s"] * len(terminals))
+                    outer_where.append(f"status NOT IN ({placeholder})")
+                    params.extend(terminals)
+            else:
+                # Compose: NOT (kind=K AND status IN (terminals_K)) per kind
+                clauses = []
+                for k, terms in _TERMINAL_BY_KIND.items():
+                    if not terms:
+                        continue
+                    placeholder = ", ".join(["%s"] * len(terms))
+                    clauses.append(
+                        f"NOT (kind = %s AND status IN ({placeholder}))"
+                    )
+                    params.append(k)
+                    params.extend(terms)
+                if clauses:
+                    outer_where.append("(" + " AND ".join(clauses) + ")")
+        if participant:
+            outer_where.append(
+                "(participant_a = %s OR participant_b = %s)"
+            )
+            params.extend([participant, participant])
+        if q:
+            outer_where.append("summary ILIKE %s")
+            params.append(f"%{q}%")
+        if before:
+            outer_where.append("last_activity < %s")
+            params.append(before)
+        outer_sql = (
+            " WHERE " + " AND ".join(outer_where)
+        ) if outer_where else ""
+
+        rows = execute(
+            f"SELECT * FROM ({union_sql}) AS e{outer_sql} "
+            f"ORDER BY last_activity DESC NULLS LAST LIMIT %s",
+            params + [limit + 1],
+        )
+        has_more = len(rows) > limit
+        return {"entities": rows[:limit], "has_more": has_more}
+
+    @app.get("/api/entity/{kind}/{entity_id}")
+    def get_entity_detail(kind: str, entity_id: str):
+        """Unified drill-down. Dispatches per-kind and normalises shape:
+        {kind, entity, thread, extras?}. Existing per-kind endpoints
+        (/api/task/:id etc.) stay as-is for backwards compatibility."""
+        if kind not in _ENTITY_KINDS:
+            raise HTTPException(400, f"Invalid kind: {kind}")
+        if kind == "task":
+            t = execute_one("SELECT * FROM tasks WHERE id = %s::uuid", (entity_id,))
+            if t is None:
+                raise HTTPException(404, "Task not found")
+            thread = execute(
+                "SELECT * FROM communications WHERE type = 'task' "
+                "AND source_id = %s::uuid ORDER BY created_at",
+                (entity_id,),
+            )
+            return {"kind": "task", "entity": t, "thread": thread}
+        if kind == "consolidation":
+            c = execute_one(
+                "SELECT * FROM consolidations WHERE id = %s::uuid",
+                (entity_id,),
+            )
+            if c is None:
+                raise HTTPException(404, "Consolidation not found")
+            thread = execute(
+                "SELECT * FROM communications WHERE type = 'consolidation' "
+                "AND source_id = %s::uuid ORDER BY created_at",
+                (entity_id,),
+            )
+            return {"kind": "consolidation", "entity": c, "thread": thread}
+        if kind == "clarification":
+            cl = execute_one(
+                "SELECT * FROM clarifications WHERE id = %s::uuid",
+                (entity_id,),
+            )
+            if cl is None:
+                raise HTTPException(404, "Clarification not found")
+            thread = execute(
+                "SELECT * FROM communications WHERE type = 'clarification' "
+                "AND source_id = %s::uuid ORDER BY created_at",
+                (entity_id,),
+            )
+            return {"kind": "clarification", "entity": cl, "thread": thread}
+        if kind == "broadcast":
+            b = execute_one(
+                "SELECT * FROM communications WHERE id = %s::uuid "
+                "AND type = 'broadcast'",
+                (entity_id,),
+            )
+            if b is None:
+                raise HTTPException(404, "Broadcast not found")
+            acks = execute(
+                "SELECT * FROM broadcast_acks WHERE communication_id = %s::uuid "
+                "ORDER BY acked_at",
+                (entity_id,),
+            )
+            return {"kind": "broadcast", "entity": b, "thread": [], "extras": {"acks": acks}}
+        raise HTTPException(400, f"Unsupported kind: {kind}")  # unreachable
+
     # --- GRAPH VIEW (Phase 3.5) ---
 
     @app.get("/api/graph")

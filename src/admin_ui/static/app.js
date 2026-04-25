@@ -692,8 +692,12 @@ function switchTab(name) {
     b.classList.toggle('active', b.dataset.tab === name));
   document.getElementById('chat-view').classList.toggle('active', name === 'chat');
   document.getElementById('comms-view').classList.toggle('active', name === 'comms');
+  document.getElementById('entities-view').classList.toggle('active', name === 'entities');
+  document.getElementById('catalog-view').classList.toggle('active', name === 'catalog');
   document.getElementById('graph-view').classList.toggle('active', name === 'graph');
   if (name === 'comms') fetchCommunications();
+  if (name === 'entities') fetchEntities();
+  if (name === 'catalog') fetchCatalog();
   if (name === 'graph') initOrRefreshGraph();
   // Phase 5.1: push URL when the tab change came from a click/code path,
   // not from a routechange that already advanced the URL.
@@ -2621,4 +2625,390 @@ document.getElementById('graph-refresh')?.addEventListener('click', _attachHover
 // Also wire when the Graph tab becomes active (first reveal).
 document.querySelector('.tab[data-tab="graph"]')?.addEventListener('click', () => {
   setTimeout(wireEdgeHoverZones, 300);  // after initOrRefreshGraph resolves
+});
+
+
+// ================================================================
+// Phase 5.2: Entities tab — workflow-entity browser
+// ================================================================
+//
+// Lists every task / consolidation / clarification / broadcast in one
+// view. Filters: kind, status, participant, search, open-only. Click a
+// row → drill-down panel with full thread (or ack roster for
+// broadcasts).
+
+const entitiesState = {
+  rows: [],
+  hasMore: false,
+  selectedKind: null,
+  selectedId: null,
+};
+
+const _STATUS_OPTIONS_BY_KIND = {
+  '':              [],   // all kinds → no specific list
+  'task':          ['BW', 'BO', 'WD', 'TC'],
+  'consolidation': ['B1', 'B2', 'R', 'M', 'MD', 'D', 'F'],
+  'clarification': ['B1', 'B2', 'QR', 'QC', 'CC'],
+  'broadcast':     ['persistent', 'forward-only'],
+};
+
+function _populateStatusOptions(kind) {
+  const sel = document.getElementById('ent-status');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All</option>';
+  (_STATUS_OPTIONS_BY_KIND[kind] || []).forEach(s => {
+    const o = document.createElement('option');
+    o.value = s; o.textContent = s;
+    sel.appendChild(o);
+  });
+  // Preserve previous selection if still valid.
+  if (current && (_STATUS_OPTIONS_BY_KIND[kind] || []).includes(current)) {
+    sel.value = current;
+  } else {
+    sel.value = '';
+  }
+}
+
+function _readEntityFiltersFromUrl() {
+  const q = Router.current().query;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+  const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v === 'true'; };
+  setVal('ent-kind', q.kind);
+  _populateStatusOptions(q.kind || '');
+  setVal('ent-status', q.status);
+  setChk('ent-open-only', q.open_only);
+  setVal('ent-participant', q.participant);
+  setVal('ent-q', q.q);
+}
+
+function _writeEntityFiltersToUrl() {
+  const get = id => (document.getElementById(id) || {}).value || '';
+  const chk = id => (document.getElementById(id) || {}).checked;
+  Router.navigate('/entities', {
+    set: {
+      kind: get('ent-kind'),
+      status: get('ent-status'),
+      open_only: chk('ent-open-only') ? 'true' : '',
+      participant: get('ent-participant'),
+      q: get('ent-q'),
+    },
+  });
+}
+
+async function fetchEntities() {
+  _readEntityFiltersFromUrl();
+  const q = Router.current().query;
+  const params = new URLSearchParams();
+  ['kind', 'status', 'participant', 'q'].forEach(k => {
+    if (q[k]) params.set(k, q[k]);
+  });
+  if (q.open_only === 'true') params.set('open_only', 'true');
+  params.set('limit', '100');
+  try {
+    const res = await fetch(`/api/entities?${params}`);
+    const data = await res.json();
+    entitiesState.rows = data.entities || [];
+    entitiesState.hasMore = data.has_more;
+    renderEntities();
+  } catch (e) {
+    console.error('fetchEntities failed:', e);
+    document.getElementById('ent-items').innerHTML =
+      '<li class="empty">Failed to load entities.</li>';
+  }
+  // If URL pointed at a specific entity, render its drill-down.
+  const segs = Router.current().segments;
+  if (segs[0] === 'entities' && segs[1] && segs[2]) {
+    showEntityDetail(segs[1], segs[2]);
+  }
+}
+
+function renderEntities() {
+  const $items = document.getElementById('ent-items');
+  const $count = document.getElementById('ent-count');
+  $count.textContent = `${entitiesState.rows.length}${entitiesState.hasMore ? '+' : ''}`;
+  if (!entitiesState.rows.length) {
+    $items.innerHTML = '<li class="empty">No entities match the filters.</li>';
+    return;
+  }
+  $items.innerHTML = '';
+  for (const e of entitiesState.rows) {
+    const li = document.createElement('li');
+    li.className = 'ent-row';
+    li.dataset.kind = e.kind;
+    li.dataset.id = e.id;
+    if (entitiesState.selectedKind === e.kind &&
+        entitiesState.selectedId === e.id) {
+      li.classList.add('selected');
+    }
+    const ts = e.last_activity ? new Date(e.last_activity).toLocaleString() : '';
+    const summaryText = (e.summary || '').slice(0, 140) || '(no summary)';
+    const part = [e.participant_a, e.participant_b]
+      .filter(Boolean).join(' ↔ ');
+    li.innerHTML = `
+      <div class="ent-row-top">
+        <span class="ent-kind ent-kind-${e.kind}">${e.kind}</span>
+        <span class="ent-status">${e.status || ''}</span>
+        <span class="ent-ts">${ts}</span>
+      </div>
+      <div class="ent-summary">${escapeHtml(summaryText)}</div>
+      <div class="ent-participants">${escapeHtml(part)}</div>
+    `;
+    li.addEventListener('click', () => {
+      Router.navigate(`/entities/${e.kind}/${e.id}`);
+    });
+    $items.appendChild(li);
+  }
+}
+
+async function showEntityDetail(kind, entityId) {
+  entitiesState.selectedKind = kind;
+  entitiesState.selectedId = entityId;
+  renderEntities();   // refresh selected highlight
+  const $title = document.getElementById('ent-detail-title');
+  const $body = document.getElementById('ent-detail-body');
+  $title.textContent = `${kind} · ${entityId.slice(0, 8)}…`;
+  $body.innerHTML = '<p class="empty">Loading…</p>';
+  try {
+    const res = await fetch(`/api/entity/${kind}/${encodeURIComponent(entityId)}`);
+    if (!res.ok) {
+      $body.innerHTML = `<p class="empty">Not found (${res.status}).</p>`;
+      return;
+    }
+    const data = await res.json();
+    $body.innerHTML = _renderEntityDetailHtml(data);
+  } catch (e) {
+    console.error('showEntityDetail failed:', e);
+    $body.innerHTML = '<p class="empty">Failed to load.</p>';
+  }
+}
+
+function _renderEntityDetailHtml(data) {
+  const { kind, entity, thread = [], extras } = data;
+  const head = `<div class="ent-detail-head">
+    <div><b>kind</b> ${kind}</div>
+    <div><b>id</b> <code>${entity.id || ''}</code></div>
+    <div><b>status</b> ${entity.status || ''}</div>
+  </div>`;
+  let metaRows = '';
+  for (const [k, v] of Object.entries(entity)) {
+    if (['id', 'status', 'text'].includes(k)) continue;
+    if (v == null || v === '') continue;
+    const valStr = (typeof v === 'object') ? JSON.stringify(v) : String(v);
+    metaRows += `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(valStr.slice(0, 400))}</td></tr>`;
+  }
+  const meta = metaRows ? `<table class="ent-meta-table">${metaRows}</table>` : '';
+  const threadHtml = thread.length
+    ? thread.map(m => {
+        const stateTrans = m.metadata && m.metadata.state_transition;
+        const conf = m.metadata && m.metadata.confidence_at_send;
+        return `<div class="ent-msg">
+          <div class="ent-msg-head">
+            <span><b>${escapeHtml(m.from_agent || '')}</b>
+              → ${escapeHtml(m.to_agent || m.to_agent_type || '')}</span>
+            <span>${new Date(m.created_at).toLocaleString()}</span>
+            ${stateTrans ? `<span class="state-pill">${stateTrans.from} → ${stateTrans.to}</span>` : ''}
+            ${conf ? `<span class="conf-pill" title="confidence at send">a:${conf.a ?? '–'} b:${conf.b ?? '–'} r:${conf.r ?? '–'}</span>` : ''}
+          </div>
+          <div class="ent-msg-body">${escapeHtml(m.text || '')}</div>
+        </div>`;
+      }).join('')
+    : '<p class="empty">No thread messages yet.</p>';
+  const extrasHtml = extras
+    ? `<div class="ent-extras"><h3>Extras</h3><pre>${escapeHtml(JSON.stringify(extras, null, 2))}</pre></div>`
+    : '';
+  return head + meta + '<h3>Thread</h3>' + threadHtml + extrasHtml;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+// Wire entity-tab UI events.
+document.getElementById('ent-apply')?.addEventListener('click', _writeEntityFiltersToUrl);
+document.getElementById('ent-reset')?.addEventListener('click', () => {
+  Router.navigate('/entities', { clear: ['kind', 'status', 'participant', 'q', 'open_only'] });
+});
+document.getElementById('ent-kind')?.addEventListener('change', e => {
+  _populateStatusOptions(e.target.value);
+});
+document.getElementById('ent-detail-close')?.addEventListener('click', () => {
+  Router.navigate('/entities');
+});
+
+
+// ================================================================
+// Phase 5.3: Catalog tab — components browser + drill-down
+// ================================================================
+
+const catalogState = {
+  rows: [],
+  hasMore: false,
+  selectedId: null,
+};
+
+function _readCatalogFiltersFromUrl() {
+  const q = Router.current().query;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+  setVal('cat-type', q.type);
+  setVal('cat-plane', q.plane);
+  setVal('cat-status', q.status === undefined ? 'active' : q.status);
+  setVal('cat-q', q.q);
+}
+
+function _writeCatalogFiltersToUrl() {
+  const get = id => (document.getElementById(id) || {}).value || '';
+  Router.navigate('/catalog', {
+    set: {
+      type: get('cat-type'),
+      plane: get('cat-plane'),
+      status: get('cat-status'),
+      q: get('cat-q'),
+    },
+  });
+}
+
+async function fetchCatalog() {
+  _readCatalogFiltersFromUrl();
+  const q = Router.current().query;
+  const params = new URLSearchParams();
+  ['type', 'plane', 'q'].forEach(k => { if (q[k]) params.set(k, q[k]); });
+  // Default status = active when not in URL.
+  const status = (q.status === undefined) ? 'active' : q.status;
+  if (status) params.set('status', status);
+  params.set('limit', '200');
+  try {
+    const res = await fetch(`/api/components?${params}`);
+    const data = await res.json();
+    catalogState.rows = data.components || [];
+    catalogState.hasMore = data.has_more;
+    renderCatalog();
+  } catch (e) {
+    console.error('fetchCatalog failed:', e);
+    document.getElementById('cat-items').innerHTML =
+      '<li class="empty">Failed to load components.</li>';
+  }
+  const segs = Router.current().segments;
+  if (segs[0] === 'catalog' && segs[1] === 'component' && segs[2]) {
+    showComponentDetail(segs[2]);
+  }
+}
+
+function renderCatalog() {
+  const $items = document.getElementById('cat-items');
+  const $count = document.getElementById('cat-count');
+  $count.textContent = `${catalogState.rows.length}${catalogState.hasMore ? '+' : ''}`;
+  if (!catalogState.rows.length) {
+    $items.innerHTML = '<li class="empty">No components match the filters.</li>';
+    return;
+  }
+  $items.innerHTML = '';
+  for (const c of catalogState.rows) {
+    const li = document.createElement('li');
+    li.className = 'cat-row';
+    li.dataset.id = c.id;
+    if (catalogState.selectedId === c.id) li.classList.add('selected');
+    const planes = (c.planes || []).map(p =>
+      `<span class="plane-pill plane-${p}">${p}</span>`).join(' ');
+    const ec = c.edge_count || {bound: 0, catalog: 0, dangling: 0};
+    li.innerHTML = `
+      <div class="cat-row-top">
+        <span class="cat-name">${escapeHtml(c.canonical_name || c.id)}</span>
+        <span class="cat-type">${c.component_type}</span>
+        <span class="cat-status status-${c.status}">${c.status}</span>
+      </div>
+      <div class="cat-display">${escapeHtml(c.display_name || '')}</div>
+      <div class="cat-row-meta">
+        ${planes || '<span class="muted">no attributions</span>'}
+        <span class="muted">attrs:${c.attribution_count || 0} ·
+          edges b:${ec.bound} c:${ec.catalog} d:${ec.dangling}</span>
+      </div>
+    `;
+    li.addEventListener('click', () => {
+      Router.navigate(`/catalog/component/${c.id}`);
+    });
+    $items.appendChild(li);
+  }
+}
+
+async function showComponentDetail(componentId) {
+  catalogState.selectedId = componentId;
+  renderCatalog();
+  const $title = document.getElementById('cat-detail-title');
+  const $body = document.getElementById('cat-detail-body');
+  $title.textContent = componentId.slice(0, 8) + '…';
+  $body.innerHTML = '<p class="empty">Loading…</p>';
+  try {
+    const res = await fetch(`/api/component/${encodeURIComponent(componentId)}/drilldown`);
+    if (!res.ok) {
+      $body.innerHTML = `<p class="empty">Not found (${res.status}).</p>`;
+      return;
+    }
+    const data = await res.json();
+    $body.innerHTML = _renderComponentDetailHtml(data);
+  } catch (e) {
+    console.error('showComponentDetail failed:', e);
+    $body.innerHTML = '<p class="empty">Failed to load.</p>';
+  }
+}
+
+function _renderComponentDetailHtml(data) {
+  const { component, attributions = [], edges = {}, flows = [], resources = [] } = data;
+  const c = component;
+  const planes = (c.planes || []).map(p =>
+    `<span class="plane-pill plane-${p}">${p}</span>`).join(' ');
+  const head = `<h3>${escapeHtml(c.canonical_name || '')}</h3>
+    <div class="muted">${escapeHtml(c.display_name || '')}</div>
+    <div class="muted">${c.component_type} · ${c.status}</div>
+    <div>${planes}</div>`;
+  const doc = c.component_doc_md
+    ? `<h4>Doc</h4><div class="cat-doc">${
+        DOMPurify.sanitize(marked.parse(c.component_doc_md))
+      }</div>`
+    : '';
+  const slice = c.source_slice
+    ? `<h4>Slice</h4><pre class="cat-slice">${escapeHtml(JSON.stringify(c.source_slice, null, 2))}</pre>`
+    : '';
+  const attrsHtml = attributions.length
+    ? '<h4>Attributions</h4><ul class="cat-attrs">' +
+      attributions.map(a =>
+        `<li><b>${escapeHtml(a.resource_type)}</b>: ${escapeHtml(a.identifier)}
+          <span class="muted">[${a.plane}]</span></li>`).join('') + '</ul>'
+    : '';
+  const edgeBucketHtml = (label, rows) => rows.length ? (
+    `<h5>${label} (${rows.length})</h5><ul>` +
+    rows.map(e =>
+      `<li><b>${escapeHtml(e.edge_type)}</b> ${escapeHtml(e.identifier)}
+        <span class="muted">→ ${e.to_component_id || '?'}</span></li>`
+    ).join('') + '</ul>'
+  ) : '';
+  const edgesHtml = '<h4>Edges</h4>' +
+    edgeBucketHtml('Bound in', edges.bound_in || []) +
+    edgeBucketHtml('Bound out', edges.bound_out || []) +
+    edgeBucketHtml('Catalog', edges.catalog || []) +
+    edgeBucketHtml('Dangling out', edges.dangling_out || []);
+  const flowsHtml = flows.length
+    ? '<h4>Flows</h4><ul>' +
+      flows.map(f =>
+        `<li>incoming <code>${f.incoming_edge_id.slice(0, 8)}</code> →
+          outgoing <code>${f.outgoing_edge_id.slice(0, 8)}</code></li>`
+      ).join('') + '</ul>'
+    : '';
+  const resHtml = resources.length
+    ? '<h4>Source resources</h4><ul>' +
+      resources.map(r =>
+        `<li><b>${r.plane}/${r.resource_type}</b>: ${escapeHtml(r.identifier)}</li>`
+      ).join('') + '</ul>'
+    : '';
+  return head + doc + slice + attrsHtml + edgesHtml + flowsHtml + resHtml;
+}
+
+document.getElementById('cat-apply')?.addEventListener('click', _writeCatalogFiltersToUrl);
+document.getElementById('cat-reset')?.addEventListener('click', () => {
+  Router.navigate('/catalog', { clear: ['type', 'plane', 'status', 'q'] });
+});
+document.getElementById('cat-detail-close')?.addEventListener('click', () => {
+  Router.navigate('/catalog');
 });

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cartograph Admin</title>
-  <link rel="stylesheet" href="/style.css?v=50">
+  <link rel="stylesheet" href="/style.css?v=51">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
@@ -28,6 +28,8 @@
       <div class="tabs">
         <button class="tab active" data-tab="chat">Chat</button>
         <button class="tab" data-tab="comms">Communications</button>
+        <button class="tab" data-tab="entities">Entities</button>
+        <button class="tab" data-tab="catalog">Catalog</button>
         <button class="tab" data-tab="graph">Graph</button>
       </div>
       <button id="broadcast-btn" title="Broadcast to all agents of a type">📢 Broadcast</button>
@@ -163,6 +165,150 @@
       </aside>
     </section>
 
+    <!-- ENTITIES VIEW (Phase 5.2) -->
+    <section id="entities-view" class="view">
+      <aside id="entities-filter">
+        <h2>Filters</h2>
+
+        <label>Kind
+          <select id="ent-kind">
+            <option value="">All</option>
+            <option value="task">Task</option>
+            <option value="consolidation">Consolidation</option>
+            <option value="clarification">Clarification</option>
+            <option value="broadcast">Broadcast</option>
+          </select>
+        </label>
+
+        <label>Status
+          <select id="ent-status">
+            <option value="">All</option>
+            <!-- Populated dynamically based on selected kind. -->
+          </select>
+        </label>
+
+        <label class="checkbox-label">
+          <input type="checkbox" id="ent-open-only">
+          <span>Open only (hide terminal states)</span>
+        </label>
+
+        <label>Participant
+          <input id="ent-participant" placeholder="agent_id (either side)" autocomplete="off"
+                 list="agent-options">
+        </label>
+
+        <label>Search
+          <input id="ent-q" placeholder="text in summary" autocomplete="off">
+        </label>
+
+        <div class="filter-actions">
+          <button id="ent-apply">Apply</button>
+          <button id="ent-reset" class="secondary">Reset</button>
+        </div>
+
+        <p class="hint">
+          Entities = workflow rows (tasks, consolidations, clarifications,
+          broadcasts). Click a row to drill into the full thread.
+        </p>
+      </aside>
+
+      <main id="entities-list-pane">
+        <header>
+          <h2>Entities</h2>
+          <span id="ent-count"></span>
+        </header>
+        <ul id="ent-items">
+          <li class="empty">Loading…</li>
+        </ul>
+      </main>
+
+      <aside id="entities-detail">
+        <header>
+          <h2 id="ent-detail-title">Detail</h2>
+          <button id="ent-detail-close" title="Close">×</button>
+        </header>
+        <div id="ent-detail-body">
+          <p class="empty">Select an entity to inspect.</p>
+        </div>
+      </aside>
+    </section>
+
+    <!-- CATALOG VIEW (Phase 5.3) -->
+    <section id="catalog-view" class="view">
+      <aside id="catalog-filter">
+        <h2>Filters</h2>
+
+        <label>Type
+          <select id="cat-type">
+            <option value="">All</option>
+            <option>application</option>
+            <option>database</option>
+            <option>cache</option>
+            <option>queue</option>
+            <option>lambda</option>
+            <option>cron</option>
+            <option>external-service</option>
+            <option>library</option>
+            <option>infrastructure</option>
+          </select>
+        </label>
+
+        <label>Plane
+          <select id="cat-plane">
+            <option value="">All</option>
+            <option>github</option>
+            <option>deploy</option>
+            <option>cloud</option>
+            <option>telemetry</option>
+            <option>config</option>
+          </select>
+        </label>
+
+        <label>Status
+          <select id="cat-status">
+            <option value="active" selected>active</option>
+            <option value="">all (incl. decommissioned)</option>
+            <option value="decommissioned">decommissioned</option>
+          </select>
+        </label>
+
+        <label>Search
+          <input id="cat-q" placeholder="canonical / display name" autocomplete="off">
+        </label>
+
+        <div class="filter-actions">
+          <button id="cat-apply">Apply</button>
+          <button id="cat-reset" class="secondary">Reset</button>
+        </div>
+
+        <p class="hint">
+          Catalog is the textual counterpart to the Graph tab. Click a
+          component to drill into its attributions, edges, flows, and
+          source resources.
+        </p>
+      </aside>
+
+      <main id="catalog-list-pane">
+        <header>
+          <h2>Components</h2>
+          <span id="cat-count"></span>
+        </header>
+        <ul id="cat-items">
+          <li class="empty">Loading…</li>
+        </ul>
+      </main>
+
+      <aside id="catalog-detail">
+        <header>
+          <h2 id="cat-detail-title">Detail</h2>
+          <button id="cat-detail-close" title="Close">×</button>
+        </header>
+        <div id="cat-detail-body">
+          <p class="empty">Select a component to inspect.</p>
+        </div>
+      </aside>
+    </section>
+
     <!-- GRAPH VIEW (Phase 3.5) -->
     <section id="graph-view" class="view">
       <aside id="graph-sidebar">
@@ -252,6 +398,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=50"></script>
+  <script src="/app.js?v=51"></script>
 </body>
 </html>

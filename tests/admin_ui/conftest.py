@@ -39,6 +39,12 @@ def clean_tables():
     execute_mutate("DELETE FROM proxy_audit")
     execute_mutate("DELETE FROM broadcast_acks")
     execute_mutate("DELETE FROM communications")
+    # Phase 5.2: workflow-entity tables — wipe so /api/entities tests
+    # see a clean slate. Order respects FKs (children first).
+    execute_mutate("DELETE FROM clarifications")
+    execute_mutate("DELETE FROM consolidations")
+    execute_mutate("DELETE FROM tasks")
+    execute_mutate("DELETE FROM flows")
     execute_mutate("DELETE FROM edges")
     execute_mutate("DELETE FROM attributions")
     execute_mutate("DELETE FROM resource_component_agents")
