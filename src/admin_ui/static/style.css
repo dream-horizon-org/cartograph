@@ -1394,6 +1394,7 @@ body {
   display: grid;
   grid-template-columns: 320px 1fr;
   grid-template-rows: minmax(0, 1fr);
+  height: 100%;
 }
 #globe-sidebar {
   border-right: 1px solid #21262d; padding: 16px; overflow-y: auto;
@@ -1409,5 +1410,5 @@ body {
   font-size: 12px; margin-top: 12px;
 }
 #globe-stats b { color: #8b949e; font-weight: normal; }
-#globe-pane { position: relative; min-height: 0; }
-#globe-canvas { width: 100%; height: 100%; }
+#globe-pane { position: relative; min-width: 0; }
+#globe-canvas { width: 100%; height: 100%; background: #0d1117; }

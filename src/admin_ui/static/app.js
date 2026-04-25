@@ -3344,15 +3344,17 @@ async function initOrRefreshGlobe() {
   const N = rawNodes.length;
   globeRadius = _globeRadiusFor(N);
 
-  // Build node objects compatible with 3d-force-graph.
+  // Build node objects compatible with 3d-force-graph + the same shape
+  // the detail-panel renderer expects (canonical / doc / slice).
   const nodes = rawNodes.map(n => ({
     id: n.id,
     name: n.canonical_name || n.id,
+    canonical: n.canonical_name || n.id,
     type: n.component_type || 'application',
-    color: nodeColor(n),
+    color: nodeColor(n.planes || []),
     planes: n.planes || [],
-    component_doc_md: n.component_doc_md,
-    source_slice: n.source_slice,
+    doc: n.component_doc_md,
+    slice: n.source_slice,
   }));
   // Seed every node uniformly on the sphere so the simulator starts
   // from a sensible spread (otherwise everything bunches at origin).
@@ -3795,12 +3797,33 @@ function _globeLinkParticles(link) {
 
 function _refreshGlobeLinkVisuals() {
   if (!globeInstance) return;
-  // Re-supply accessors with fresh closures so 3d-force-graph
-  // invalidates its per-link cache (it caches by accessor identity).
-  globeInstance
-    .linkColor(l => _globeLinkColor(l))
-    .linkOpacity(l => _globeLinkOpacity(l))
-    .linkDirectionalParticles(l => _globeLinkParticles(l));
+  // Custom THREE.Line meshes built via linkThreeObject are NOT
+  // re-rendered when the .linkColor accessor changes — the library
+  // only uses .linkColor for default-rendered lines. So we walk every
+  // link's stored mesh and update its material color directly.
+  try {
+    const gd = globeInstance.graphData();
+    for (const l of (gd?.links || [])) {
+      const mesh = l.__threeObj;
+      if (!mesh) continue;
+      // Curve line itself.
+      if (mesh.material) {
+        mesh.material.color.set(_globeLinkColor(l));
+        mesh.material.opacity = _globeLinkOpacity(l);
+        mesh.material.needsUpdate = true;
+      }
+      // 3d-force-graph stores the directional arrow + particle objects
+      // under predictable __ keys; update their colors so they sync
+      // with the lit state.
+      if (l.__arrowObj && l.__arrowObj.material) {
+        l.__arrowObj.material.color.set(_globeLinkColor(l));
+      }
+    }
+    // Re-supply particle accessor — these ARE recomputed by the library.
+    globeInstance.linkDirectionalParticles(l => _globeLinkParticles(l));
+  } catch (e) {
+    console.warn('refreshGlobeLinkVisuals failed:', e);
+  }
 }
 
 function _globeLinkObject(link) {
@@ -3980,20 +4003,205 @@ function _globeLightOfSight(link) {
 }
 
 
+// ----- 6.4: drill-down sidebar with full Graph-parity tabs ---------------
+//
+// Renderers live in the Globe block (read globeSnapshot directly) so
+// the module stays self-contained — Graph code is untouched.
+
+let activeGlobeDetailNodeId = null;
+let activeGlobeDetailTab = 'doc';
+
+function _globeRenderEdgeList(edges, opts) {
+  return edges.map(e => {
+    let sideHtml = '';
+    if (opts.showSide === 'caller') {
+      const srcNode = globeSnapshot.nodeById[e.source_id];
+      sideHtml = `<span class="edge-from">from ${escapeHtml(srcNode?.name || (e.source_id || '').slice(0, 8))}</span>`;
+    } else if (opts.showSide === 'callee') {
+      if (e.target_id) {
+        const tgtNode = globeSnapshot.nodeById[e.target_id];
+        sideHtml = `<span class="edge-to">to ${escapeHtml(tgtNode?.name || e.target_id.slice(0, 8))}</span>`;
+      } else {
+        sideHtml = `<span class="edge-to dangling">dangling (to unresolved)</span>`;
+      }
+    }
+    const conf = e.confidence != null ? ` · conf ${Number(e.confidence).toFixed(2)}` : '';
+    return `
+      <div class="edge-row" data-edge-id="${e.id}">
+        <div class="edge-head">
+          <span class="edge-type">${escapeHtml(e.edge_type)}</span>
+          <code class="edge-identifier">${escapeHtml(e.identifier)}</code>
+        </div>
+        <div class="edge-sub">${sideHtml}${conf}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function _globeRenderFlowList(flows) {
+  const byIncoming = {};
+  for (const f of flows) (byIncoming[f.incoming_edge_id] ||= []).push(f);
+  return Object.entries(byIncoming).map(([incomingId, rows]) => {
+    const incoming = globeSnapshot.edgeById[incomingId];
+    const outgoings = rows.map(r => globeSnapshot.edgeById[r.outgoing_edge_id]).filter(Boolean);
+    const incHead = incoming
+      ? `${escapeHtml(incoming.edge_type)} <code>${escapeHtml(incoming.identifier)}</code>`
+      : `<em>missing edge ${incomingId.slice(0, 8)}</em>`;
+    const outList = outgoings.map(o => {
+      const tgt = o.target_id ? globeSnapshot.nodeById[o.target_id]?.name : 'dangling';
+      return `<li>${escapeHtml(o.edge_type)} <code>${escapeHtml(o.identifier)}</code> <span class="edge-to">→ ${escapeHtml(tgt || 'dangling')}</span></li>`;
+    }).join('');
+    return `
+      <div class="flow-block">
+        <div class="flow-incoming">${incHead}</div>
+        <ul class="flow-outgoings">${outList}</ul>
+      </div>
+    `;
+  }).join('');
+}
+
+function _globeRenderCatalogList(catalogs) {
+  return catalogs.map(e => {
+    const callers = globeSnapshot.edges.filter(b =>
+      b.kind === 'bound'
+      && b.target_id === e.target_id
+      && b.edge_type === e.edge_type
+      && b.identifier === e.identifier
+    );
+    let sideHtml;
+    if (callers.length === 0) {
+      sideHtml = `<span class="edge-from catalog">exposed — no caller bound yet</span>`;
+    } else {
+      const names = callers.map(c => {
+        const n = globeSnapshot.nodeById[c.source_id];
+        return escapeHtml(n?.name || c.source_id.slice(0, 8));
+      });
+      sideHtml = `<span class="edge-from">${callers.length} caller(s): ${names.join(', ')}</span>`;
+    }
+    const conf = e.confidence != null ? ` · conf ${Number(e.confidence).toFixed(2)}` : '';
+    return `
+      <div class="edge-row" data-edge-id="${e.id}">
+        <div class="edge-head">
+          <span class="edge-type">${escapeHtml(e.edge_type)}</span>
+          <code class="edge-identifier">${escapeHtml(e.identifier)}</code>
+        </div>
+        <div class="edge-sub">${sideHtml}${conf}</div>
+      </div>
+    `;
+  }).join('');
+}
+
 function showGlobeNodeDetail(node) {
-  const $body = document.getElementById('globe-hover-doc');
-  const planes = (node.planes || []).map(p =>
-    `<span class="plane-pill plane-${p}">${p}</span>`).join(' ');
-  const doc = node.component_doc_md
-    ? DOMPurify.sanitize(marked.parse(node.component_doc_md))
-    : '<p class="empty">No component_doc_md.</p>';
-  $body.innerHTML = `
-    <h4>${escapeHtml(node.name)}</h4>
-    <div class="muted">${node.type}</div>
-    <div>${planes || '<span class="muted">no attributions</span>'}</div>
-    <hr>
-    <div class="cat-doc">${doc}</div>
+  const $doc = document.getElementById('globe-hover-doc');
+  if (!node) {
+    activeGlobeDetailNodeId = null;
+    $doc.innerHTML = '<p class="empty">Click a component on the globe to inspect it.</p>';
+    return;
+  }
+  activeGlobeDetailNodeId = node.id;
+  activeGlobeDetailTab = 'doc';
+  renderGlobeDetailPanel();
+}
+
+function renderGlobeDetailPanel() {
+  const $doc = document.getElementById('globe-hover-doc');
+  if (!activeGlobeDetailNodeId) {
+    $doc.innerHTML = '<p class="empty">Click a component on the globe to inspect it.</p>';
+    return;
+  }
+  const node = globeSnapshot.nodeById[activeGlobeDetailNodeId];
+  if (!node) {
+    $doc.innerHTML = '<p class="empty">Component no longer in graph.</p>';
+    return;
+  }
+  const planesArr = node.planes || [];
+  const planes = planesArr.length
+    ? planesArr.map(p =>
+        `<span class="plane-pill" style="background:${PLANE_COLORS[p] || NO_PLANE_COLOR}22;color:${PLANE_COLORS[p] || NO_PLANE_COLOR}">${p}</span>`
+      ).join('')
+    : '<span class="plane-pill">no attributions</span>';
+
+  const incoming_bound = globeSnapshot.edges.filter(
+    e => e.kind === 'bound' && e.target_id === node.id
+  );
+  const incoming_catalog = globeSnapshot.edges.filter(
+    e => e.kind === 'catalog' && e.target_id === node.id
+  );
+  const outgoing_bound = globeSnapshot.edges.filter(
+    e => e.kind === 'bound' && e.source_id === node.id
+  );
+  const outgoing_dangling = globeSnapshot.edges.filter(
+    e => e.kind === 'dangling' && e.source_id === node.id
+  );
+  const flows = globeSnapshot.flows.filter(f => f.component_id === node.id);
+
+  const tabs = [
+    {id: 'doc',     label: 'Doc'},
+    {id: 'slice',   label: 'Slice'},
+    {id: 'catalog', label: `Catalog (${incoming_catalog.length})`},
+    {id: 'in',      label: `Bindings in (${incoming_bound.length})`},
+    {id: 'out',     label: `Bindings out (${outgoing_bound.length + outgoing_dangling.length})`},
+    {id: 'flows',   label: `Flows (${flows.length})`},
+  ];
+  const tabHtml = tabs.map(t =>
+    `<button class="detail-tab ${t.id === activeGlobeDetailTab ? 'active' : ''}"
+             data-tab="${t.id}">${escapeHtml(t.label)}</button>`
+  ).join('');
+
+  let body = '';
+  if (activeGlobeDetailTab === 'doc') {
+    body = node.doc
+      ? renderMarkdown(node.doc)
+      : '<p class="empty">No doc written yet.</p>';
+  } else if (activeGlobeDetailTab === 'slice') {
+    const sliceHtml = renderSourceSlice(node.slice);
+    body = sliceHtml || '<p class="empty">No source_slice — single-resource component.</p>';
+  } else if (activeGlobeDetailTab === 'catalog') {
+    body = incoming_catalog.length
+      ? _globeRenderCatalogList(incoming_catalog)
+      : '<p class="empty">No catalog rows.</p>';
+  } else if (activeGlobeDetailTab === 'in') {
+    body = incoming_bound.length
+      ? _globeRenderEdgeList(incoming_bound, {showSide: 'caller'})
+      : '<p class="empty">No inbound bindings.</p>';
+  } else if (activeGlobeDetailTab === 'out') {
+    const merged = [...outgoing_bound, ...outgoing_dangling];
+    body = merged.length
+      ? _globeRenderEdgeList(merged, {showSide: 'callee'})
+      : '<p class="empty">No outbound edges.</p>';
+  } else if (activeGlobeDetailTab === 'flows') {
+    body = flows.length
+      ? _globeRenderFlowList(flows)
+      : '<p class="empty">No flows recorded.</p>';
+  }
+
+  $doc.innerHTML = `
+    <div class="graph-node-head">
+      <b>${escapeHtml(node.name)}</b>
+      <div class="kv-row"><span>canonical</span><code>${escapeHtml(node.canonical)}</code></div>
+      <div class="kv-row"><span>type</span><code>${escapeHtml(node.type)}</code></div>
+      <div class="plane-pills">${planes}</div>
+    </div>
+    <div class="detail-tabs">${tabHtml}</div>
+    <div class="detail-body">${body}</div>
   `;
+
+  $doc.querySelectorAll('.detail-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeGlobeDetailTab = btn.dataset.tab;
+      renderGlobeDetailPanel();
+    });
+  });
 }
 
 document.getElementById('globe-refresh')?.addEventListener('click', initOrRefreshGlobe);
+
+// Resize the renderer when the window changes and the Globe tab is visible.
+window.addEventListener('resize', () => {
+  if (globeInstance && document.getElementById('globe-view')?.classList.contains('active')) {
+    const canvas = document.getElementById('globe-canvas');
+    try {
+      globeInstance.width(canvas.clientWidth).height(canvas.clientHeight);
+    } catch (_e) { /* fine */ }
+  }
+});
