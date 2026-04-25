@@ -35,6 +35,7 @@ def setup_db():
 def clean_tables():
     """Clean test data before each test (test DB only)."""
     assert config.DB_NAME != "cartograph", "Refusing to wipe dev DB"
+    execute_mutate("DELETE FROM mcp_audit")
     execute_mutate("DELETE FROM agent_insights")
     execute_mutate("DELETE FROM proxy_audit")
     execute_mutate("DELETE FROM broadcast_acks")

@@ -413,6 +413,35 @@ def create_app() -> FastAPI:
         )
         return {"clarification": row, "thread": thread}
 
+    # --- MCP AUDIT (Phase 5.10) ---
+
+    @app.get("/api/mcp_audit")
+    def list_mcp_audit(
+        agent_id: Optional[str] = Query(None),
+        tool_name: Optional[str] = Query(None),
+        result_status: Optional[str] = Query(None),
+        limit: int = Query(200, ge=1, le=2000),
+    ):
+        """Per-agent / per-tool activity timeline."""
+        where = []
+        params: list = []
+        if agent_id:
+            where.append("agent_id = %s")
+            params.append(agent_id)
+        if tool_name:
+            where.append("tool_name = %s")
+            params.append(tool_name)
+        if result_status:
+            where.append("result_status = %s")
+            params.append(result_status)
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = execute(
+            f"SELECT * FROM mcp_audit{where_sql} "
+            f"ORDER BY created_at DESC LIMIT %s",
+            params + [limit],
+        )
+        return {"entries": rows}
+
     # --- INSIGHTS (Phase 5.9) ---
 
     class TriageBody(BaseModel):

@@ -716,6 +716,25 @@ def run_migrations() -> None:
                 "metadata JSONB NOT NULL DEFAULT '{}'"
             )
 
+            # Phase 5.10: mcp_audit — blanket per-call audit log of every
+            # MCP tool invocation. Stores the agent_id + tool name +
+            # args_hash (sha1 of canonicalised args; full args NOT
+            # logged) + result_status + duration. Foundation for
+            # debugging + future replay. Single table for now;
+            # partitioning can be added later if volume warrants.
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS mcp_audit (
+                    id            BIGSERIAL PRIMARY KEY,
+                    agent_id      TEXT,
+                    tool_name     TEXT NOT NULL,
+                    args_hash     TEXT NOT NULL,
+                    result_status TEXT NOT NULL CHECK (result_status IN ('ok', 'error')),
+                    error_msg     TEXT,
+                    duration_ms   INTEGER NOT NULL,
+                    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+                )"""
+            )
+
             # Phase 5.9: agent_insights — self-improvement loop.
             # Agents call record_insight() to flag prompt gaps, tactic
             # wins, tool gaps, doc confusion, workflow friction. Admin
@@ -843,6 +862,11 @@ def _create_indexes(cur) -> None:
         "CREATE INDEX IF NOT EXISTS idx_insights_agent ON agent_insights(agent_id)",
         "CREATE INDEX IF NOT EXISTS idx_insights_status ON agent_insights(status)",
         "CREATE INDEX IF NOT EXISTS idx_insights_target ON agent_insights(target)",
+
+        # Phase 5.10: MCP audit
+        "CREATE INDEX IF NOT EXISTS idx_mcp_audit_agent_time ON mcp_audit(agent_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_mcp_audit_tool ON mcp_audit(tool_name)",
+        "CREATE INDEX IF NOT EXISTS idx_mcp_audit_created ON mcp_audit(created_at DESC)",
     ]
     for idx in indexes:
         cur.execute(idx)

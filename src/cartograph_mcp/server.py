@@ -44,6 +44,13 @@ logger = logging.getLogger(__name__)
 # Create the MCP server. Streamable HTTP listens at /mcp endpoint.
 mcp = FastMCP("cartograph-db", host="0.0.0.0", port=8100)
 
+# Phase 5.10: install the per-call audit wrapper BEFORE any @mcp.tool()
+# decorator runs. Every subsequent tool registration gets transparently
+# wrapped — no per-tool annotation needed. Records (agent, tool, args
+# hash, status, duration) to mcp_audit. Failures swallowed.
+from cartograph_mcp.audit import install as _install_audit
+_install_audit(mcp)
+
 # Import AgentManager as a library — the MCP server instantiates its own
 # for the create_agent tool. Same DB state, different Python instance
 # than the one running the invoke loop. That's fine: AgentManager is stateless
