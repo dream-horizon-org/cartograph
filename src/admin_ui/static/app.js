@@ -3563,8 +3563,13 @@ async function initOrRefreshGlobe() {
         _globeLosTimers.forEach(t => clearTimeout(t));
         _globeLosTimers = [];
         _globeLitEdgeIds = new Set();
+        _globeRevealStart.clear();
         _refreshGlobeLinkVisuals();
       });
+
+    // Start the curve-following particle animator. Runs forever; only
+    // works on lit edges so cost is bounded.
+    _startGlobeAnimLoop();
 
     // Force tuning: weaker charge so tangent forces dominate the
     // projection; long-ish link distance so the surface doesn't
@@ -3829,13 +3834,135 @@ function _globeLinkOpacity(link) {
 }
 
 function _globeLinkParticles(_link) {
-  // Disabled on Globe: 3d-force-graph animates particles along the
-  // straight chord between source and target node positions — for
-  // curved sphere edges that means particles beam THROUGH the globe
-  // interior, which looks broken. The LOS amber color + full opacity
-  // already convey the chain; particles were a Graph-specific
-  // affordance that doesn't translate to sphere geometry.
+  // 3d-force-graph's built-in particles beam along the straight chord
+  // between nodes, cutting through the globe — useless for sphere
+  // edges. Disabled here; we run our own curve-following particle
+  // animator (see _globeAnimTick) that samples positions along each
+  // lit tube's stored curve every frame.
   return 0;
+}
+
+// ----- Curve-following particle animator + per-edge reveal --------------
+//
+// For every LOS-lit edge we attach _PARTICLES_PER_EDGE small amber
+// spheres as children of the tube. Each sphere has its own t (0..1)
+// parameter; on every animation frame we advance t and reposition
+// the sphere along the tube's stored curve. Result: a comet-like
+// stream of particles flowing source → target along the actual curve.
+//
+// We also track per-edge "reveal progress" so newly-lit edges
+// animate in (color/opacity ramp source-side → target-side over
+// ~400ms) instead of blinking instantly.
+
+const _PARTICLES_PER_EDGE = 4;
+const _PARTICLE_SPEED_PER_MS = 0.0009;     // t-progress per millisecond
+const _REVEAL_MS = 420;                    // per-edge reveal animation
+let _globeAnimRaf = null;
+let _globeAnimLastTick = null;
+const _globeRevealStart = new Map();       // linkId → ms when LOS lit it
+
+function _ensureLinkParticles(tube) {
+  if (tube.userData._particles?.length === _PARTICLES_PER_EDGE) return;
+  for (const p of (tube.userData._particles || [])) {
+    tube.remove(p);
+    if (p.geometry) p.geometry.dispose();
+    if (p.material) p.material.dispose();
+  }
+  const THREE = window.THREE;
+  const arr = [];
+  for (let i = 0; i < _PARTICLES_PER_EDGE; i++) {
+    const geom = new THREE.SphereGeometry(1.1, 10, 10);
+    const mat = new THREE.MeshBasicMaterial({
+      color: '#fbbf24',
+      transparent: true,
+      opacity: 1.0,
+    });
+    const s = new THREE.Mesh(geom, mat);
+    s.frustumCulled = false;
+    s.userData._isParticle = true;
+    s.userData._t = i / _PARTICLES_PER_EDGE;
+    s.raycast = () => {};
+    tube.add(s);
+    arr.push(s);
+  }
+  tube.userData._particles = arr;
+}
+
+function _removeLinkParticles(tube) {
+  if (!tube.userData._particles?.length) return;
+  for (const p of tube.userData._particles) {
+    tube.remove(p);
+    if (p.geometry) p.geometry.dispose();
+    if (p.material) p.material.dispose();
+  }
+  tube.userData._particles = null;
+}
+
+function _startGlobeAnimLoop() {
+  if (_globeAnimRaf) return;
+  _globeAnimLastTick = performance.now();
+  function tick() {
+    if (_globeAnimRaf == null) return;
+    _globeAnimTick();
+    _globeAnimRaf = requestAnimationFrame(tick);
+  }
+  _globeAnimRaf = requestAnimationFrame(tick);
+}
+
+function _globeAnimTick() {
+  if (!globeInstance) return;
+  const now = performance.now();
+  const dt = now - (_globeAnimLastTick || now);
+  _globeAnimLastTick = now;
+
+  const gd = globeInstance.graphData();
+  for (const l of (gd?.links || [])) {
+    const tube = l.__lineObj;
+    if (!tube) continue;
+    const isLit = _globeLitEdgeIds.has(l.id);
+
+    // Per-edge reveal animation: literally GROW the tube from source
+    // to target by clamping the geometry's drawRange. TubeGeometry
+    // indexes are laid out path-segment-major, so the first N indices
+    // correspond to the source-end portion. drawRange(0, N) shows
+    // the tube up to a fraction of its length. As revealT animates
+    // 0→1, the tube paints itself from source to target.
+    if (isLit) {
+      const revealStart = _globeRevealStart.get(l.id) || now;
+      if (!_globeRevealStart.has(l.id)) _globeRevealStart.set(l.id, now);
+      const revealT = Math.min(1, (now - revealStart) / _REVEAL_MS);
+      if (tube.geometry?.index) {
+        const total = tube.geometry.index.count;
+        // Quantise to whole rings (radialSegments * 6 indices/ring) so
+        // the growing front always reads as a clean radial cap, not a
+        // jagged half-ring slice.
+        const indicesPerRing = _GLOBE_TUBE_RADIAL_SEGMENTS * 6;
+        const ringsTotal = total / indicesPerRing;
+        const ringsToShow = Math.max(1, Math.ceil(revealT * ringsTotal));
+        tube.geometry.setDrawRange(0, ringsToShow * indicesPerRing);
+      }
+      if (tube.material) tube.material.opacity = 1.0;
+
+      // Particles: ensure they exist + advance t along the curve.
+      _ensureLinkParticles(tube);
+      const curve = tube.userData._curve;
+      if (curve) {
+        for (const p of tube.userData._particles) {
+          p.userData._t = (p.userData._t + dt * _PARTICLE_SPEED_PER_MS) % 1;
+          const pos = curve.getPoint(p.userData._t);
+          p.position.copy(pos);
+        }
+      }
+    } else {
+      // Edge no longer lit — restore full draw range, drop particles,
+      // clear reveal state.
+      if (tube.geometry?.index) {
+        tube.geometry.setDrawRange(0, Infinity);
+      }
+      if (tube.userData._particles?.length) _removeLinkParticles(tube);
+      _globeRevealStart.delete(l.id);
+    }
+  }
 }
 
 function _refreshGlobeLinkVisuals() {
@@ -3988,6 +4115,25 @@ function _globeLinkPositionUpdate(obj, { start, end }, link) {
   if (obj.geometry) obj.geometry.dispose();
   obj.geometry = newGeom;
 
+  // Phase 6 polish: stash the curve on the mesh so the particle
+  // animator can sample positions along it without re-deriving from
+  // node positions every frame.
+  obj.userData._curve = curve;
+
+  // Re-apply the reveal-progress drawRange after the geometry rebuild.
+  // Without this, the rebuild would reset drawRange to full every
+  // tick — fighting the reveal animation on long-running graphs.
+  if (_globeLitEdgeIds.has(link.id) && _globeRevealStart.has(link.id)) {
+    const now = performance.now();
+    const revealT = Math.min(1, (now - _globeRevealStart.get(link.id)) / _REVEAL_MS);
+    if (newGeom.index) {
+      const indicesPerRing = _GLOBE_TUBE_RADIAL_SEGMENTS * 6;
+      const ringsTotal = newGeom.index.count / indicesPerRing;
+      const ringsToShow = Math.max(1, Math.ceil(revealT * ringsTotal));
+      newGeom.setDrawRange(0, ringsToShow * indicesPerRing);
+    }
+  }
+
   // Position arrow head if present: per-arrow t (set at creation time
   // — 0.94 for regular edges, 0.7 for short trunks) and orient it
   // along the local tangent.
@@ -4054,6 +4200,7 @@ function _globeLightOfSight(link) {
   _globeLosTimers.forEach(t => clearTimeout(t));
   _globeLosTimers = [];
   _globeLitEdgeIds = new Set();
+  _globeRevealStart.clear();   // reset reveal-progress for the new chain
   _refreshGlobeLinkVisuals();
 
   // Resolve seed edges. Bundle-aware: clicking a junction trunk OR any
