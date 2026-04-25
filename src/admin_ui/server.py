@@ -413,6 +413,28 @@ def create_app() -> FastAPI:
         )
         return {"clarification": row, "thread": thread}
 
+    # --- DEBUG LOG SINK (temporary, for Globe debugging) ---
+    #
+    # Sink for FE diagnostic events so the user doesn't have to copy
+    # browser-console output. POST { msg: "..." } → appended with
+    # timestamp to /tmp/cartograph_fe_debug.log. We can grep that file.
+
+    import time as _time
+
+    _DEBUG_LOG = "/tmp/cartograph_fe_debug.log"
+
+    class FeDebugBody(BaseModel):
+        msg: str
+
+    @app.post("/api/debug/log")
+    def fe_debug(body: FeDebugBody):
+        try:
+            with open(_DEBUG_LOG, "a") as f:
+                f.write(f"{_time.strftime('%H:%M:%S')} {body.msg}\n")
+        except Exception:
+            pass
+        return {"ok": True}
+
     # --- MCP AUDIT (Phase 5.10) ---
 
     @app.get("/api/mcp_audit")

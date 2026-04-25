@@ -3701,6 +3701,24 @@ async function initOrRefreshGlobe() {
   }
 
   globeInstance.graphData({ nodes, links });
+
+  // Post-init diagnostic — confirm linkThreeObject got called and
+  // __threeObj refs are populated. Run on next frame so the library
+  // has a chance to build the meshes.
+  requestAnimationFrame(() => {
+    setTimeout(() => {
+      try {
+        const gd = globeInstance.graphData();
+        let withMesh = 0, withoutMesh = 0;
+        for (const l of (gd?.links || [])) {
+          if (l.__threeObj) withMesh += 1; else withoutMesh += 1;
+        }
+        _globeDebug(`init done: nodes=${nodes.length} links=${links.length} withMesh=${withMesh} withoutMesh=${withoutMesh}`);
+      } catch (e) {
+        _globeDebug(`init done: error reading meshes ${e.message}`);
+      }
+    }, 500);
+  });
 }
 
 // ----- 6.2: edge curves --------------------------------------------------
@@ -3781,6 +3799,20 @@ let _globeLitEdgeIds = new Set();
 let _globeHoverLitEdgeIds = new Set();
 let _globeLosTimers = [];
 
+// Debug sink — POSTs diagnostic strings to /api/debug/log so the
+// developer can grep /tmp/cartograph_fe_debug.log instead of asking
+// the user to copy from browser devtools.
+function _globeDebug(msg) {
+  try { console.log('[globe]', msg); } catch (_e) {}
+  try {
+    fetch('/api/debug/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msg }),
+    });
+  } catch (_e) {}
+}
+
 function _globeLinkColor(link) {
   if (_globeLitEdgeIds.has(link.id))      return '#fbbf24';  // LOS-lit amber
   if (_globeHoverLitEdgeIds.has(link.id)) return '#22d3ee';  // hover cyan
@@ -3832,8 +3864,7 @@ function _refreshGlobeLinkVisuals() {
       }
       touched += 1;
     }
-    console.log('[globe] refresh visuals: touched=', touched, 'missing __threeObj=', missing,
-      'lit=', _globeLitEdgeIds.size, 'hover=', _globeHoverLitEdgeIds.size);
+    _globeDebug(`refresh touched=${touched} missing=${missing} lit=${_globeLitEdgeIds.size} hover=${_globeHoverLitEdgeIds.size}`);
   } catch (e) {
     console.warn('refreshGlobeLinkVisuals failed:', e);
   }
@@ -3994,8 +4025,7 @@ function _globeEffectiveFlowIncomingsForEdge(edgeId) {
 }
 
 function _globeHover(link) {
-  // Diagnostic — temporary, helps confirm raycasting reaches the tubes.
-  if (link) console.log('[globe] hover', link.id, link.edge_type, link.identifier);
+  if (link) _globeDebug(`hover id=${link.id} type=${link.edge_type} ident=${link.identifier}`);
   _globeHoverLitEdgeIds = new Set();
   if (link) {
     _globeHoverLitEdgeIds.add(link.id);
@@ -4018,8 +4048,7 @@ function _globeHover(link) {
 }
 
 function _globeLightOfSight(link) {
-  console.log('[globe] LOS click on', link?.id, link?.edge_type, link?.identifier,
-    'junctionOut=', !!link?.isJunctionOut, 'junctionIn=', !!link?.isJunctionIn);
+  _globeDebug(`LOS click id=${link?.id} type=${link?.edge_type} ident=${link?.identifier} junctionOut=${!!link?.isJunctionOut} junctionIn=${!!link?.isJunctionIn}`);
   _globeLosTimers.forEach(t => clearTimeout(t));
   _globeLosTimers = [];
   _globeLitEdgeIds = new Set();
