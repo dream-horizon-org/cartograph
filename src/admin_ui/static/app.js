@@ -3358,23 +3358,167 @@ async function initOrRefreshGlobe() {
   // from a sensible spread (otherwise everything bunches at origin).
   nodes.forEach(n => _seedOnSphere(n, globeRadius));
 
-  // For 6.1/6.2, only render bound edges. Catalog + dangling become
-  // radial spikes in 6.3. Each link is tagged with `curveMode` so the
-  // renderer knows great-circle vs ballistic.
-  const links = rawEdges
-    .filter(e => e.kind === 'bound' && e.source_id && e.target_id)
-    .map(e => ({
-      source: e.source_id,
-      target: e.target_id,
+  // 6.3: full preprocessing — junctions for shared targets, stubs
+  // for orphan catalogs + outgoing danglings. Same data shape as
+  // Graph's preprocessing; adapted for sphere geometry.
+  const boundEdges = rawEdges.filter(e => e.kind === 'bound' && e.source_id && e.target_id);
+
+  // ---- Junction bundling: N≥2 callers sharing (target, type, id) ----
+  const convergenceGroups = {};
+  for (const e of boundEdges) {
+    const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
+    (convergenceGroups[key] ||= []).push(e);
+  }
+  const junctionNodes = [];
+  const junctionOutLinks = [];
+  const junctionOutById = {};
+  const bundledEdgeIds = new Set();
+  for (const [key, group] of Object.entries(convergenceGroups)) {
+    if (group.length < 2) continue;
+    const junctionId = `__junction__${key}`;
+    junctionNodes.push({
+      id: junctionId,
+      isJunction: true,
+      name: `⌖ ${group.length} callers → ${group[0].edge_type} ${group[0].identifier}`,
+      type: 'junction',
+      planes: [],
+      color: '#94a3b8',
+      junctionTargetId: group[0].target_id,
+      junctionCallerIds: group.map(e => e.source_id),
+    });
+    const sample = group[0];
+    const outId = `__junction_out__${key}`;
+    junctionOutLinks.push({
+      id: outId,
+      source: junctionId,
+      target: sample.target_id,
+      edge_type: sample.edge_type,
+      identifier: sample.identifier,
+      kind: 'bound',
+      curveMode: _curveModeForEdgeType(sample.edge_type),
+      isJunctionOut: true,
+      groupEdgeIds: group.map(e => e.id),
+    });
+    junctionOutById[outId] = {
+      groupEdgeIds: group.map(e => e.id),
+      target_id: sample.target_id,
+      edge_type: sample.edge_type,
+      identifier: sample.identifier,
+    };
+    for (const e of group) bundledEdgeIds.add(e.id);
+  }
+
+  // ---- Build link list: bundled edges → junction-in, others → direct ----
+  const links = [];
+  for (const e of boundEdges) {
+    if (bundledEdgeIds.has(e.id)) {
+      const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
+      links.push({
+        id: e.id,
+        source: e.source_id,
+        target: `__junction__${key}`,
+        edge_type: e.edge_type,
+        identifier: e.identifier,
+        kind: 'bound',
+        curveMode: _curveModeForEdgeType(e.edge_type),
+        isJunctionIn: true,
+      });
+    } else {
+      links.push({
+        id: e.id,
+        source: e.source_id,
+        target: e.target_id,
+        edge_type: e.edge_type,
+        identifier: e.identifier,
+        kind: 'bound',
+        curveMode: _curveModeForEdgeType(e.edge_type),
+      });
+    }
+  }
+  links.push(...junctionOutLinks);
+
+  // ---- Dangling stubs: orphan catalogs + outgoing danglings ----
+  // Stubs live as small "?" placeholders OFF the surface, sticking
+  // radially outward from their anchor. Multiple stubs per anchor
+  // get distinct tangent-plane offsets so they don't stack.
+  const boundKeySet = new Set(
+    boundEdges.map(e => `${e.target_id}|${e.edge_type}|${e.identifier}`)
+  );
+  const pendingStubs = [];
+  for (const e of rawEdges) {
+    if (e.kind === 'catalog') {
+      const key = `${e.target_id}|${e.edge_type}|${e.identifier}`;
+      if (boundKeySet.has(key)) continue;  // implicit — bound row represents it
+      pendingStubs.push({ e, stubKind: 'inbound', anchorId: e.target_id });
+    } else if (e.kind === 'dangling') {
+      pendingStubs.push({ e, stubKind: 'outbound', anchorId: e.source_id });
+    }
+  }
+  // Group by anchor so siblings get distinct offset directions.
+  const anchorBuckets = {};
+  for (const p of pendingStubs) (anchorBuckets[p.anchorId] ||= []).push(p);
+  const stubNodes = [];
+  const stubLinks = [];
+  const stubEdgeIds = new Set();
+  const STUB_DIST = Math.max(15, globeRadius * 0.18);  // distance OFF the surface
+  for (const [anchorId, list] of Object.entries(anchorBuckets)) {
+    const k = list.length;
+    for (let i = 0; i < k; i++) {
+      // Each stub gets a unit direction; final position pinned each
+      // tick at (anchor + radial_outward + tangent_offset). Tangent
+      // offset is chosen per-sibling so multiple stubs of one anchor
+      // don't overlap. The stub's `stubTangentSeed` indexes into a
+      // ring around the anchor's tangent plane.
+      list[i].tangentSeed = i;
+      list[i].siblingCount = k;
+    }
+  }
+  for (const { e, stubKind, anchorId, tangentSeed, siblingCount } of pendingStubs) {
+    const stubId = stubKind === 'inbound' ? `__stub_in__${e.id}` : `__stub_out__${e.id}`;
+    stubNodes.push({
+      id: stubId,
+      isStub: true,
+      stubKind,
+      stubAnchorId: anchorId,
+      stubTangentSeed: tangentSeed,
+      stubSiblingCount: siblingCount,
+      stubDist: STUB_DIST,
+      name: '?',
+      type: 'stub',
+      planes: [],
+      color: '#475569',
+    });
+    const linkRow = stubKind === 'inbound'
+      ? { source: stubId, target: anchorId }
+      : { source: anchorId, target: stubId };
+    stubLinks.push({
+      id: e.id,
+      ...linkRow,
       edge_type: e.edge_type,
       identifier: e.identifier,
       kind: e.kind,
-      curveMode: _curveModeForEdgeType(e.edge_type),
-    }));
+      isStub: true,
+      stubKind,
+      // Stubs render as straight radial line, not a great-circle curve.
+      curveMode: 'radial',
+    });
+    stubEdgeIds.add(e.id);
+  }
+  links.push(...stubLinks);
+  nodes.push(...junctionNodes);
+  nodes.push(...stubNodes);
+
+  // edgeById / metadata maps for hover + LOS.
+  const edgeById = {};
+  for (const e of rawEdges) edgeById[e.id] = e;
 
   globeSnapshot = {
     nodes, links, flows, edges: rawEdges,
     nodeById: Object.fromEntries(nodes.map(n => [n.id, n])),
+    edgeById,
+    junctionOutById,
+    bundledEdgeIds,
+    stubEdgeIds,
   };
 
   // Stats sidebar.
@@ -3394,14 +3538,30 @@ async function initOrRefreshGlobe() {
       // current source/target positions on the sphere.
       .linkThreeObject(_globeLinkObject)
       .linkPositionUpdate(_globeLinkPositionUpdate)
-      .linkColor(_globeLinkColor)            // arrow heads + fallback
+      .linkColor(l => _globeLinkColor(l))
       .linkWidth(0.6)
-      .linkOpacity(0.7)
-      .linkDirectionalArrowLength(3)
+      .linkOpacity(l => _globeLinkOpacity(l))
+      .linkDirectionalArrowLength(l => l.isJunctionIn ? 0 : 3)
       .linkDirectionalArrowRelPos(1)
-      .linkDirectionalArrowColor(_globeLinkColor)
+      .linkDirectionalArrowColor(l => _globeLinkColor(l))
+      .linkDirectionalParticles(l => _globeLinkParticles(l))
+      .linkDirectionalParticleSpeed(0.008)
+      .linkDirectionalParticleWidth(2.5)
+      .linkDirectionalParticleColor(() => '#fbbf24')
       .linkLabel(l => `${l.edge_type}: ${l.identifier}`)
-      .onNodeClick(n => showGlobeNodeDetail(n));
+      .onNodeClick(n => {
+        if (n.isJunction || n.isStub) return;
+        showGlobeNodeDetail(n);
+        _globeLitEdgeIds = new Set();
+        _refreshGlobeLinkVisuals();
+      })
+      .onLinkClick(l => _globeLightOfSight(l))
+      .onBackgroundClick(() => {
+        _globeLosTimers.forEach(t => clearTimeout(t));
+        _globeLosTimers = [];
+        _globeLitEdgeIds = new Set();
+        _refreshGlobeLinkVisuals();
+      });
 
     // Force tuning: weaker charge so tangent forces dominate the
     // projection; long-ish link distance so the surface doesn't
@@ -3418,10 +3578,77 @@ async function initOrRefreshGlobe() {
     // (the sphere's center). Center force fights radial projection.
     globeInstance.d3Force('center', null);
 
-    // The projection. Runs after every physics step.
+    // The projection + per-tick pinning of junctions and stubs.
     globeInstance.onEngineTick(() => {
       const gd = globeInstance.graphData();
-      gd.nodes.forEach(n => _projectToSphere(n, globeRadius));
+      if (!gd || !gd.nodes) return;
+      const byId = {};
+      for (const n of gd.nodes) byId[n.id] = n;
+      // 1. Project regular component nodes onto the sphere surface.
+      for (const n of gd.nodes) {
+        if (n.isJunction || n.isStub) continue;
+        _projectToSphere(n, globeRadius);
+      }
+      // 2. Junction pinning: place each junction on the sphere surface,
+      // at the great-circle point along the (target → callers' centroid)
+      // direction, ε past the target. Same "just outside the target"
+      // semantic the Graph view has, adapted for the sphere.
+      for (const n of gd.nodes) {
+        if (!n.isJunction) continue;
+        const target = byId[n.junctionTargetId];
+        if (!target || target.x == null) continue;
+        let cx = 0, cy = 0, cz = 0, count = 0;
+        for (const cid of (n.junctionCallerIds || [])) {
+          const c = byId[cid];
+          if (c && c.x != null) { cx += c.x; cy += c.y; cz += c.z; count += 1; }
+        }
+        if (count === 0) continue;
+        cx /= count; cy /= count; cz /= count;
+        // Direction from target toward callers' centroid.
+        const dx = cx - target.x, dy = cy - target.y, dz = cz - target.z;
+        const dlen = Math.hypot(dx, dy, dz) || 1;
+        // Step a small angle from target toward centroid, then re-project
+        // to the sphere surface.
+        const step = globeRadius * 0.06;
+        let jx = target.x + (dx / dlen) * step;
+        let jy = target.y + (dy / dlen) * step;
+        let jz = target.z + (dz / dlen) * step;
+        const jlen = Math.hypot(jx, jy, jz) || 1;
+        const k = globeRadius / jlen;
+        n.fx = jx * k; n.fy = jy * k; n.fz = jz * k;
+      }
+      // 3. Stub pinning: each "?" sits OFF the surface — anchor + radial
+      // outward × stubDist + small tangent offset per sibling so multiple
+      // stubs of one anchor fan out and don't overlap.
+      for (const n of gd.nodes) {
+        if (!n.isStub) continue;
+        const a = byId[n.stubAnchorId];
+        if (!a || a.x == null) continue;
+        const r = Math.hypot(a.x, a.y, a.z) || globeRadius;
+        const ux = a.x / r, uy = a.y / r, uz = a.z / r;
+        // Build a tangent basis (any two unit vectors perpendicular to u).
+        const refUp = Math.abs(uz) < 0.9 ? [0, 0, 1] : [0, 1, 0];
+        const tx1 = uy * refUp[2] - uz * refUp[1];
+        const ty1 = uz * refUp[0] - ux * refUp[2];
+        const tz1 = ux * refUp[1] - uy * refUp[0];
+        const t1len = Math.hypot(tx1, ty1, tz1) || 1;
+        const t1 = [tx1 / t1len, ty1 / t1len, tz1 / t1len];
+        const t2 = [
+          uy * t1[2] - uz * t1[1],
+          uz * t1[0] - ux * t1[2],
+          ux * t1[1] - uy * t1[0],
+        ];
+        // Per-sibling angle around the local tangent ring.
+        const k = n.stubSiblingCount || 1;
+        const theta = k > 1 ? (n.stubTangentSeed / k) * 2 * Math.PI : 0;
+        const tangentMag = (k > 1 ? globeRadius * 0.05 : 0);
+        const ox = Math.cos(theta) * tangentMag * t1[0] + Math.sin(theta) * tangentMag * t2[0];
+        const oy = Math.cos(theta) * tangentMag * t1[1] + Math.sin(theta) * tangentMag * t2[1];
+        const oz = Math.cos(theta) * tangentMag * t1[2] + Math.sin(theta) * tangentMag * t2[2];
+        n.fx = a.x + ux * n.stubDist + ox;
+        n.fy = a.y + uy * n.stubDist + oy;
+        n.fz = a.z + uz * n.stubDist + oz;
+      }
     });
 
     // Lighting — same Lambert + bright key/fill setup as Graph so
@@ -3542,9 +3769,38 @@ function _ballisticPoints(p1, p2, R) {
   return out;
 }
 
+// LOS / hover lit-edge sets — populated when user clicks an edge or
+// hovers a node; consumed by _globeLinkColor / _globeLinkOpacity.
+let _globeLitEdgeIds = new Set();
+let _globeLosTimers = [];
+
 function _globeLinkColor(link) {
-  // Amber for ballistic (async, "loud"); slate for great-circle (sync).
-  return link.curveMode === 'ballistic' ? '#fbbf24' : '#9ca3af';
+  if (_globeLitEdgeIds.has(link.id)) return '#fbbf24';  // LOS-lit amber
+  if (link.isStub)                    return '#475569';  // muted slate
+  if (link.curveMode === 'ballistic') return '#fbbf24';  // async always amber
+  return '#9ca3af';                                       // sync slate
+}
+
+function _globeLinkOpacity(link) {
+  if (_globeLitEdgeIds.has(link.id)) return 1.0;
+  if (link.isStub)                    return 0.45;
+  return 0.7;
+}
+
+function _globeLinkParticles(link) {
+  // Lit edges get directional particles, like Graph's LOS treatment.
+  if (_globeLitEdgeIds.has(link.id)) return 4;
+  return 0;
+}
+
+function _refreshGlobeLinkVisuals() {
+  if (!globeInstance) return;
+  // Re-supply accessors with fresh closures so 3d-force-graph
+  // invalidates its per-link cache (it caches by accessor identity).
+  globeInstance
+    .linkColor(l => _globeLinkColor(l))
+    .linkOpacity(l => _globeLinkOpacity(l))
+    .linkDirectionalParticles(l => _globeLinkParticles(l));
 }
 
 function _globeLinkObject(link) {
@@ -3565,11 +3821,32 @@ function _globeLinkObject(link) {
   return line;
 }
 
+function _radialPoints(p1, p2) {
+  // Straight-line interpolation — used for stub edges (anchor → "?")
+  // which deliberately stick OFF the surface and shouldn't bend.
+  const THREE = window.THREE;
+  const out = [];
+  for (let i = 0; i <= _GLOBE_CURVE_SEGMENTS; i++) {
+    const t = i / _GLOBE_CURVE_SEGMENTS;
+    out.push(new THREE.Vector3(
+      p1.x + (p2.x - p1.x) * t,
+      p1.y + (p2.y - p1.y) * t,
+      p1.z + (p2.z - p1.z) * t,
+    ));
+  }
+  return out;
+}
+
 function _globeLinkPositionUpdate(obj, { start, end }, link) {
   if (!obj || !obj.geometry) return false;
-  const points = link.curveMode === 'ballistic'
-    ? _ballisticPoints(start, end, globeRadius)
-    : _greatCirclePoints(start, end, globeRadius);
+  let points;
+  if (link.curveMode === 'radial') {
+    points = _radialPoints(start, end);
+  } else if (link.curveMode === 'ballistic') {
+    points = _ballisticPoints(start, end, globeRadius);
+  } else {
+    points = _greatCirclePoints(start, end, globeRadius);
+  }
   const attr = obj.geometry.getAttribute('position');
   for (let i = 0; i < points.length; i++) {
     const p = points[i];
@@ -3578,9 +3855,128 @@ function _globeLinkPositionUpdate(obj, { start, end }, link) {
     attr.array[i * 3 + 2] = p.z;
   }
   attr.needsUpdate = true;
-  // Returning true tells 3d-force-graph we handled positioning — its
-  // own straight-line update is skipped.
   return true;
+}
+
+
+// ----- 6.3: LOS — strict forward BFS through flows + catalog bridging --
+
+function _globeEffectiveFlowIncomingsForEdge(edgeId) {
+  // Catalog bridging — see Graph's effectiveFlowIncomingsForEdge.
+  // A bound edge "A calls B at /x" is fired by B's catalog row "B
+  // exposes /x" — flows on B reference the catalog id, not the bound
+  // id. So treat bound + matching catalog as equivalent incomings.
+  const e = globeSnapshot.edgeById[edgeId];
+  if (!e || !e.target_id) return [edgeId];
+  const out = [edgeId];
+  for (const cat of globeSnapshot.edges) {
+    if (cat.kind === 'catalog'
+        && cat.target_id === e.target_id
+        && cat.edge_type === e.edge_type
+        && cat.identifier === e.identifier) {
+      out.push(cat.id);
+    }
+  }
+  return out;
+}
+
+function _globeLightOfSight(link) {
+  _globeLosTimers.forEach(t => clearTimeout(t));
+  _globeLosTimers = [];
+  _globeLitEdgeIds = new Set();
+  _refreshGlobeLinkVisuals();
+
+  // Resolve seed edges. Bundle-aware: clicking a junction trunk OR any
+  // bundled contributor seeds the whole bundle in layer 0.
+  let seedEdges = [];
+  const seedVisualIds = new Set();
+  if (link.isJunctionOut && link.groupEdgeIds) {
+    seedVisualIds.add(link.id);
+    for (const id of link.groupEdgeIds) {
+      const e = globeSnapshot.edgeById[id];
+      if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+    }
+  } else if (link.isJunctionIn) {
+    const meta = globeSnapshot.junctionOutById || {};
+    for (const [outId, out] of Object.entries(meta)) {
+      if (out.groupEdgeIds.includes(link.id)) {
+        seedVisualIds.add(outId);
+        for (const id of out.groupEdgeIds) {
+          const e = globeSnapshot.edgeById[id];
+          if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+        }
+        break;
+      }
+    }
+    if (seedEdges.length === 0) {
+      const e = globeSnapshot.edgeById[link.id];
+      if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+    }
+  } else {
+    const e = globeSnapshot.edgeById[link.id];
+    if (e) { seedEdges.push(e); seedVisualIds.add(e.id); }
+  }
+
+  // Forward BFS — same algorithm as Graph's lightOfSight. Each edge's
+  // destination component is examined for flows whose incoming matches
+  // the edge (or its catalog bridge); each such flow's outgoing becomes
+  // a layer-N+1 seed.
+  const layers = [[...seedVisualIds]];
+  const visitedPairs = new Set();
+  const visitedOutgoing = new Set();
+  seedEdges.forEach(e => visitedOutgoing.add(e.id));
+
+  let currentEdges = seedEdges;
+  for (let depth = 1; depth < 100; depth++) {
+    const nextOutgoingIds = new Set();
+    for (const e of currentEdges) {
+      const destComponentId = e.target_id;
+      if (!destComponentId) continue;
+      const flowIncomings = _globeEffectiveFlowIncomingsForEdge(e.id);
+      let alreadySeen = false;
+      for (const fi of flowIncomings) {
+        if (visitedPairs.has(destComponentId + '|' + fi)) { alreadySeen = true; break; }
+      }
+      if (alreadySeen) continue;
+      for (const fi of flowIncomings) {
+        visitedPairs.add(destComponentId + '|' + fi);
+      }
+      for (const f of globeSnapshot.flows) {
+        if (f.component_id !== destComponentId) continue;
+        if (!flowIncomings.includes(f.incoming_edge_id)) continue;
+        if (!visitedOutgoing.has(f.outgoing_edge_id)) {
+          nextOutgoingIds.add(f.outgoing_edge_id);
+          visitedOutgoing.add(f.outgoing_edge_id);
+        }
+      }
+    }
+    if (nextOutgoingIds.size === 0) break;
+    const layerEdges = [];
+    const layerVisual = [];
+    for (const oid of nextOutgoingIds) {
+      const oEdge = globeSnapshot.edgeById[oid];
+      if (!oEdge) continue;
+      layerEdges.push(oEdge);
+      // If the outgoing is itself bundled, light its junction trunk too.
+      if (globeSnapshot.bundledEdgeIds.has(oid)) {
+        for (const [outId, out] of Object.entries(globeSnapshot.junctionOutById)) {
+          if (out.groupEdgeIds.includes(oid)) { layerVisual.push(outId); break; }
+        }
+      }
+      layerVisual.push(oid);
+    }
+    layers.push(layerVisual);
+    currentEdges = layerEdges;
+  }
+
+  // Animate the reveal — 220ms stagger per layer (same as Graph).
+  layers.forEach((layer, depth) => {
+    const t = setTimeout(() => {
+      layer.forEach(id => _globeLitEdgeIds.add(id));
+      _refreshGlobeLinkVisuals();
+    }, depth * 220);
+    _globeLosTimers.push(t);
+  });
 }
 
 
