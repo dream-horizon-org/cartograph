@@ -1371,3 +1371,20 @@ body {
   padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 14px;
 }
 .ins-triage button:hover { background: #30363d; }
+
+/* Phase 5.12: entity-ref pill + short entity-id badge */
+.entity-ref {
+  display: inline-flex; align-items: center; gap: 2px;
+  background: #1f2937; color: #58a6ff; padding: 1px 6px;
+  border-radius: 3px; font-size: 11px; text-decoration: none;
+  border: 1px solid #30363d;
+}
+.entity-ref:hover { background: #30363d; color: #79c0ff; }
+.entity-ref code {
+  background: transparent; color: inherit; font-size: 11px;
+  padding: 0;
+}
+.ent-id {
+  background: #21262d; color: #8b949e; padding: 1px 6px;
+  border-radius: 3px; font-size: 11px;
+}

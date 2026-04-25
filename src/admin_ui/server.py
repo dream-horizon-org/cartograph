@@ -472,11 +472,18 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(e))
 
     # --- ENTITIES VIEW (Phase 5.2) ---
+    #
+    # Naming convention (Phase 5.12 cleanup): 'type' is the canonical
+    # term across BOTH Communications (communications.type) and Entities
+    # (the row's entity-type). The earlier 'kind' parameter was
+    # internally consistent but conflicted visually with Communications'
+    # 'type', so it has been renamed throughout. The query param + JSON
+    # response field are both `type`. URL path stays /entity/{type}/{id}.
 
-    _ENTITY_KINDS = {"task", "consolidation", "clarification", "broadcast"}
-    # Per-kind terminal-state set — drives the "open / closed" filter
+    _ENTITY_TYPES = {"task", "consolidation", "clarification", "broadcast"}
+    # Per-type terminal-state set — drives the "open / closed" filter
     # without forcing the FE to know each state machine's terminals.
-    _TERMINAL_BY_KIND = {
+    _TERMINAL_BY_TYPE = {
         "task": {"TC"},
         "consolidation": {"D", "F"},
         "clarification": {"CC", "QR"},
@@ -485,7 +492,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/entities")
     def list_entities(
-        kind: Optional[str] = Query(None),
+        type: Optional[str] = Query(None),
         status: Optional[str] = Query(None),
         participant: Optional[str] = Query(None),
         q: Optional[str] = Query(None),
@@ -499,19 +506,22 @@ def create_app() -> FastAPI:
         normalised to a common shape so the FE can render a uniform list.
         Filters AND together. Sort: most-recent activity first.
         Cursor pagination via `before` (ISO timestamp on `last_activity`).
+        Response shape: {entities: [{type, id, status, participant_a,
+        participant_b, summary, last_activity, extra}], has_more}.
         """
-        if kind is not None and kind not in _ENTITY_KINDS:
+        kind = type  # local alias to keep the body readable
+        if kind is not None and kind not in _ENTITY_TYPES:
             raise HTTPException(
-                400, f"Invalid kind (allowed: {sorted(_ENTITY_KINDS)})"
+                400, f"Invalid type (allowed: {sorted(_ENTITY_TYPES)})"
             )
 
-        # Per-kind SELECTs, each producing the common columns:
+        # Per-type SELECTs, each producing the common columns:
         # kind, id, status, participant_a, participant_b, summary, last_activity, extra
         parts = []
         params: list = []
         if kind in (None, "task"):
             parts.append(
-                "SELECT 'task' AS kind, t.id::text AS id, t.status, "
+                "SELECT 'task' AS type, t.id::text AS id, t.status, "
                 "       t.owner_agent_id AS participant_a, "
                 "       t.worker_agent_id AS participant_b, "
                 "       LEFT(t.description, 200) AS summary, "
@@ -521,7 +531,7 @@ def create_app() -> FastAPI:
             )
         if kind in (None, "consolidation"):
             parts.append(
-                "SELECT 'consolidation' AS kind, c.id::text AS id, c.status, "
+                "SELECT 'consolidation' AS type, c.id::text AS id, c.status, "
                 "       c.agent_a_id AS participant_a, "
                 "       c.agent_b_id AS participant_b, "
                 "       (c.nomination_type || ' ' || c.component_a_id::text) AS summary, "
@@ -539,7 +549,7 @@ def create_app() -> FastAPI:
             )
         if kind in (None, "clarification"):
             parts.append(
-                "SELECT 'clarification' AS kind, cl.id::text AS id, cl.status, "
+                "SELECT 'clarification' AS type, cl.id::text AS id, cl.status, "
                 "       cl.asker_agent_id AS participant_a, "
                 "       cl.responder_agent_id AS participant_b, "
                 "       NULL AS summary, "
@@ -549,7 +559,7 @@ def create_app() -> FastAPI:
             )
         if kind in (None, "broadcast"):
             parts.append(
-                "SELECT 'broadcast' AS kind, b.id::text AS id, "
+                "SELECT 'broadcast' AS type, b.id::text AS id, "
                 "       CASE WHEN b.is_persistent THEN 'persistent' "
                 "            ELSE 'forward-only' END AS status, "
                 "       b.from_agent AS participant_a, "
@@ -567,25 +577,25 @@ def create_app() -> FastAPI:
             outer_where.append("status = %s")
             params.append(status)
         if open_only:
-            # Build NOT-terminal conditions per-kind. If kind is filtered,
-            # use only that kind's terminals; otherwise OR across all.
+            # Build NOT-terminal conditions per-type. If type is filtered,
+            # use only that type's terminals; otherwise OR across all.
             if kind:
-                terminals = _TERMINAL_BY_KIND.get(kind, set())
+                terminals = _TERMINAL_BY_TYPE.get(kind, set())
                 if terminals:
                     placeholder = ", ".join(["%s"] * len(terminals))
                     outer_where.append(f"status NOT IN ({placeholder})")
                     params.extend(terminals)
             else:
-                # Compose: NOT (kind=K AND status IN (terminals_K)) per kind
+                # Compose: NOT (type=T AND status IN (terminals_T)) per type
                 clauses = []
-                for k, terms in _TERMINAL_BY_KIND.items():
+                for t, terms in _TERMINAL_BY_TYPE.items():
                     if not terms:
                         continue
                     placeholder = ", ".join(["%s"] * len(terms))
                     clauses.append(
-                        f"NOT (kind = %s AND status IN ({placeholder}))"
+                        f"NOT (type = %s AND status IN ({placeholder}))"
                     )
-                    params.append(k)
+                    params.append(t)
                     params.extend(terms)
                 if clauses:
                     outer_where.append("(" + " AND ".join(clauses) + ")")
@@ -612,13 +622,14 @@ def create_app() -> FastAPI:
         has_more = len(rows) > limit
         return {"entities": rows[:limit], "has_more": has_more}
 
-    @app.get("/api/entity/{kind}/{entity_id}")
-    def get_entity_detail(kind: str, entity_id: str):
-        """Unified drill-down. Dispatches per-kind and normalises shape:
-        {kind, entity, thread, extras?}. Existing per-kind endpoints
+    @app.get("/api/entity/{type}/{entity_id}")
+    def get_entity_detail(type: str, entity_id: str):
+        """Unified drill-down. Dispatches per-type and normalises shape:
+        {type, entity, thread, extras?}. Existing per-kind endpoints
         (/api/task/:id etc.) stay as-is for backwards compatibility."""
-        if kind not in _ENTITY_KINDS:
-            raise HTTPException(400, f"Invalid kind: {kind}")
+        kind = type
+        if kind not in _ENTITY_TYPES:
+            raise HTTPException(400, f"Invalid type: {kind}")
         if kind == "task":
             t = execute_one("SELECT * FROM tasks WHERE id = %s::uuid", (entity_id,))
             if t is None:
@@ -628,7 +639,7 @@ def create_app() -> FastAPI:
                 "AND source_id = %s::uuid ORDER BY created_at",
                 (entity_id,),
             )
-            return {"kind": "task", "entity": t, "thread": thread}
+            return {"type": "task", "entity": t, "thread": thread}
         if kind == "consolidation":
             c = execute_one(
                 "SELECT * FROM consolidations WHERE id = %s::uuid",
@@ -641,7 +652,7 @@ def create_app() -> FastAPI:
                 "AND source_id = %s::uuid ORDER BY created_at",
                 (entity_id,),
             )
-            return {"kind": "consolidation", "entity": c, "thread": thread}
+            return {"type": "consolidation", "entity": c, "thread": thread}
         if kind == "clarification":
             cl = execute_one(
                 "SELECT * FROM clarifications WHERE id = %s::uuid",
@@ -654,7 +665,7 @@ def create_app() -> FastAPI:
                 "AND source_id = %s::uuid ORDER BY created_at",
                 (entity_id,),
             )
-            return {"kind": "clarification", "entity": cl, "thread": thread}
+            return {"type": "clarification", "entity": cl, "thread": thread}
         if kind == "broadcast":
             b = execute_one(
                 "SELECT * FROM communications WHERE id = %s::uuid "
@@ -668,8 +679,8 @@ def create_app() -> FastAPI:
                 "ORDER BY acked_at",
                 (entity_id,),
             )
-            return {"kind": "broadcast", "entity": b, "thread": [], "extras": {"acks": acks}}
-        raise HTTPException(400, f"Unsupported kind: {kind}")  # unreachable
+            return {"type": "broadcast", "entity": b, "thread": [], "extras": {"acks": acks}}
+        raise HTTPException(400, f"Unsupported type: {kind}")  # unreachable
 
     # --- CATALOG VIEW (Phase 5.3) ---
 

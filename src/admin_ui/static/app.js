@@ -833,13 +833,28 @@ function renderCommunications() {
             title="Click to ${m.is_persistent ? 'make forward-only' : 'mark persistent'}"
         >${m.is_persistent ? '📌 persistent' : '↪ forward-only'}</button>`
       : '';
+    // Phase 5.12: short entity-id badge for cross-tab cross-reference.
+    // For task / consolidation / clarification: that's source_id (the
+    // owning entity). For broadcast: the comm row itself IS the entity,
+    // so use m.id. For chat: no entity (chats aren't in Entities).
+    // Click → drill into Entities tab for that row.
+    let entityRefHtml = '';
+    if (m.type !== 'chat') {
+      const entityId = (m.type === 'broadcast') ? m.id : m.source_id;
+      if (entityId) {
+        entityRefHtml = ` <a class="entity-ref" href="/entities/${m.type}/${entityId}"
+            data-entity-type="${m.type}" data-entity-id="${entityId}"
+            title="Open in Entities tab"
+          >${m.type}/<code>${escapeHtml(String(entityId).slice(0, 8))}</code></a>`;
+      }
+    }
     li.innerHTML = `
       <div class="comm-head">
         <span class="type-pill type-${m.type}">${m.type}</span>
         <span class="from">${escapeHtml(m.from_agent)}</span>${fromCompTag}
         <span class="arrow">→</span>
         <span class="to">${escapeHtml(commTargetLabel(m))}</span>${toCompTag}
-        ${state}${viaBadge}${persistentPill}
+        ${state}${viaBadge}${persistentPill}${entityRefHtml}
         <span class="ts">${new Date(m.created_at).toLocaleString()}</span>
       </div>
       <div class="comm-body">${escapeHtml(excerpt)}${excerpt.length >= 120 ? '…' : ''}</div>
@@ -853,6 +868,15 @@ function renderCommunications() {
         const id = btn.dataset.bcastId;
         const next = btn.dataset.persistent !== '1';
         toggleBroadcastPersistence(id, next);
+        return;
+      }
+      // Phase 5.12: entity-ref click → SPA navigate to Entities tab,
+      // don't trigger full page load + don't drill into detail.
+      const ref = e.target.closest('.entity-ref');
+      if (ref) {
+        e.preventDefault();
+        e.stopPropagation();
+        Router.navigate(`/entities/${ref.dataset.entityType}/${ref.dataset.entityId}`);
         return;
       }
       selectCommunication(m);
@@ -2694,30 +2718,33 @@ document.querySelector('.tab[data-tab="graph"]')?.addEventListener('click', () =
 const entitiesState = {
   rows: [],
   hasMore: false,
-  selectedKind: null,
+  selectedType: null,
   selectedId: null,
 };
 
-const _STATUS_OPTIONS_BY_KIND = {
-  '':              [],   // all kinds → no specific list
+// Phase 5.12 cleanup: 'type' is the canonical term across both
+// Communications (communications.type) and Entities (entity-row type).
+// Filter dropdowns / labels / state keys all use 'type'.
+const _STATUS_OPTIONS_BY_TYPE = {
+  '':              [],   // all types → no specific list
   'task':          ['BW', 'BO', 'WD', 'TC'],
   'consolidation': ['B1', 'B2', 'R', 'M', 'MD', 'D', 'F'],
   'clarification': ['B1', 'B2', 'QR', 'QC', 'CC'],
   'broadcast':     ['persistent', 'forward-only'],
 };
 
-function _populateStatusOptions(kind) {
+function _populateStatusOptions(type) {
   const sel = document.getElementById('ent-status');
   if (!sel) return;
   const current = sel.value;
   sel.innerHTML = '<option value="">All</option>';
-  (_STATUS_OPTIONS_BY_KIND[kind] || []).forEach(s => {
+  (_STATUS_OPTIONS_BY_TYPE[type] || []).forEach(s => {
     const o = document.createElement('option');
     o.value = s; o.textContent = s;
     sel.appendChild(o);
   });
   // Preserve previous selection if still valid.
-  if (current && (_STATUS_OPTIONS_BY_KIND[kind] || []).includes(current)) {
+  if (current && (_STATUS_OPTIONS_BY_TYPE[type] || []).includes(current)) {
     sel.value = current;
   } else {
     sel.value = '';
@@ -2728,8 +2755,8 @@ function _readEntityFiltersFromUrl() {
   const q = Router.current().query;
   const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
   const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v === 'true'; };
-  setVal('ent-kind', q.kind);
-  _populateStatusOptions(q.kind || '');
+  setVal('ent-type', q.type);
+  _populateStatusOptions(q.type || '');
   setVal('ent-status', q.status);
   setChk('ent-open-only', q.open_only);
   setVal('ent-participant', q.participant);
@@ -2741,7 +2768,7 @@ function _writeEntityFiltersToUrl() {
   const chk = id => (document.getElementById(id) || {}).checked;
   Router.navigate('/entities', {
     set: {
-      kind: get('ent-kind'),
+      type: get('ent-type'),
       status: get('ent-status'),
       open_only: chk('ent-open-only') ? 'true' : '',
       participant: get('ent-participant'),
@@ -2754,7 +2781,7 @@ async function fetchEntities() {
   _readEntityFiltersFromUrl();
   const q = Router.current().query;
   const params = new URLSearchParams();
-  ['kind', 'status', 'participant', 'q'].forEach(k => {
+  ['type', 'status', 'participant', 'q'].forEach(k => {
     if (q[k]) params.set(k, q[k]);
   });
   if (q.open_only === 'true') params.set('open_only', 'true');
@@ -2789,9 +2816,9 @@ function renderEntities() {
   for (const e of entitiesState.rows) {
     const li = document.createElement('li');
     li.className = 'ent-row';
-    li.dataset.kind = e.kind;
+    li.dataset.type = e.type;
     li.dataset.id = e.id;
-    if (entitiesState.selectedKind === e.kind &&
+    if (entitiesState.selectedType === e.type &&
         entitiesState.selectedId === e.id) {
       li.classList.add('selected');
     }
@@ -2799,32 +2826,84 @@ function renderEntities() {
     const summaryText = (e.summary || '').slice(0, 140) || '(no summary)';
     const part = [e.participant_a, e.participant_b]
       .filter(Boolean).join(' ↔ ');
+    // Phase 5.12: persistence toggle on broadcast rows here too — same
+    // affordance as the Communications tab. Click is intercepted via
+    // .stopPropagation so the row doesn't drill into the broadcast detail.
+    const isPersistent = e.extra && e.extra.is_persistent;
+    const persistenceToggle = e.type === 'broadcast'
+      ? ` <button class="pill persistence-toggle ${isPersistent ? 'persistent-pill' : 'forward-only-pill'}"
+            data-bcast-id="${e.id}" data-persistent="${isPersistent ? '1' : '0'}"
+            title="Click to ${isPersistent ? 'make forward-only' : 'mark persistent'}"
+        >${isPersistent ? '📌 persistent' : '↪ forward-only'}</button>`
+      : '';
+    // Phase 5.12: short ID badge for cross-tab cross-reference.
+    const idBadge = `<code class="ent-id" title="${escapeHtml(e.id)}">${escapeHtml(e.id.slice(0, 8))}</code>`;
     li.innerHTML = `
       <div class="ent-row-top">
-        <span class="ent-kind ent-kind-${e.kind}">${e.kind}</span>
+        <span class="ent-kind ent-kind-${e.type}">${e.type}</span>
         <span class="ent-status">${e.status || ''}</span>
+        ${persistenceToggle}
+        ${idBadge}
         <span class="ent-ts">${ts}</span>
       </div>
       <div class="ent-summary">${escapeHtml(summaryText)}</div>
       <div class="ent-participants">${escapeHtml(part)}</div>
     `;
-    li.addEventListener('click', () => {
-      Router.navigate(`/entities/${e.kind}/${e.id}`);
+    li.addEventListener('click', evt => {
+      // Phase 5.12: same persistence-toggle interception used in
+      // Communications. Don't drill when admin clicks the toggle.
+      if (evt.target.closest('.persistence-toggle')) {
+        evt.stopPropagation();
+        const btn = evt.target.closest('.persistence-toggle');
+        const id = btn.dataset.bcastId;
+        const next = btn.dataset.persistent !== '1';
+        toggleBroadcastPersistenceFromEntities(id, next);
+        return;
+      }
+      Router.navigate(`/entities/${e.type}/${e.id}`);
     });
     $items.appendChild(li);
   }
 }
 
-async function showEntityDetail(kind, entityId) {
-  entitiesState.selectedKind = kind;
+async function toggleBroadcastPersistenceFromEntities(communicationId, persistent) {
+  try {
+    const res = await fetch(
+      `/api/broadcast/${encodeURIComponent(communicationId)}/persistence`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ persistent }),
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Failed to toggle persistence: ${err.detail || res.status}`);
+      return;
+    }
+    // Update local state in-place + re-render so the pill flips instantly.
+    const row = entitiesState.rows.find(r => r.id === communicationId);
+    if (row) {
+      row.extra = row.extra || {};
+      row.extra.is_persistent = persistent;
+      row.status = persistent ? 'persistent' : 'forward-only';
+    }
+    renderEntities();
+  } catch (e) {
+    console.error('toggleBroadcastPersistenceFromEntities failed:', e);
+  }
+}
+
+async function showEntityDetail(type, entityId) {
+  entitiesState.selectedType = type;
   entitiesState.selectedId = entityId;
   renderEntities();   // refresh selected highlight
   const $title = document.getElementById('ent-detail-title');
   const $body = document.getElementById('ent-detail-body');
-  $title.textContent = `${kind} · ${entityId.slice(0, 8)}…`;
+  $title.textContent = `${type} · ${entityId.slice(0, 8)}…`;
   $body.innerHTML = '<p class="empty">Loading…</p>';
   try {
-    const res = await fetch(`/api/entity/${kind}/${encodeURIComponent(entityId)}`);
+    const res = await fetch(`/api/entity/${type}/${encodeURIComponent(entityId)}`);
     if (!res.ok) {
       $body.innerHTML = `<p class="empty">Not found (${res.status}).</p>`;
       return;
@@ -2838,9 +2917,9 @@ async function showEntityDetail(kind, entityId) {
 }
 
 function _renderEntityDetailHtml(data) {
-  const { kind, entity, thread = [], extras } = data;
+  const { type, entity, thread = [], extras } = data;
   const head = `<div class="ent-detail-head">
-    <div><b>kind</b> ${kind}</div>
+    <div><b>type</b> ${type}</div>
     <div><b>id</b> <code>${entity.id || ''}</code></div>
     <div><b>status</b> ${entity.status || ''}</div>
   </div>`;
@@ -2883,9 +2962,9 @@ function escapeHtml(s) {
 // Wire entity-tab UI events.
 document.getElementById('ent-apply')?.addEventListener('click', _writeEntityFiltersToUrl);
 document.getElementById('ent-reset')?.addEventListener('click', () => {
-  Router.navigate('/entities', { clear: ['kind', 'status', 'participant', 'q', 'open_only'] });
+  Router.navigate('/entities', { clear: ['type', 'status', 'participant', 'q', 'open_only'] });
 });
-document.getElementById('ent-kind')?.addEventListener('change', e => {
+document.getElementById('ent-type')?.addEventListener('change', e => {
   _populateStatusOptions(e.target.value);
 });
 document.getElementById('ent-detail-close')?.addEventListener('click', () => {

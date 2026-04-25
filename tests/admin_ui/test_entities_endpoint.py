@@ -123,16 +123,16 @@ def test_empty_returns_empty_list(client):
 def test_kind_filter_isolates(client, task_factory, broadcast_factory):
     task_factory()
     broadcast_factory()
-    r = client.get("/api/entities?kind=task")
+    r = client.get("/api/entities?type=task")
     body = r.json()
-    assert body["entities"][0]["kind"] == "task"
-    assert all(e["kind"] == "task" for e in body["entities"])
+    assert body["entities"][0]["type"] == "task"
+    assert all(e["type"] == "task" for e in body["entities"])
 
 
 def test_status_filter(client, task_factory):
     task_factory(status="BW")
     task_factory(status="TC")
-    r = client.get("/api/entities?kind=task&status=BW")
+    r = client.get("/api/entities?type=task&status=BW")
     body = r.json()
     assert all(e["status"] == "BW" for e in body["entities"])
     assert len(body["entities"]) == 1
@@ -145,7 +145,7 @@ def test_open_only_excludes_terminal(client, task_factory, consolidation_factory
     consolidation_factory(status="D")   # terminal
     r = client.get("/api/entities?open_only=true")
     body = r.json()
-    statuses = {(e["kind"], e["status"]) for e in body["entities"]}
+    statuses = {(e["type"], e["status"]) for e in body["entities"]}
     assert ("task", "TC") not in statuses
     assert ("consolidation", "D") not in statuses
     assert ("task", "BW") in statuses
@@ -165,7 +165,7 @@ def test_pagination_cursor(client, task_factory):
     """Insert 5 tasks, paginate with limit=2."""
     for i in range(5):
         task_factory(worker=f"sme-pg-{i}", desc=f"task-{i}")
-    r1 = client.get("/api/entities", params={"kind": "task", "limit": 2})
+    r1 = client.get("/api/entities", params={"type": "task", "limit": 2})
     body1 = r1.json()
     assert len(body1["entities"]) == 2
     assert body1["has_more"]
@@ -174,7 +174,7 @@ def test_pagination_cursor(client, task_factory):
     # correctly (otherwise it gets decoded to a space server-side).
     r2 = client.get(
         "/api/entities",
-        params={"kind": "task", "limit": 2, "before": cursor},
+        params={"type": "task", "limit": 2, "before": cursor},
     )
     body2 = r2.json()
     assert len(body2["entities"]) <= 2
@@ -189,7 +189,7 @@ def test_drilldown_task(client, task_factory):
     r = client.get(f"/api/entity/task/{t['id']}")
     assert r.status_code == 200
     body = r.json()
-    assert body["kind"] == "task"
+    assert body["type"] == "task"
     assert body["entity"]["id"] == str(t["id"])
     assert "thread" in body
 
@@ -198,14 +198,14 @@ def test_drilldown_consolidation(client, consolidation_factory):
     c = consolidation_factory()
     r = client.get(f"/api/entity/consolidation/{c['id']}")
     assert r.status_code == 200
-    assert r.json()["kind"] == "consolidation"
+    assert r.json()["type"] == "consolidation"
 
 
 def test_drilldown_clarification(client, clarification_factory):
     cl = clarification_factory()
     r = client.get(f"/api/entity/clarification/{cl['id']}")
     assert r.status_code == 200
-    assert r.json()["kind"] == "clarification"
+    assert r.json()["type"] == "clarification"
 
 
 def test_drilldown_broadcast_includes_acks(client, broadcast_factory, agent_factory):
@@ -218,7 +218,7 @@ def test_drilldown_broadcast_includes_acks(client, broadcast_factory, agent_fact
     r = client.get(f"/api/entity/broadcast/{b['id']}")
     assert r.status_code == 200
     body = r.json()
-    assert body["kind"] == "broadcast"
+    assert body["type"] == "broadcast"
     assert body["extras"]["acks"][0]["agent_id"] == "sme-acker"
 
 
@@ -228,7 +228,7 @@ def test_drilldown_404(client):
 
 
 def test_invalid_kind_400(client):
-    r = client.get("/api/entities?kind=bogus")
+    r = client.get("/api/entities?type=bogus")
     assert r.status_code == 400
     r2 = client.get(f"/api/entity/bogus/{_new_uuid()}")
     assert r2.status_code == 400
