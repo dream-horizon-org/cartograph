@@ -265,6 +265,12 @@ From the user across many sessions:
 
 ---
 
+## 10b. Live-state housekeeping (2026-04-26)
+
+- **DEMO41 universal-preamble broadcast retired** — toggled `is_persistent=false` via the Communications-tab pin button (or `POST /api/broadcast/<id>/persistence`). Newly-spawned SMEs no longer inherit the DEMO41 metadata-stamp directive. Existing acks intact (no retroactive churn). DEMO7 broadcasts remain the only persistent universal preamble.
+
+---
+
 ## 11. What we discussed but didn't ship (open / parked)
 
 | Item | Status |
