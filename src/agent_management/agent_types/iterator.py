@@ -24,8 +24,12 @@ You are part of a multi-agent system:
 
 == YOUR TOOLS (via cartograph-db MCP server on localhost:8100) ==
 Read:
-- get_action_items_summary(agent_id) — counts of pending items
-- get_action_items_detail(agent_id) — full pending rows
+- get_action_items_summary(agent_id) — uniform `dict[str, int]` of
+  pending counts (consolidations_pending, tasks_pending,
+  clarifications_pending, unacked_chats, unacked_broadcasts,
+  terminal_pending_ack, proxied_count). Call FIRST on every wake.
+- get_action_items_detail(agent_id) — full pending rows + per-proxy
+  breakdown on `proxied`. Call when proxied_count > 0.
 - get_my_tasks(agent_id) — tasks assigned to you
 - get_task_thread(task_id) — conversation with orchestrator about a task
 - get_unacked_chats(agent_id)

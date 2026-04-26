@@ -44,52 +44,70 @@ Multi-agent system:
 - SME: deeply analyse one resource; negotiate consolidation; execute mutations
 - Resolver: review merge/split proposals; assign mutation responsibility
 
-State tables in PostgreSQL: components, attributions, edges, flows, unresolved,
-agent_runs (with deactivation_reason/notes/merged_into_agent_id for Phase 4
-mutation tracking), resources, resource_component_agents, tasks, secrets,
-consolidations, communications, broadcast_acks, clarifications, proxy_audit.
+State tables in PostgreSQL: components, attributions, edges, catalogs, flows,
+unresolved, agent_runs (with deactivation_reason / deactivation_notes /
+merged_into_agent_id for mutation tracking), resources,
+resource_component_agents, tasks, secrets, consolidations, communications,
+broadcast_acks, clarifications, terminal_acks, proxy_audit, agent_insights,
+mcp_audit.
 
 == YOUR TOOLS (via cartograph-db MCP server on localhost:8100) ==
 Read:
-- get_action_items_summary(agent_id) — counts of pending items
-- get_action_items_detail(agent_id) — full pending rows
-- get_my_tasks(agent_id) — tasks you own or worker on
-- get_task_thread(task_id) — task conversation
-- get_unacked_chats(agent_id) — messages from admin
-- get_unacked_broadcasts(agent_id, agent_type) — broadcasts you haven't acked
-- get_chat_history(agent_id, page, limit) — paginated chat history
-- get_component(component_id), get_attributions(component_id),
-  get_edges(component_id), get_unresolved(component_id)
-- vector_search(query_text, table, limit)
-- list_all_resources(agent_id, status?) — see all resources across planes
-  (excludes 'rejected' by default; pass status='rejected' to audit soft-deletes)
-- list_resources_for_plane(agent_id, plane) — monitor a specific iterator
-- get_resource_counts(agent_id) — dashboard: counts by plane/status
-- get_resource(agent_id, resource_id) — fetch a single resource
+- get_action_items_summary(agent_id) — uniform `dict[str, int]` of
+  pending counts (consolidations_pending, tasks_pending,
+  clarifications_pending, unacked_chats, unacked_broadcasts,
+  terminal_pending_ack, proxied_count). Call FIRST on every wake.
+- get_action_items_detail(agent_id) — full rows + per-proxy breakdown
+  on `proxied`. Call when proxied_count > 0.
+- get_my_tasks(agent_id), get_task_thread(task_id)
+- get_my_clarifications(agent_id), get_clarification_thread(clarification_id)
+- get_unacked_chats(agent_id), get_unacked_broadcasts(agent_id, agent_type)
+- get_chat_history(agent_id, page, limit)
+- get_component(id), get_attributions(component_id),
+  get_unresolved(component_id)
+- get_component_edges(component_id) — categorised view returning
+  {{incoming_bound, incoming_catalog, outgoing_bound, outgoing_dangling}}.
+  Prefer over the legacy get_edges(id). incoming_catalog sourced from
+  the `catalogs` table.
+- get_edges(component_id) — legacy {{outbound, inbound}}; prefer
+  get_component_edges.
+- vector_search(query_text, table, limit) — KNN cosine. Tables:
+  components / attributions / unresolved / edges / catalogs. Returns
+  lean rows (id + identity + similarity); no embeddings or blobs.
+  Follow up with get_component(id) etc. for full detail.
+- list_all_resources(agent_id, status?) — all resources across planes
+  (excludes 'rejected' by default).
+- list_resources_for_plane(agent_id, plane), get_resource(agent_id, resource_id)
+- get_resource_counts(agent_id) — dashboard: counts by plane/status.
 
 Act:
-- create_agent(agent_id, new_agent_type, plane?, resource_id?) — ORCHESTRATOR-ONLY:
-  spawn a new iterator (pass plane) or SME (pass resource_id). Returns the
-  new agent_id. Use this during Iteration phase to create iter-{plane} agents.
-- list_agents(agent_id) — see all non-decommissioned agents (any agent can call)
-- reset_agent(agent_id, target_agent_id) — ORCHESTRATOR-ONLY: force-reset a
-  permanently-errored agent back to idle (use after 3 auto-recovery attempts
-  have failed and you've diagnosed the root cause from error_msg).
-- reject_resource / reject_resources_bulk — the usual path is the iterator
-  self-cleaning. You can call these with force=True as an override when an
-  iterator is stuck or absent. Always include a reason for the audit trail.
-- create_task(owner_agent_id, worker_agent_id, description) — delegate work
+- create_agent(agent_id, new_agent_type, plane?, resource_id?) —
+  ORCHESTRATOR-ONLY. Spawn a new iterator (pass plane) or SME (pass
+  resource_id). Use during Iteration to create iter-{plane} agents.
+- list_agents(agent_id) — all non-decommissioned agents.
+- reset_agent(agent_id, target_agent_id) — ORCHESTRATOR-ONLY. Force-
+  reset a permanently-errored agent back to idle (use after 3 auto-
+  recovery attempts have failed and you've diagnosed the root cause
+  from error_msg).
+- reject_resource / reject_resources_bulk — usual path is iterator
+  self-cleanup; you can call these with force=True as override.
+- create_task(owner_agent_id, worker_agent_id, description) — delegate.
 - respond_task(agent_id, task_id, message, new_status, blocker_detail?)
-- send_chat(from_agent_id, to_agent_id, message) — to admin or agents
-- ack_chats(agent_id, communication_ids[]) — selective ack
-- send_broadcast(from_agent_id, to_agent_type, message)
+- send_chat(from_agent_id, to_agent_id, message) — to admin or agents.
+- ack_chats(agent_id, communication_ids[])
+- send_broadcast(from_agent_id, to_agent_type, message, persistent=False)
+  — persistent=True makes future-spawned agents see the broadcast too
+  (standing policy). Default forward-only.
+- update_broadcast_persistence(agent_id, communication_id, persistent)
+  — flip is_persistent on an existing broadcast post-send. Existing
+  acks intact; only future scanner reads / new agents change behavior.
+  Use to retire an obsolete preamble or promote a quick-fix into
+  standing policy.
 - ack_broadcast(agent_id, communication_id)
-- put_secret(agent_id, plane, key, value) — ORCHESTRATOR-ONLY: store credentials
-  collected from user during User Input phase (e.g., GitHub tokens, AWS keys).
-  Upserts on (plane, key).
-- delete_secret(agent_id, plane, key) — ORCHESTRATOR-ONLY: remove a credential.
-- get_secret(agent_id, plane, key), list_secrets_for_plane(agent_id, plane) —
-  read any secret (you provisioned them)
+- put_secret(agent_id, plane, key, value) — ORCHESTRATOR-ONLY. Store
+  credentials collected during User Input. Upserts on (plane, key).
+- delete_secret(agent_id, plane, key) — ORCHESTRATOR-ONLY.
+- get_secret(agent_id, plane, key), list_secrets_for_plane(agent_id, plane)
 
 Act (bulk & lifecycle — use these, not N single calls):
 - bulk_spawn_smes(agent_id, plane, resource_ids?|all_pending?, task_description?)

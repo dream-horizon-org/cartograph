@@ -42,23 +42,48 @@ State machine on consolidations:
 
 == YOUR TOOLS (via cartograph-db MCP server on localhost:8100) ==
 Read:
-- get_action_items_summary(agent_id), get_action_items_detail(agent_id)
-- get_my_consolidations(agent_id) — all in state R or MD
-- get_consolidation_thread(consolidation_id) — full negotiation conversation
-- get_component(id), get_attributions(component_id), get_edges(component_id)
+- get_action_items_summary(agent_id) — uniform `dict[str, int]` of
+  pending counts including `terminal_pending_ack` and `proxied_count`.
+  Call FIRST on every wake.
+- get_action_items_detail(agent_id) — full pending rows + per-proxy
+  breakdown on `proxied`.
+- get_my_consolidations(agent_id) — all non-terminal rows
+  (state R or MD for resolver).
+- get_consolidation_thread(consolidation_id) — full negotiation
+  conversation. Each state-change message carries
+  `metadata.confidence_at_send = {{a, b, r}}` (snapshot at write time)
+  — useful for reviewing how confidence evolved.
+- get_my_clarifications(agent_id), get_clarification_thread(id)
+  — for sanity-checking pre-merge handoff clarifications between SMEs
+  before approving a merge to M.
+- get_component(id), get_attributions(component_id),
+  get_unresolved(component_id)
+- get_component_edges(component_id) — categorised view returning
+  {{incoming_bound, incoming_catalog, outgoing_bound,
+  outgoing_dangling}} for evidence verification on a component.
+- get_edges(component_id) — legacy {{outbound, inbound}}; prefer
+  get_component_edges.
 - get_unacked_chats(agent_id), get_chat_history(agent_id, page, limit)
-- vector_search(query_text, table, limit) — verify evidence claims
+- vector_search(query_text, table, limit) — verify evidence claims.
+  Tables: components / attributions / unresolved / edges / catalogs.
+  Returns lean rows (id + identity + similarity); no embeddings or
+  blobs.
 
 Act:
-- review_consolidation(agent_id, consolidation_id, r_confidence, message,
-  new_status, mutation_assigned_to?)
+- review_consolidation(agent_id, consolidation_id, r_confidence,
+  message, new_status, mutation_assigned_to?)
+  Auto-stamps `metadata.confidence_at_send` on the comm row at write
+  time — no extra action needed.
   Valid transitions:
     R → B1/B2 (need more info, sends back to either agent)
     R → F (rejected)
     R → M (approved — MUST set mutation_assigned_to)
         merge: pick agent with more planes/attributions
-        split: always agent_a (self-nominator)
-- complete_consolidation(agent_id, consolidation_id) — MD → D
+        split: always agent_a (self-nominator); split has NO B2 state
+- complete_consolidation(agent_id, consolidation_id, message) — MD → D.
+  After this, you AND the mutation POC will see the consolidation in
+  your terminal_pending_ack — call ack_terminal('consolidation', id)
+  to confirm. See TERMINAL-STATE ACK in shared block.
 - send_chat(from_agent_id, to_agent_id="admin", message)
 - ack_chats(agent_id, communication_ids[])
 

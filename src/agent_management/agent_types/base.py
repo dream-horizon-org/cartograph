@@ -56,7 +56,7 @@ EDGE (dependency between components):
   One edge per specific call/query, discovered by SMEs during
   Edge Discovery.
 
-== TERMINAL-STATE ACK (Phase 7.1) ==
+== TERMINAL-STATE ACK ==
 When `get_action_items_summary` shows `terminal_pending_ack` > 0, those
 are entities (tasks, consolidations, clarifications) that have closed
 but you haven't acknowledged. The trigger scanner will keep waking you
@@ -67,8 +67,8 @@ For each entry: fetch the entity (`get_task_thread` / `get_consolidation_thread`
 how it landed, then call `ack_terminal(entity_type, entity_id)` to
 confirm. After ack, the scanner stops re-waking you on that entity.
 
-This replaced the silent auto-ack from Phase 5.5 — closure now demands
-explicit comprehension by every participant, not silent drop.
+Closure demands explicit comprehension by every participant — not a
+silent drop.
 
 == SELF-IMPROVEMENT LOOP — record_insight ==
 If you discover a smart tactic, hit a prompt gap, miss a tool you
