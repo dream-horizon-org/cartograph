@@ -2324,22 +2324,488 @@ Total: ~38 new. Target final count: ~421 (from 383).
 
 ---
 
-## Phase 6+: Future phases (planned, not started)
+## Phase 7: Acks + handoff + self-loops + catalogs first-class
 
-**Phase 6 — Phase-flow completion** (orchestrator-driven sweeps):
+Bundle of four conceptually distinct improvements that share infrastructure (schema migrations, scanner extensions, agent-prompt updates) and naturally batch together. Sub-phases are independently shippable but presented as one phase for narrative coherence.
+
+**Note on numbering:** Phase 6 (Globe — sphere-constrained graph view) was carved off into the `feat/globe-experimental` branch and is NOT on main. Future phases (phase-flow completion, observability, DM, knowledge pool) shift right by one — see end-of-file.
+
+### 7.0 Motivation
+
+Four threads surfaced through Phase 5 + 6 work + design discussions:
+
+1. **Phase 5.5's "auto-ack on terminal communications" was solving the wrong problem.** It silently dropped closure announcements without explicit comprehension by participants. Closure should be an explicit forcing function — every participant should be re-woken on terminal entities until they ack.
+2. **Merge protocol has no structured handoff.** The agent being absorbed (B) has accumulated runtime knowledge — caveats, configs, runtime nuances — that aren't captured in `component_doc_md` / source_slice / attributions. Once B is decommissioned, that context is gone. Pre-merge clarification gives A a chance to extract it.
+3. **`edges_no_self_loop_v2` CHECK constraint blocks legitimate self-invocation patterns** (cron self-trigger, service publishing + consuming the same topic, recursive component-level calls). Loosening costs nothing.
+4. **Catalog modeling via `from IS NULL` in `edges` is structurally awkward** — `edge_type='calls'` on a callee declaration grafts the future-caller's POV onto the callee. A separate `catalogs` table with noun-form `kind` enum (`endpoint`/`topic`/`queue`/...) reads cleanly and gives us first-class queryability for unmatched-caller / orphan-catalog detection.
+
+---
+
+### 7.1 Terminal-state ack model (replaces Phase 5.5 auto-ack)
+
+#### Schema
+
+New table:
+```sql
+CREATE TABLE terminal_acks (
+  entity_type TEXT NOT NULL CHECK (entity_type IN ('task','consolidation','clarification')),
+  entity_id   UUID NOT NULL,
+  agent_id    TEXT NOT NULL REFERENCES agent_runs(agent_id) ON DELETE CASCADE,
+  acked_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (entity_type, entity_id, agent_id)
+);
+CREATE INDEX idx_term_acks_agent ON terminal_acks(agent_id);
+```
+
+#### Phase 5.5 revert
+
+Drop `acked_at = now()` pre-stamping at four sites:
+- `src/cartograph_mcp/tools/tasks.py::respond_task` — TC transition
+- `src/cartograph_mcp/tools/consolidation.py::review_consolidation` — F transition
+- `src/cartograph_mcp/tools/consolidation.py::complete_consolidation` — D transition (both rows)
+- `src/cartograph_mcp/tools/clarification.py::respond_clarification` — CC + QR transitions
+
+Terminal announcement comm rows now land UNACKED. Trigger scanner picks them up via the new wake condition.
+
+#### MCP tool
+
+```
+ack_terminal(agent_id, entity_type, entity_id) -> dict
+  Insert a row into terminal_acks. ON CONFLICT DO NOTHING (idempotent).
+  Validates:
+    - entity_type ∈ ('task','consolidation','clarification')
+    - entity exists at entity_id
+    - caller is a participant of the entity
+    - entity is in a terminal state (TC for task, D/F for consolidation, CC/QR for clarification)
+  Returns {acked: bool, already_acked: bool}
+```
+
+Lives in `src/cartograph_mcp/tools/terminal_acks.py` (new file).
+
+#### Trigger scanner extension
+
+Add three EXISTS-NOT scans in `src/trigger_management/scanners/`. Each returns "wake needed" if there's a terminal-state participant entity I haven't acked:
+
+```sql
+-- Tasks
+SELECT 1 FROM tasks t
+ WHERE (t.owner_agent_id = :me OR t.worker_agent_id = :me)
+   AND t.status = 'TC'
+   AND NOT EXISTS (
+         SELECT 1 FROM terminal_acks ta
+          WHERE ta.entity_type = 'task' AND ta.entity_id = t.id AND ta.agent_id = :me
+       )
+LIMIT 1
+```
+
+Same shape for consolidations (`status IN ('D','F')`, participants = `agent_a_id`, `agent_b_id`, `resolved_by`, `mutation_assigned_to`) and clarifications (`status IN ('CC','QR')`, participants = `asker_agent_id`, `responder_agent_id`).
+
+Combine into existing trigger scan. Add `terminal_pending_ack_count` to action-items summary.
+
+#### Action-items surface
+
+Extend `get_action_items_summary` + `get_action_items_detail` to include:
+```json
+{
+  "terminal_pending_ack": [
+    {"entity_type": "task", "entity_id": "...", "summary": "...", "since": "..."}
+  ]
+}
+```
+
+Agents see this on every wake until they ack each entry.
+
+#### Decommission auto-ack
+
+In `src/cartograph_mcp/tools/mutation.py::absorb_agent`: after decommissioning the target, run the scanner query for the target and bulk-insert terminal_acks rows on the target's behalf. ~5 lines.
+
+This handles the case where B has unacked terminal entities at decommission time — A can't easily ack on B's behalf via proxy (terminal-acks aren't a comm row), so we just close them out automatically. Audit trail loss is acceptable per design discussion.
+
+#### Agent prompts
+
+All four agent types get a wake-up rule (in `MISSION_AND_VOCABULARY` shared block in `src/agent_management/agent_types/base.py`):
+
+> "When `get_action_items_summary` shows `terminal_pending_ack` entries, fetch each entity (`get_*_thread` by id), read the resolution, then call `ack_terminal(entity_type, entity_id)` to confirm understanding. You will keep being woken on these until you ack."
+
+#### Tests (~10 new in `tests/mcp_tools/test_terminal_acks.py`)
+
+- `test_ack_terminal_inserts_row` — happy path
+- `test_ack_terminal_idempotent` — ON CONFLICT DO NOTHING
+- `test_ack_terminal_rejects_non_participant`
+- `test_ack_terminal_rejects_non_terminal_entity`
+- `test_ack_terminal_rejects_unknown_entity`
+- `test_scanner_wakes_on_unacked_terminal_task`
+- `test_scanner_wakes_on_unacked_terminal_consolidation_for_both_agents`
+- `test_scanner_wakes_on_unacked_terminal_clarification`
+- `test_scanner_skips_after_ack`
+- `test_decommission_auto_acks_target_pending`
+
+Plus update existing `tests/mcp_tools/test_terminal_auto_ack.py` (Phase 5.5 tests) — assertions inverted: announcement comm should be `acked_at IS NULL` after the transition.
+
+#### Files touched
+
+- `src/shared/migrations.py` — terminal_acks table + index
+- `src/cartograph_mcp/tools/{tasks,consolidation,clarification}.py` — revert auto-ack
+- `src/cartograph_mcp/tools/terminal_acks.py` — new
+- `src/cartograph_mcp/tools/action_items.py` — extend summary + detail responses
+- `src/cartograph_mcp/tools/mutation.py` — decommission auto-ack in absorb_agent
+- `src/cartograph_mcp/server.py` — register `ack_terminal` MCP tool
+- `src/trigger_management/scanners/` — extend wake scan
+- `src/agent_management/agent_types/base.py` — shared prompt addition
+- `tests/mcp_tools/test_terminal_acks.py` — new
+- `tests/mcp_tools/test_terminal_auto_ack.py` — invert assertions
+- `tests/admin_ui/conftest.py` — add `terminal_acks` to clean_tables
+
+**Effort:** S (~½ day)
+
+---
+
+### 7.2 Pre-merge context handoff convention
+
+#### No new tools, no schema. Pure agent-prompt addition.
+
+In `src/agent_management/agent_types/sme.py`, in the merge mutation section, add a step before `absorb_agent`:
+
+> **Step 0 — Pre-absorb handoff (mandatory):**
+> Before calling `absorb_agent(target_agent_id=B)`, raise a clarification to B:
+>
+> ```
+> create_clarification(
+>   asker_agent_id = me,
+>   responder_agent_id = B,
+>   question_message = "Pre-merge handoff: I'm about to absorb you. Brief me on
+>     anything important you know that's NOT captured in your component_doc_md /
+>     source_slice / attributions / edges / flows: configs, runtime nuances,
+>     known issues, monitoring quirks, deploy gotchas. Respond with QC."
+> )
+> ```
+>
+> WAIT for B's QC response. Read it. Capture relevant facts in your own
+> `component_doc_md` (call `upsert_component` with appended doc). THEN call
+> `absorb_agent`.
+>
+> If B is unresponsive for >30 minutes (no state change off B2), escalate
+> to admin via `send_chat` instead of blocking the mutation. Admin may
+> proceed without handoff or intervene with B directly.
+
+Same convention for split via `spawn_child_agent` (parent can pre-clarify with admin or a domain-expert SME if needed for briefing quality). Documented as optional for split.
+
+#### Tests
+
+None — convention only, manual smoke-verifiable. The `create_clarification` + `respond_clarification` + `upsert_component` tools all have existing test coverage.
+
+#### Files touched
+
+- `src/agent_management/agent_types/sme.py` — prompt update only
+
+**Effort:** XS (~30 min)
+
+---
+
+### 7.3 Self-loop CHECK constraint relaxation
+
+#### Schema
+
+Drop the `edges_no_self_loop_v2` CHECK constraint via migration:
+```sql
+ALTER TABLE edges DROP CONSTRAINT IF EXISTS edges_no_self_loop_v2;
+```
+
+The other two CHECK constraints stay (`edges_at_least_one_endpoint`, the old `edges_no_self_loop` if it exists).
+
+#### MCP tools
+
+No changes. `upsert_edge_outbound` already accepts arbitrary `from_component_id` + `to_component_id`; the constraint was the only blocker.
+
+#### Graph view
+
+3d-force-graph handles self-links natively — they render as a small curl off the node. No code change. Bundling already works: a self-loop `(X, X, calls, /foo)` joins the convergence-group keyed on `(target=X, calls, /foo)` and becomes a contributor at the junction.
+
+#### Globe view
+
+Globe lives on `feat/globe-experimental` branch — not on main. Adding the great-circle self-loop fallback there is part of that branch's polish, NOT this phase.
+
+#### Tests (~3 new in `tests/mcp_tools/test_self_loops.py`)
+
+- `test_self_loop_bound_edge_accepted` — `upsert_edge_outbound` with from = to succeeds
+- `test_self_loop_idempotent` — ON CONFLICT updates as expected
+- `test_self_loop_bundles_into_existing_junction` — verify convergence-group key includes self-loop
+
+#### Files touched
+
+- `src/shared/migrations.py` — drop constraint
+- `tests/mcp_tools/test_self_loops.py` — new
+
+**Effort:** XS (~½ hour)
+
+---
+
+### 7.4 Catalogs as first-class table
+
+The largest sub-phase. Promotes catalog rows from `edges` (where `from IS NULL`) to a dedicated `catalogs` table with noun-form `kind` enum.
+
+#### Schema
+
+```sql
+CREATE TABLE catalogs (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  component_id  UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN (
+                  'endpoint',         -- HTTP endpoint
+                  'topic',            -- pub/sub topic
+                  'queue',            -- message queue
+                  'data_source',      -- DB / cache / object store
+                  'trigger_target'    -- something that can be triggered
+                )),
+  identifier    TEXT NOT NULL,        -- the specific endpoint/topic/queue/etc.
+  metadata      JSONB NOT NULL DEFAULT '{}',
+  confidence    FLOAT NOT NULL DEFAULT 1.0,
+  embedding     vector(1024),         -- mxbai-embed-large dim
+  discovered_by TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  UNIQUE (component_id, kind, identifier)
+);
+
+CREATE INDEX idx_catalogs_component ON catalogs(component_id);
+CREATE INDEX idx_catalogs_identifier ON catalogs(identifier);
+CREATE INDEX idx_catalogs_kind ON catalogs(kind);
+CREATE INDEX idx_catalogs_embedding ON catalogs USING hnsw (embedding vector_cosine_ops);
+```
+
+#### Migration
+
+Move existing catalog-shape rows from `edges` to `catalogs`:
+```sql
+INSERT INTO catalogs (component_id, kind, identifier, metadata, confidence, embedding, discovered_by, created_at)
+SELECT to_component_id,
+       CASE edge_type
+         WHEN 'calls' THEN 'endpoint'
+         WHEN 'reads_from' THEN 'data_source'
+         WHEN 'writes_to' THEN 'data_source'
+         WHEN 'publishes_to' THEN 'topic'
+         WHEN 'consumes_from' THEN 'queue'
+         WHEN 'triggers' THEN 'trigger_target'
+         WHEN 'runs_on' THEN 'data_source'  -- infrastructure-side; may need review
+         ELSE 'endpoint'
+       END AS kind,
+       identifier, metadata, confidence, embedding, discovered_by, created_at
+FROM edges
+WHERE from_component_id IS NULL
+ON CONFLICT (component_id, kind, identifier) DO NOTHING;
+
+DELETE FROM edges WHERE from_component_id IS NULL;
+```
+
+After migration, `edges_at_least_one_endpoint` CHECK still holds (we removed the NULL-from rows). Drop the catalog-related index `edges_catalog_unique` (no longer needed).
+
+#### MCP tools — added
+
+```
+upsert_catalog(agent_id, component_id, kind, identifier, metadata?, confidence?) -> dict
+  Replaces upsert_edge_catalog.
+  Validates: agent owns component_id via RCA.
+  ON CONFLICT (component_id, kind, identifier) DO UPDATE
+    metadata = catalogs.metadata || EXCLUDED.metadata,
+    confidence = GREATEST(catalogs.confidence, EXCLUDED.confidence),
+    updated_at = now().
+  Auto-embeds identifier via shared.embedding.
+
+get_my_catalogs(agent_id) -> list[dict]
+  Returns catalogs for components the agent owns (via RCA).
+  Includes a 'caller_count' field (how many bound edges currently
+  match this catalog).
+
+get_my_catalog_callers(agent_id, catalog_id?) -> dict
+  For each of agent's catalog rows, list bound callers matched by
+  (target=catalog.component_id, edge_type=mapped_from_kind, identifier).
+  Returns {catalog_id: [{caller_id, edge_id, edge_type, identifier}]}.
+
+get_unmatched_callers(agent_id) -> list[dict]
+  Bound edges whose target = a component owned by agent, but where no
+  matching catalog row exists. Per row:
+    {edge_id, source_id (caller), edge_type, identifier,
+     suggested_action: 'add_catalog' | 'raise_clarification'}
+  Suggested action is informational only — SME triages: dynamic
+  identifier (DB-like, ignore), missing catalog (upsert), caller
+  error (raise clarification).
+
+get_orphan_catalogs(agent_id) -> list[dict]
+  Catalogs the agent owns where no bound caller currently matches.
+  Companion to get_unmatched_callers — together they show the
+  catalog-coverage health of the agent's component.
+```
+
+The kind ↔ edge_type mapping for matching:
+```python
+_CATALOG_KIND_TO_EDGE_TYPES = {
+    'endpoint':       {'calls'},
+    'topic':          {'publishes_to', 'consumes_from'},
+    'queue':          {'publishes_to', 'consumes_from'},
+    'data_source':    {'reads_from', 'writes_to'},
+    'trigger_target': {'triggers'},
+}
+```
+
+#### MCP tools — renamed
+
+- `upsert_edge_catalog` → `upsert_catalog` (signature change: `kind` replaces `edge_type` for the new noun semantics)
+
+The old name kept as a deprecated wrapper that translates `edge_type` → `kind` and forwards to `upsert_catalog` (via the inverse mapping) for one phase, then removed in Phase 8+.
+
+#### MCP tools — modified
+
+- `bind_edge` — when binding a dangling outgoing, no longer matches against catalogs in `edges`; instead optionally validates against a `catalogs` row by `(to_component_id, mapped_kind, identifier)`. Soft validation (warn but don't block) — preserves "bind first, catalog later" workflow.
+- `get_component_edges` — return shape adds a top-level `catalog` bucket sourced from the new table (separate from `incoming_bound`/`outgoing_bound`/`outgoing_dangling`). Or rename to `incoming_catalog` to keep names parallel.
+
+#### LOS BFS — catalog bridging across two tables
+
+Today `effectiveFlowIncomingsForEdge` walks `graphSnapshot.edges` to find catalog rows matching `(target, edge_type, identifier)`. Update to walk `catalogs` table instead, mapping `edge_type` to expected catalog `kind`. This is FE-only logic; same algorithm.
+
+#### Backend `/api/graph` payload
+
+Returns `nodes`, `edges` (only bound + dangling now), `flows`, AND new `catalogs` array:
+```json
+{
+  "nodes": [...],
+  "edges": [...],
+  "flows": [...],
+  "catalogs": [{
+    "id": "...", "component_id": "...", "kind": "endpoint",
+    "identifier": "GET /scorecard", "metadata": {...}, "confidence": 0.95
+  }]
+}
+```
+
+FE Graph + Catalog tabs + Globe consume the new shape — UNION local renders so the visual orphan-catalog stub spike treatment continues to work.
+
+#### Embedding pipeline
+
+Catalog rows embed `"{kind}: {identifier}"` at write time. Same pipeline as edges/components.
+
+#### Stale hygiene
+
+`get_stale_edges` continues to surface bound edges whose target component is decommissioned. Catalogs of decommissioned components are now visible via `get_orphan_catalogs` (returning rows with no callers — which post-decommission they all are).
+
+#### Agent prompts
+
+Update SME prompt (`sme.py`):
+
+- **Materialisation Step 2** — replace `upsert_edge_catalog(edge_type=...)` references with `upsert_catalog(kind=...)`. Update the noun semantics: "applications/lambdas/external-services declare exposed endpoints; databases declare data_source rows for queryable schemas; queue components declare queue rows for accepted topics; etc."
+- **Hygiene cycle** — add: "On wake, periodically call `get_unmatched_callers(your_agent_id)` to find bound edges to your component that have no matching catalog row. Triage each: dynamic identifier (DB-like, ignore), missing catalog (call `upsert_catalog`), caller error (raise clarification)."
+
+#### Backwards compatibility
+
+- The deprecated `upsert_edge_catalog` shim accepts the old call shape and forwards. Logged at WARN level so we know who's still calling it.
+- The old `incoming_catalog` field on `get_component_edges` still returned (sourced from new table now), so admin UI / Graph / Globe don't need to change their FE shape immediately.
+
+#### Tests (~20 new in `tests/mcp_tools/test_catalogs.py` + extensions)
+
+- `test_catalogs_table_exists`
+- `test_upsert_catalog_creates`
+- `test_upsert_catalog_scope_check_owner_only`
+- `test_upsert_catalog_idempotent_on_unique_key`
+- `test_upsert_catalog_metadata_merge_on_conflict`
+- `test_upsert_catalog_kind_validation`
+- `test_upsert_catalog_embeds_identifier`
+- `test_get_my_catalogs_returns_owned_only`
+- `test_get_my_catalogs_includes_caller_count`
+- `test_get_my_catalog_callers_matches_by_kind_mapping`
+- `test_get_unmatched_callers_finds_orphan_bounds`
+- `test_get_unmatched_callers_skips_matched`
+- `test_get_orphan_catalogs_returns_zero_caller_rows`
+- `test_get_orphan_catalogs_skips_matched`
+- `test_bind_edge_no_longer_blocks_on_missing_catalog` (soft validation)
+- `test_migration_moves_existing_catalog_rows` (manual / fixture-based)
+- `test_old_upsert_edge_catalog_shim_forwards`
+- `test_graph_endpoint_returns_catalogs_array` (admin_ui)
+- `test_graph_endpoint_excludes_catalog_rows_from_edges` (admin_ui)
+- `test_los_bfs_bridges_catalog_via_two_tables` (smoke; manually verified)
+
+Plus migrations of existing edge tests that asserted catalog rows in `edges` — update assertions or move to catalog tests.
+
+#### Files touched
+
+- `src/shared/migrations.py` — catalogs table + indexes + migration of catalog rows + drop edges_catalog_unique
+- `src/cartograph_mcp/tools/catalogs.py` — new (upsert_catalog, get_my_catalogs, get_my_catalog_callers, get_unmatched_callers, get_orphan_catalogs)
+- `src/cartograph_mcp/tools/components.py` — `bind_edge` soft validation against catalogs
+- `src/cartograph_mcp/tools/components.py` — `get_component_edges` reads catalog bucket from new table
+- `src/cartograph_mcp/server.py` — register 5 new tools + deprecation wrapper for `upsert_edge_catalog`
+- `src/admin_ui/server.py` — `/api/graph` UNION includes catalogs array
+- `src/admin_ui/static/app.js` — Graph tab uses new catalogs source for orphan stub rendering
+- `src/admin_ui/static/app.js` — Catalog tab drill-down reads from new shape (was already consuming the `incoming_catalog` bucket; should still work)
+- `src/agent_management/agent_types/sme.py` — prompt rewrites
+- `tests/mcp_tools/test_catalogs.py` — new
+- `tests/mcp_tools/test_edges.py` + `test_flows.py` — assertions updated
+- `tests/admin_ui/test_graph_endpoint.py` — extend for catalogs payload
+- `tests/admin_ui/conftest.py` + `tests/mcp_tools/conftest.py` — clean_tables adds `catalogs`
+
+**Effort:** L (~2-3 days)
+
+---
+
+### 7.5 Sub-phase ordering + commit cadence
+
+```
+7.0  pre-Phase-7 doc sync (DONE — commit c67ecb3)
+7.1  terminal-acks            ← S, ½ day
+7.2  pre-merge handoff prompt ← XS, 30 min  (independent, can land any time)
+7.3  self-loop loosening       ← XS, ½ hour (independent, can land any time)
+7.4  catalogs first-class      ← L, 2-3 days (largest)
+7.5  doc + memory sync         ← M, ½ day
+```
+
+Each sub-phase = its own commit + push. TDD: tests written first, run red, then implementation makes them green.
+
+### 7.6 Test budget
+
+| Sub-phase | New tests | Modified tests |
+|-----------|-----------|----------------|
+| 7.1 | ~10 | ~8 (Phase 5.5 invert) |
+| 7.2 | 0 | 0 |
+| 7.3 | ~3 | 0 |
+| 7.4 | ~20 | ~5 (edge tests with catalog-row assertions) |
+
+Total: ~33 new + ~13 modified. Target final count: ~545 (from ~510).
+
+### 7.7 Schema delta summary
+
+- `+terminal_acks` table
+- `+catalogs` table
+- `-edges_no_self_loop_v2` constraint
+- `-edges_catalog_unique` index
+- migration: catalog rows moved from `edges` to `catalogs`
+- communications table unchanged (no longer auto-stamping acked_at on terminal rows)
+
+### 7.8 MCP tool delta summary
+
+- `+ack_terminal` (Phase 7.1)
+- `+upsert_catalog`, `+get_my_catalogs`, `+get_my_catalog_callers`, `+get_unmatched_callers`, `+get_orphan_catalogs` (Phase 7.4)
+- `=upsert_edge_catalog` (kept as deprecated wrapper)
+
+Net: 79 → 84 tools.
+
+---
+
+## Phase 8+: Future phases (planned, not started)
+
+**Phase 8 — Phase-flow completion** (orchestrator-driven sweeps):
 - **Resolution phase orchestration** — wake config-SMEs to resolve `unresolved` table rows; re-run cosine ladder against now-consolidated component registry.
 - **Edge Discovery phase orchestration** — dedicated bidirectional-validation pass + telemetry trace edge injection.
 - **User Feedback phase** — admin UI workflows for "merge these two" / "missed this" / "this doesn't exist anymore" → orchestrator routes to the right SME(s).
 
-**Phase 7 — Observability + cost controls** (HLD §11):
+**Phase 9 — Observability + cost controls** (HLD §11):
 - Dashboard on `agent_runs`: token usage, phase progress, unresolved count, blocker count, B1/B2/R/M/MD/D/F counts.
 - `max_turns` per agent per phase, embedding budget caps, consolidation max-rounds.
 
-**Phase 8 — DM between agents** (HLD §11.2):
+**Phase 10 — DM between agents** (HLD §11.2):
 - Lighter-weight than consolidation for one-off SME↔SME clarifications.
 
-**Phase 9 — Knowledge pool** (HLD §11.3):
+**Phase 11 — Knowledge pool** (HLD §11.3):
 - Shared facts table any agent can read/write ("all dream11 services use `{service}.dream11.local`").
+
+**Phase 6 — Globe (sphere-constrained graph view)** is parked on `feat/globe-experimental` branch. Re-introduce by merging that branch when ready; doc sync brief lives at `docs/GLOBE-MERGE-BRIEF.md` on that branch.
 
 ---
 
