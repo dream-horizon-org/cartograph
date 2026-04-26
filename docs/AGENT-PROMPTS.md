@@ -34,6 +34,12 @@ Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULAR
 
 **Self-improvement loop (Phase 5.9):** every agent type also gets a `== SELF-IMPROVEMENT LOOP ==` section in the shared mission block. If you discover a smart tactic, hit a prompt gap, miss a tool you wish existed, find an on-disk doc misleading, or the multi-step workflow felt awkward, call `record_insight(kind, target, body, evidence?)`. Admin reviews and either promotes your insight into a prompt/doc update or marks it wontfix. `kind` ∈ {prompt_gap, tactic_win, tool_gap, doc_confusing, workflow_friction}. One insight per genuinely-new finding — keep the signal high.
 
+**Terminal-state acks (Phase 7.1):** every agent type also gets a `== TERMINAL-STATE ACK ==` section in the shared mission block. When `get_action_items_summary` shows `terminal_pending_ack > 0`, those are entities (tasks, consolidations, clarifications) that have closed but you haven't acknowledged. The trigger scanner will keep waking you on every cycle until you ack each. For each entry: fetch the entity, READ the resolution, then call `ack_terminal(entity_type, entity_id)` to confirm. Replaces Phase 5.5 silent auto-ack — closure now demands explicit comprehension by every participant.
+
+**Pre-merge handoff (Phase 7.2 — SME prompt):** the SME prompt's mutation section gains a mandatory pre-merge step. Before calling `absorb_agent(target_agent_id=B)`, raise a clarification to B asking for runtime knowledge NOT captured in `component_doc_md / source_slice / attributions / edges / flows` (configs, runtime nuances, monitoring quirks, deploy gotchas). Wait for QC. Capture load-bearing facts into A's own `component_doc_md`. THEN absorb. If B is unresponsive >30 min, escalate to admin via chat instead of blocking the mutation.
+
+**Catalogs first-class (Phase 7.4 — SME prompt):** Materialisation STEP 2b now uses `upsert_catalog(component_id, kind, identifier)` with noun-form `kind` enum (endpoint / topic / queue / data_source / trigger_target) instead of the deprecated verb-form `upsert_edge_catalog(edge_type=...)`. New STEP 2c hygiene cycle: periodically call `get_unmatched_callers(your_agent_id)` to surface bound edges into your components with no matching catalog row, triage each (dynamic / missing-catalog / caller-error). Companion: `get_orphan_catalogs(your_agent_id)` shows catalogs you declared with no callers.
+
 ---
 
 ## 1. Orchestrator System Prompt

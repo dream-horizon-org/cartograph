@@ -2324,7 +2324,15 @@ Total: ~38 new. Target final count: ~421 (from 383).
 
 ---
 
-## Phase 7: Acks + handoff + self-loops + catalogs first-class
+## Phase 7: Acks + handoff + self-loops + catalogs first-class ✅
+
+**Shipped 2026-04-26.** All 4 sub-phases landed across incremental commits:
+- `b850a28` — 7.1 terminal-state ack model (replaces Phase 5.5 auto-ack)
+- `feecdc0` — 7.2 pre-merge handoff convention (SME prompt only)
+- `53a2894` — 7.3 self-loop CHECK relaxation
+- `595ef85` — 7.4 catalogs as first-class table
+
+Final test count: 490 (up from 469 pre-Phase-7). MCP tool count: **85** (up from 79 — added `ack_terminal`, `upsert_catalog`, `get_my_catalogs`, `get_my_catalog_callers`, `get_unmatched_callers`, `get_orphan_catalogs`). Two new tables: `terminal_acks`, `catalogs`. Two CHECK constraints dropped: `edges_no_self_loop_v2`, `edges_check`.
 
 Bundle of four conceptually distinct improvements that share infrastructure (schema migrations, scanner extensions, agent-prompt updates) and naturally batch together. Sub-phases are independently shippable but presented as one phase for narrative coherence.
 

@@ -340,6 +340,23 @@ Design notes (see IMPLEMENTATION-PHASES §Phase 4 for the full spec):
 |---|---|---|---|---|---|
 | `record_insight(agent_id, kind, target, body, evidence?)` | ✓ | ✓ | ✓ | ✓ | All active agents. `kind` ∈ {prompt_gap, tactic_win, tool_gap, doc_confusing, workflow_friction}. Admin triages from the UI Insights tab — promoted entries inform prompt + doc updates. |
 
+#### Terminal-state acks (Phase 7.1 · shipped)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `ack_terminal(agent_id, entity_type, entity_id)` | ✓ | ✓ | ✓ | ✓ | All active agents. Acknowledge a terminal-state entity (task TC, consolidation D/F, clarification CC/QR). Validates participant scope. Idempotent. Without ack, the trigger scanner re-wakes you on every cycle. Replaces Phase 5.5 auto-ack which silently dropped closures. |
+
+#### Catalogs first-class (Phase 7.4 · shipped)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `upsert_catalog(agent_id, component_id, kind, identifier, metadata?, confidence?)` | — | — | ✓ *own component* | — | Phase 7.4. Owner-only declaration of an exposed thing. `kind` ∈ {endpoint, topic, queue, data_source, trigger_target} (noun form, replaces Phase 3.9 verb-form edge_type for catalogs). |
+| `get_my_catalogs(agent_id)` | — | — | ✓ | — | Lists catalogs for components I own + caller_count per row. |
+| `get_my_catalog_callers(agent_id, catalog_id?)` | — | — | ✓ | — | For each of my catalogs, return bound callers matched via kind ↔ edge_type bridging. |
+| `get_unmatched_callers(agent_id)` | — | — | ✓ | — | Bound edges INTO my components with no matching catalog row. Triage: dynamic / missing-catalog / caller-error. |
+| `get_orphan_catalogs(agent_id)` | — | — | ✓ | — | Catalogs I own that no bound caller currently matches. |
+| `upsert_edge_catalog(agent_id, edge_data)` | — | — | ✓ *own component* | — | DEPRECATED Phase 7.4. Backwards-compat shim that translates verb-form edge_type → noun-form kind and forwards to `upsert_catalog`. |
+
 #### Per-call audit (Phase 5.10 · shipped)
 
 Not an agent tool — automatically applied to every `@mcp.tool()` registration via `cartograph_mcp.audit.install(mcp)`. Records `(agent_id, tool_name, args_hash, result_status, error_msg, duration_ms)` to the `mcp_audit` table on every call. Full payloads NOT stored; sha1 hash only. Audit-side failures are swallowed so the wrapped tool's contract is never affected.

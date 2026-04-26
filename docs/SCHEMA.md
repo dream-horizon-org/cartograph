@@ -675,6 +675,103 @@ CREATE INDEX idx_insights_status ON agent_insights(status);
 CREATE INDEX idx_insights_target ON agent_insights(target);
 ```
 
+### `terminal_acks` (Phase 7.1)
+
+Per-participant explicit acknowledgement of an entity's terminal state
+(task TC, consolidation D/F, clarification CC/QR). The trigger
+scanner re-wakes participants on every cycle until they call
+`ack_terminal(entity_type, entity_id)` for each pending closure.
+Replaces Phase 5.5's auto-ack at write site, which silently dropped
+closure announcements without comprehension.
+
+```sql
+CREATE TABLE terminal_acks (
+    entity_type TEXT NOT NULL CHECK (entity_type IN (
+                  'task', 'consolidation', 'clarification'
+                )),
+    entity_id   UUID NOT NULL,
+    agent_id    TEXT NOT NULL REFERENCES agent_runs(agent_id) ON DELETE CASCADE,
+    acked_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (entity_type, entity_id, agent_id)
+);
+CREATE INDEX idx_term_acks_agent ON terminal_acks(agent_id);
+```
+
+`absorb_agent` bulk-acks on behalf of the decommissioned target
+during merge (so target's row doesn't sit forever in negative
+space). Audit trail loss is acceptable — `agent_runs.deactivation_reason`
+already records the decommission event.
+
+### `catalogs` (Phase 7.4)
+
+First-class table for owner-side declarations of exposed surfaces.
+Replaced `edges WHERE from_component_id IS NULL` rows from Phase 3.9
+which used verb-form `edge_type` ('calls', 'reads_from', etc.) — that
+read awkwardly when applied to a callee declaration ("X calls /foo"
+when X is callable AT /foo).
+
+```sql
+CREATE TABLE catalogs (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    component_id  UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL CHECK (kind IN (
+                    'endpoint',         -- HTTP endpoint (was edge_type='calls')
+                    'topic',            -- pub/sub topic (was 'publishes_to')
+                    'queue',            -- message queue (was 'consumes_from')
+                    'data_source',      -- DB / cache / object store (reads/writes)
+                    'trigger_target'    -- cron-fire-able (was 'triggers')
+                  )),
+    identifier    TEXT NOT NULL,
+    metadata      JSONB NOT NULL DEFAULT '{}',
+    confidence    FLOAT NOT NULL DEFAULT 1.0,
+    embedding     vector(1024),         -- mxbai-embed-large dim
+    discovered_by TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    UNIQUE (component_id, kind, identifier)
+);
+
+CREATE INDEX idx_catalogs_component  ON catalogs(component_id);
+CREATE INDEX idx_catalogs_identifier ON catalogs(identifier);
+CREATE INDEX idx_catalogs_kind       ON catalogs(kind);
+CREATE INDEX idx_catalogs_embedding  ON catalogs USING hnsw (embedding vector_cosine_ops);
+```
+
+**Bridging catalog ↔ bound edges** (used by hygiene queries and LOS
+catalog-bridging in BFS):
+```
+endpoint       ↔ {calls}
+topic          ↔ {publishes_to, consumes_from}
+queue          ↔ {publishes_to, consumes_from}
+data_source    ↔ {reads_from, writes_to}
+trigger_target ↔ {triggers}
+```
+
+A catalog `(component_id=B, kind='endpoint', identifier='/x')` matches
+a bound edge `(to_component_id=B, edge_type='calls', identifier='/x')`.
+
+**Migration (Phase 7.4):** existing `from_component_id IS NULL` rows
+in `edges` were moved to `catalogs` with `edge_type → kind` mapping
+(idempotent INSERT ... ON CONFLICT DO NOTHING + DELETE-after-insert).
+
+**Backwards compat:** `upsert_edge_catalog` (Phase 3.9 tool) is kept
+as a thin wrapper that translates verb-form `edge_type` → noun-form
+`kind` and forwards to `upsert_catalog`.
+
+### Edges constraint loosening (Phase 7.3)
+
+Two CHECK constraints dropped from the `edges` table to allow self-
+loop bound edges (`from_component_id = to_component_id`):
+- `edges_check` (from original CREATE TABLE, hard `from <> to`)
+- `edges_no_self_loop_v2` (from Phase 3.9, allowed if either side
+  null — too restrictive for cron self-trigger / recursive call /
+  service publish+consume on same topic patterns)
+
+`edges_at_least_one_endpoint` and the partial unique indexes
+(`edges_bound_unique`, `edges_dangling_unique`) remain — self-loops
+are deduped same as cross-component edges.
+
 ### `mcp_audit` (Phase 5.10)
 
 Blanket per-call audit log for every MCP tool invocation. Wrapped via
@@ -764,5 +861,7 @@ Model: **`mxbai-embed-large` via local Ollama** (1024 dims, Metal-accelerated on
 | resource_component_agents | done |
 | agent_insights | done   |
 | mcp_audit      | done   |
+| terminal_acks  | done   |
+| catalogs       | done   |
 
 

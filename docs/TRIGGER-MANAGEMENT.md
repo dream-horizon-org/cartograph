@@ -372,7 +372,7 @@ TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
 
-> **Implementation status.** 79 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 5.10). Covers action_items, chat, broadcast (incl. `update_broadcast_persistence` from 5.7), secrets, tasks, resources, agent_lifecycle, components (asymmetric edge writes + flows), notifications, consolidation (incl. `confidence_at_send` metadata stamping from 5.6), clarification, vector_search, mutation lifecycle (Phase 4 + 4.1 + 4.2: `execute_mutation`, `complete_consolidation`, `absorb_agent`, `spawn_child_agent`, `transfer_attributions`, `transfer_edges`, `transfer_flows`, `get_my_components`, `get_stale_edges`, `get_stale_flows`), proxy inheritance (`get_my_proxy_items`, `act_on_proxy_item`), and `record_insight` (Phase 5.9). Every tool is wrapped by `cartograph_mcp.audit.audited` (Phase 5.10).
+> **Implementation status.** 85 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 7.4). Covers action_items, chat, broadcast (incl. `update_broadcast_persistence` from 5.7), secrets, tasks, resources, agent_lifecycle, components (asymmetric edge writes + flows), notifications, consolidation (incl. `confidence_at_send` metadata stamping from 5.6), clarification, vector_search, mutation lifecycle (Phase 4 + 4.1 + 4.2: `execute_mutation`, `complete_consolidation`, `absorb_agent`, `spawn_child_agent`, `transfer_attributions`, `transfer_edges`, `transfer_flows`, `get_my_components`, `get_stale_edges`, `get_stale_flows`), proxy inheritance (`get_my_proxy_items`, `act_on_proxy_item`), `record_insight` (Phase 5.9), `ack_terminal` (Phase 7.1), and the catalogs-first-class set (Phase 7.4: `upsert_catalog`, `get_my_catalogs`, `get_my_catalog_callers`, `get_unmatched_callers`, `get_orphan_catalogs`). Every tool is wrapped by `cartograph_mcp.audit.audited` (Phase 5.10).
 
 ### 3.1 Trigger Tools (what wakes me — read-only, used by trigger manager)
 
@@ -677,6 +677,56 @@ record_insight(agent_id, kind, target, body, evidence?)
   confusion, workflow friction. Admin triages from the UI Insights tab.
   kind ∈ {prompt_gap, tactic_win, tool_gap, doc_confusing, workflow_friction}.
   evidence: optional {task_ids, comm_ids, file_paths}.
+```
+
+**Terminal-state acks (Phase 7.1):**
+
+```
+ack_terminal(agent_id, entity_type, entity_id)
+  All active agents. Acknowledge a terminal-state entity (task TC,
+  consolidation D/F, clarification CC/QR). Validates entity exists,
+  is in terminal state, and caller is a participant. Idempotent
+  (ON CONFLICT DO NOTHING).
+
+  The trigger scanner re-wakes participants on every cycle until
+  they ack each terminal entity they participate in. Replaces the
+  silent Phase 5.5 auto-ack at write site — closure now demands
+  explicit comprehension.
+
+  Decommission auto-ack: absorb_agent bulk-acks on behalf of the
+  decommissioned target, so the target's terminal-pending list
+  doesn't sit in negative space forever.
+```
+
+**Catalogs first-class (Phase 7.4):**
+
+```
+upsert_catalog(agent_id, component_id, kind, identifier, metadata?, confidence?)
+  SME-only owner declaration of an exposed thing. kind ∈
+  {endpoint, topic, queue, data_source, trigger_target} (noun form,
+  replaces Phase 3.9 verb-form edge_type for catalogs). Idempotent on
+  (component_id, kind, identifier) with metadata merge + confidence
+  max + last-seen-at update.
+
+get_my_catalogs(agent_id)
+  Catalogs for components owned via RCA, with caller_count per row.
+
+get_my_catalog_callers(agent_id, catalog_id?)
+  For each of my catalogs, return bound callers matched via
+  kind ↔ edge_type bridging:
+    endpoint       ↔ {calls}
+    topic          ↔ {publishes_to, consumes_from}
+    queue          ↔ {publishes_to, consumes_from}
+    data_source    ↔ {reads_from, writes_to}
+    trigger_target ↔ {triggers}
+
+get_unmatched_callers(agent_id)
+  Bound edges INTO my components with no matching catalog row.
+  Triage each: dynamic (DB-like) → ignore; missing-catalog →
+  upsert_catalog; caller-error → raise clarification.
+
+get_orphan_catalogs(agent_id)
+  Catalogs I own that no bound caller currently matches.
 ```
 
 **Per-call audit (Phase 5.10) — not an agent tool, automatic.**
