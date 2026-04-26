@@ -200,7 +200,7 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `get_action_items_summary(agent_id)` | ✓ | ✓ | ✓ | ✓ | Returns counts for the caller only |
+| `get_action_items_summary(agent_id)` | ✓ | ✓ | ✓ | ✓ | Phase 7.4.5: returns uniform `dict[str, int]` — every value is a count (consolidations_pending, tasks_pending, clarifications_pending, unacked_chats, unacked_broadcasts, terminal_pending_ack, **proxied_count**). Pre-7.4.5 the proxied field was a list which broke MCP-client pydantic inference. Rich per-proxy breakdown moved to `get_action_items_detail`. |
 | `get_action_items_detail(agent_id)`  | ✓ | ✓ | ✓ | ✓ | Same |
 
 #### Chat & Broadcast (live · Phase 0 + 2.5 + 5.7)
@@ -285,7 +285,7 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `get_flow(component_id, incoming_catalog_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9 + 7.4.2. Outgoing edges fired when the catalog at `incoming_catalog_id` is hit. |
 | `get_flow_inverse(component_id, outgoing_edge_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9 + 7.4.2. Catalog rows whose hit triggers this outgoing edge (returns rows from the `catalogs` table, not `edges`). |
 | `get_unresolved(component_id)` | ✓ | ✓ | ✓ | ✓ | |
-| `vector_search(agent_id, query, table, limit)` | ✓ | ✓ | ✓ | ✓ | Embeds query with `mxbai-embed-large` (Phase 3.7), KNN-cosines against the target table. Returns `{query_embedded: bool, results}`. Tables: components / attributions / unresolved / edges / **catalogs** (Phase 7.4 follow-up). Limit clamped [1, 50]. |
+| `vector_search(agent_id, query, table, limit)` | ✓ | ✓ | ✓ | ✓ | Embeds query with `mxbai-embed-large` (Phase 3.7), KNN-cosines against the target table. Returns `{query_embedded: bool, results}`. Tables: components / attributions / unresolved / edges / **catalogs** (Phase 7.4 follow-up). Limit clamped [1, 50]. **Phase 7.4.4 lean projection**: results carry only id + identity columns + `similarity` — no embedding vectors, no doc/slice/metadata blobs. Search-then-fetch: callers follow up with `get_component(id)` etc. for full detail. |
 
 #### Notifications (live · Phase 2.3)
 
@@ -319,7 +319,7 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `execute_mutation(agent_id, cons_id, message)` | — | — | ✓ *mutation POC* | — | M→MD. Gated on `mutation_assigned_to == agent_id` AND `status='M'`. Notifies resolver. |
 | `complete_consolidation(agent_id, cons_id, message)` | — | — | — | ✓ | MD→D. Notifies both parties. |
 | `absorb_agent(agent_id, cons_id, target_id, reason?, notes?, cascade_attributions=True, cascade_edges=True, cascade_flows=True)` | — | — | ✓ *mutation POC* | — | Merge. Populates deactivation cols + unions source_slice + re-points RCA. Phase 4.1 cascades move attributions/edges/flows from target to survivor via the scoped transfer tools (defaults on). Phase 7.4.2 added an unconditional **catalog cascade** (runs before flows so flow.incoming_catalog_id refs land on survivor's catalogs; collisions on (kind, identifier) drop target's row + cascade-delete its flows). Chain never flattened. |
-| `spawn_child_agent(parent_id, cons_id, child_id, comp_data, slice, briefing, transfer_edge_ids?, transfer_flow_ids?, transfer_attribution_ids?, transfer_catalog_ids?)` | — | — | ✓ *mutation POC* | — | Split. Atomic carve-out. Phase 4.1: strict top-level source_slice guard, welcome BW task, optional edge/flow transfers. Phase 4.2: optional attribution transfers (mandatory hygiene — without it, hostname-class attributions strand on parent). Phase 7.4.2: optional `transfer_catalog_ids` to move catalog rows parent→child (run BEFORE transfer_flows so flow.incoming_catalog_id refs follow). Consolidation.child_agent_id blocks re-spawn. |
+| `spawn_child_agent(parent_id, cons_id, child_id, comp_data, slice, briefing, transfer_edge_ids?, transfer_flow_ids?, transfer_attribution_ids?, transfer_catalog_ids?)` | — | — | ✓ *mutation POC* | — | Split. Atomic carve-out. Phase 4.1: strict top-level source_slice guard, welcome BW task, optional edge/flow transfers. Phase 4.2: optional attribution transfers (mandatory hygiene — without it, hostname-class attributions strand on parent). Phase 7.4.2: optional `transfer_catalog_ids` to move catalog rows parent→child (run BEFORE transfer_flows so flow.incoming_catalog_id refs follow). **Phase 7.4.4 fix**: MCP wrapper now exposes `transfer_catalog_ids` — pre-7.4.4 it was on the inner tool but the wrapper signature missed it, so SMEs couldn't actually invoke it. Consolidation.child_agent_id blocks re-spawn. |
 | `transfer_attributions(agent_id, cons_id, ids[], from, to)` | — | — | ✓ *mutation POC* | — | Phase 4.1 mutation-scoped. Re-embeds both. Does NOT touch source_slice. |
 | `transfer_edges(agent_id, cons_id, edge_ids[], direction='both')` | — | — | ✓ *mutation POC* | — | Phase 4.1. Re-points from/to component IDs. Catalog collision collapses; bound/dangling collision rejects. |
 | `transfer_flows(agent_id, cons_id, flow_ids[])` | — | — | ✓ *mutation POC* | — | Phase 4.1. Re-points flows.component_id. Triple-collision rejects. |

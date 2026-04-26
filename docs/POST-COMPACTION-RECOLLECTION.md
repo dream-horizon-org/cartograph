@@ -76,7 +76,10 @@ grep "tools registered" /tmp/cartograph_mcp.log | tail -1   # expect: 85 tools
 | **6** | **PARKED** | Globe sphere-constrained graph view — on `feat/globe-experimental` branch, NOT on main |
 | **7.1-7.5** | **✅ SHIPPED** | Terminal acks + pre-merge handoff + self-loops + catalogs first-class + doc sync |
 | **7.4.2** | **✅ SHIPPED 2026-04-26** | flows reference catalogs first-class (FK to catalogs) + admin UI `/api/components.catalog_count` + `/api/component/{id}/drilldown.catalog` fixes + `absorb_agent` catalog cascade + `spawn_child_agent` `transfer_catalog_ids` + FE field rename + mock_seed rewrite |
-| **7.4.3** | **✅ SHIPPED 2026-04-26** | Doc + memory sync across 6 docs |
+| **7.4.3** | **✅ SHIPPED 2026-04-26** | Doc + memory sync for 7.4.2 |
+| **7.4.4** | **✅ SHIPPED 2026-04-26** | DEMO7 fixes (mine): `spawn_child_agent` MCP wrapper now exposes `transfer_catalog_ids`; Phase 7.3 Python self-loop guards dropped from `create_edge` / `upsert_edge_outbound` / `bind_edge`; `vector_search` lean projection (no embedding/blobs in result rows). |
+| **7.4.5** | **✅ SHIPPED 2026-04-26** | DEMO7 fixes (pre-existing): `get_my_catalogs` (and 3 sibling tools) switched JOIN→EXISTS to dedupe post-merge survivor; `get_action_items_summary` reshape to uniform `dict[str, int]` (proxied list moved to detail); SME prompt hygiene-cycle stale `upsert_edge_catalog` references replaced. |
+| **7.4.6** | **✅ SHIPPED 2026-04-26** | Doc + memory sync for 7.4.4 + 7.4.5 |
 
 ---
 
@@ -249,7 +252,10 @@ From the user across many sessions:
 6. **Terminal ack:** every participant of a closed entity must explicitly `ack_terminal` — else trigger scanner re-wakes them. Replaces Phase 5.5 silent auto-ack.
 7. **Pre-merge handoff:** mutation POC MUST raise clarification to target before `absorb_agent` (convention, enforced via prompt).
 8. **No session reset needed for prompt changes** — `agent_manager.py:190` passes `--system-prompt` fresh on every `--resume`.
-9. **Mutation cascades (Phase 7.4.2):** `absorb_agent` runs an unconditional **catalog cascade** BEFORE the flow cascade (so flow.incoming_catalog_id refs land on survivor's catalogs). `spawn_child_agent` accepts `transfer_catalog_ids` for split.
+9. **Mutation cascades (Phase 7.4.2):** `absorb_agent` runs an unconditional **catalog cascade** BEFORE the flow cascade (so flow.incoming_catalog_id refs land on survivor's catalogs). `spawn_child_agent` accepts `transfer_catalog_ids` for split (MCP wrapper plumbed in 7.4.4).
+10. **Self-loops permitted (Phase 7.3 + 7.4.4):** `from_component_id = to_component_id` is fine on every write path. DB CHECK constraints + Python guards both gone.
+11. **`vector_search` returns lean rows (Phase 7.4.4):** no embedding vectors, no doc/slice/metadata blobs in results — search-then-fetch via `get_*(id)` for full detail.
+12. **`get_action_items_summary` is uniform `dict[str, int]` (Phase 7.4.5):** rich per-proxy breakdown lives on `get_action_items_detail.proxied`. Pre-7.4.5 the mixed-type response crashed MCP-client pydantic on every wake.
 
 ---
 

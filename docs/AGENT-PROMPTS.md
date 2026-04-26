@@ -42,6 +42,12 @@ Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULAR
 
 **Flows reference catalogs first-class (Phase 7.4.2 — SME prompt):** STEP 4 (flow declaration) now takes `incoming_catalog_id` (NOT an edge id). The flow's incoming surface is canonically YOUR catalog row — bound caller edges bridge to it via `(target, edge_type, identifier)` for rendering / hygiene, but they are NOT the flow anchor. Implication: declare your catalogs (STEP 2b) FIRST, then anchor flows on those catalog ids (STEP 4). No catalog → no flow. Signature: `upsert_flow(component_id, incoming_catalog_id, outgoing_edge_id, metadata?, confidence?)`. `get_flow_inverse(component_id, outgoing_edge_id)` returns rows from the `catalogs` table (was: `edges`).
 
+**Phase 7.4.4 + 7.4.5 — SME-facing reminders surfaced from DEMO7:**
+- **Self-loops are permitted.** Phase 7.3 dropped the DB CHECK constraints; Phase 7.4.4 dropped the Python `must differ` guards in `create_edge` / `upsert_edge_outbound` / `bind_edge`. Cron self-trigger / recursive component-level calls / service publish+consume on the same topic all model directly with `from_component_id = to_component_id`.
+- **`vector_search` returns lean rows.** Result rows carry only `id + identity columns + similarity` — no embedding vectors, no doc/slice/metadata blobs. Pre-7.4.4 SMEs hit 50–115KB responses that blew the tool-result token budget and forced `jq` workarounds. Search-then-fetch: call `get_component(id)` / `get_attributions(id)` / etc. for full detail on hits you care about.
+- **`get_action_items_summary` is now all-int.** The pre-7.4.5 `proxied: list[dict]` field crashed MCP-client pydantic on every wake. Now `proxied_count: int` lives in summary; rich per-proxy breakdown (proxy_agent_id, deactivation_reason, depth, item lists) moved to `get_action_items_detail.proxied`. Triage flow: call summary FIRST, then call detail when `proxied_count > 0`.
+- **`upsert_catalog`, NOT `upsert_edge_catalog`.** The latter is a deprecated back-compat wrapper one redirect away from removal. Use the noun-form `upsert_catalog(component_id, kind, identifier)` for all new declarations. The Phase 7.4 hygiene tool `get_unmatched_callers(your_agent_id)` directly surfaces missing catalogs without manual cross-referencing.
+
 ---
 
 ## 1. Orchestrator System Prompt

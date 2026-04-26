@@ -2916,13 +2916,174 @@ are NOT the flow anchor. No catalog → no flow.
 
 ---
 
-## Phase 7.4.3: doc + memory sync ✅
+## Phase 7.4.3: doc + memory sync for 7.4.2 ✅
 
-**Shipped 2026-04-26.** Single commit. Updates HLD / SCHEMA /
-IMPLEMENTATION-PHASES / TRIGGER-MANAGEMENT / AGENT-PROMPTS /
-POST-COMPACTION-RECOLLECTION docs + memory `cartograph_state.md` to
-reflect Phase 7.4.2's flows-reference-catalogs model. ONE-PAGER.md
-unchanged.
+**Shipped 2026-04-26.** Commit `faeca1b`. Updates 6 canonical docs +
+memory file to reflect the flows-reference-catalogs-first-class
+model shipped in 7.4.2.
+
+---
+
+## Phase 7.4.4: spawn_child wrapper exposes transfer_catalog_ids + drop Python self-loop guards + lean vector_search projection ✅
+
+**Shipped 2026-04-26.** Single commit `ead74bf`. Closes 3 DEMO7-surfaced gaps.
+
+### #1 spawn_child_agent MCP wrapper missed `transfer_catalog_ids`
+
+The inner `mutation_tool.spawn_child_agent` had the param (added in
+Phase 7.4.2) but the `@mcp.tool()` wrapper at `server.py:982` didn't
+declare or pass it through, so SMEs literally couldn't use it.
+sme-payments-split flagged in DEMO7 feedback: *"Phase 7.4.2 catalog
+'transfer' did NOT actually transfer: the parent monolith-x still
+owns the original POST /payments/charge catalog row."* Fix: add the
+param to the wrapper signature + pass through.
+
+### #2 Phase 7.3 left 3 application-layer Python self-loop guards
+
+Phase 7.3 dropped the DB CHECK constraints (`edges_no_self_loop_v2`,
+`edges_check`) but left the Python-side `if from == to: raise` guards
+in three places:
+- `components.py:303` `create_edge` — "source_id and target_id must differ (no self-loops)"
+- `components.py:443` `upsert_edge_outbound` — "from_component_id and to_component_id must differ (no self-loops)"
+- `components.py:553` `bind_edge` — "Cannot bind to self (no self-loops)"
+
+DEMO7 sme-cron blocked on all 3 paths despite Phase 7.3 being marked
+shipped. The migration succeeded but the public tool surface looked
+the same as before — Phase 7.3 was effectively a no-op. All 3 raises
+removed, replaced with `# Phase 7.3` comments. New tests
+(`test_create_edge_accepts_self_loop`, `test_upsert_edge_outbound_
+accepts_self_loop`, `test_bind_edge_accepts_self_target`) prevent
+regression.
+
+### #6 vector_search lean projection
+
+Pre-7.4.4, `_VALID_TABLES` queries used `SELECT c.*` which inlined
+the full 1024-d embedding vector + heavy JSONB blobs
+(`component_doc_md`, `source_slice`, `metadata`, `evidence`,
+`context`) on every result row. DEMO7 SMEs reported single calls
+returning **50–115KB** and blowing their tool-result token budgets,
+forcing `jq` workarounds across the board (sme-auth-1, sme-auth-2,
+sme-cron all flagged it).
+
+New projection per table — agents get just enough to triage matches,
+then call `get_*(id)` for full detail (search-then-fetch pattern):
+
+| Table | Returned columns |
+|---|---|
+| components | id, canonical_name, display_name, component_type, status, similarity |
+| attributions | id, component_id, plane, resource_type, identifier, confidence, similarity |
+| unresolved | id, found_in_component_id, reference_type, reference_value, resolved, similarity |
+| edges | id, from_component_id, to_component_id, edge_type, identifier, confidence, similarity |
+| catalogs | id, component_id, kind, identifier, confidence, similarity |
+
+Test asserts forbidden fields `{embedding, component_doc_md,
+source_slice, metadata}` do NOT leak.
+
+### Files touched
+
+- `src/cartograph_mcp/server.py` (spawn_child wrapper)
+- `src/cartograph_mcp/tools/components.py` (3 self-loop guards dropped)
+- `src/cartograph_mcp/tools/search.py` (lean projections × 5)
+- `tests/mcp_tools/test_self_loops.py` (+ 3 tool-path tests)
+- `tests/mcp_tools/test_vector_search.py` (+ no-leak assertion)
+
+**Verified:** 83/83 across vector_search + self_loops + flows + catalogs + mutation green.
+
+---
+
+## Phase 7.4.5: get_my_catalogs DISTINCT + summary uniform-int + SME prompt cleanup ✅
+
+**Shipped 2026-04-26.** Single commit `9b94805`. Closes 3 pre-existing bugs DEMO7 surfaced.
+
+### #3 get_my_catalogs (and 3 sibling tools) returned duplicates post-merge
+
+`get_my_catalogs`, `get_my_catalog_callers`, `get_unmatched_callers`,
+`get_orphan_catalogs` all `JOIN resource_component_agents rca ON
+rca.component_id = c.component_id`. After `absorb_agent` re-points
+the target's RCA rows to the survivor, the survivor can have N RCA
+rows pointing at the same component (one per inherited resource).
+The JOIN multiplied each catalog by N. DEMO7 sme-f9bde48a saw 12
+rows for 6 distinct catalogs after absorbing sme-d3c8a998 — diagnosed
+in resolver insight `d4c923dc`.
+
+Fix: switch all 4 queries from `JOIN ... rca` to `WHERE EXISTS
+(SELECT 1 FROM resource_component_agents WHERE rca.agent_id = %s)` —
+short-circuits, no fan-out, each catalog returned exactly once.
+Regression test (`test_get_my_catalogs_no_duplicates_when_multiple_
+rca_rows`) reproduces the multi-RCA shape and asserts no duplicates.
+
+### #4 get_action_items_summary pydantic crash
+
+Summary returned a mixed-type dict (6 ints + `proxied: list[dict]`).
+The MCP client's pydantic inferred `dict[str, int]` from the int
+siblings then crashed on the list with `Input should be a valid
+integer [type=int_type, input_value=[], input_type=list]`. DEMO7
+resolver hit this on **every wake**. Phase 4.1.1 + 4.2.1 attempts to
+fix via untyped return annotation didn't hold.
+
+Real fix: make the summary a uniform `dict[str, int]`. `proxied` is
+now `proxied_count: int`; the rich per-proxy breakdown
+(proxy_agent_id, deactivation_reason, depth, item lists) lives on
+`get_action_items_detail` — call it when `proxied_count > 0`.
+Wrapper declares `-> dict[str, int]` explicitly. Regression test
+(`test_summary_response_uniform_int_shape`) asserts every value is
+an int and `proxied` is NOT in the response.
+
+**Wire-shape change (note for callers):**
+
+Pre-7.4.5 summary:
+```json
+{ "tasks_pending": 1, "proxied": [{"proxy_agent_id": "...", ...}] }
+```
+
+Post-7.4.5 summary:
+```json
+{ "tasks_pending": 1, "proxied_count": 1 }
+```
+
+Per-proxy detail moved to `get_action_items_detail.proxied`.
+
+### #8 SME prompt stale catalog references
+
+`sme.py` materialisation hygiene cycle still pointed SMEs at the
+deprecated `upsert_edge_catalog` instead of the Phase 7.4 noun-form
+`upsert_catalog`. Multiple DEMO7 SMEs flagged the inconsistency.
+Updated:
+- Hygiene cycle (line ~165): point at `upsert_catalog` + the new
+  `get_unmatched_callers` tool that surfaces the missing-catalog
+  case directly.
+- Edge Discovery section: added Phase 7.3 self-loop note + Phase
+  7.4.2 "use upsert_catalog, not the deprecated wrapper" note.
+
+### Stale tests inverted
+
+Two tests asserted the now-removed Phase-7.3 guards:
+- `test_create_edge_self_loop_rejected` → `_accepted`
+- `test_outbound_self_loop_refused` → `_accepted`
+
+### Files touched
+
+- `src/cartograph_mcp/tools/catalogs.py` (4 EXISTS rewrites)
+- `src/cartograph_mcp/tools/action_items.py` (summary reshape)
+- `src/cartograph_mcp/server.py` (summary wrapper return type)
+- `src/agent_management/agent_types/sme.py` (hygiene + edge discovery prompt)
+- `tests/mcp_tools/test_action_items_proxy.py` (uniform-shape regression)
+- `tests/mcp_tools/test_catalogs.py` (multi-RCA dedup regression)
+- `tests/mcp_tools/test_components.py` + `test_edges_phase39.py` (invert stale self-loop tests)
+
+**Verified:** 498 / 500 mcp_tools+admin_ui tests green (2 pre-existing failures unrelated).
+
+---
+
+## Phase 7.4.6: doc + memory sync for 7.4.4 + 7.4.5 ✅
+
+**Shipped 2026-04-26.** Single commit. Updates IMPLEMENTATION-PHASES
+(adds 7.4.4 + 7.4.5 entries above), HLD (vector_search projection
+note + spawn_child wrapper signature), AGENT-PROMPTS (catalog
+hygiene cycle clarification + self-loop note), TRIGGER-MANAGEMENT
+(action_items_summary uniform-int wire shape), POST-COMPACTION-
+RECOLLECTION + memory `cartograph_state.md`. ONE-PAGER unchanged.
+SCHEMA.md unchanged (no schema deltas in 7.4.4/7.4.5).
 
 ---
 
