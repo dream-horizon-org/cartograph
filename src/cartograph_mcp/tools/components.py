@@ -300,8 +300,10 @@ def create_edge(agent_id: str, edge_data: dict) -> dict:
         raise ValueError("source_id is required")
     if not target_id:
         raise ValueError("target_id is required")
-    if source_id == target_id:
-        raise ValueError("source_id and target_id must differ (no self-loops)")
+    # Phase 7.3: self-loops permitted (cron self-trigger, recursive
+    # component-level calls, service publish+consume on the same
+    # topic). DB CHECK constraints + the pre-7.4.4 Python guard both
+    # dropped.
     if edge_type not in _VALID_EDGE_TYPES:
         raise ValueError(
             f"Invalid edge_type '{edge_type}'. Valid: {sorted(_VALID_EDGE_TYPES)}"
@@ -440,8 +442,7 @@ def upsert_edge_outbound(agent_id: str, edge_data: dict) -> dict:
         raise ValueError("identifier is required")
     if not (0.0 <= confidence <= 1.0):
         raise ValueError("confidence must be in [0.0, 1.0]")
-    if to_component_id is not None and to_component_id == from_component_id:
-        raise ValueError("from_component_id and to_component_id must differ (no self-loops)")
+    # Phase 7.3: self-loops permitted (see note in create_edge above).
     if not _sme_owns_component(agent_id, from_component_id):
         raise ValueError(
             f"SME {agent_id} does not own from_component_id {from_component_id}. "
@@ -550,9 +551,7 @@ def bind_edge(agent_id: str, edge_id: str, to_component_id: str) -> dict:
             f"SME {agent_id} does not own from_component_id "
             f"{edge['from_component_id']}; cannot bind."
         )
-    if str(to_component_id) == str(edge["from_component_id"]):
-        raise ValueError("Cannot bind to self (no self-loops)")
-
+    # Phase 7.3: self-loops permitted (see note in create_edge above).
     # Refuse if a bound row already covers this (from, to, type, identifier).
     collision = execute_one(
         """SELECT id FROM edges

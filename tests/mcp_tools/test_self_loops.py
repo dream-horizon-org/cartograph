@@ -112,3 +112,45 @@ def test_self_loop_bundles_with_other_callers(agent_factory):
     sources = {str(r["from_component_id"]) for r in rows}
     assert str(x_cid) in sources, "self-loop must be in the bundle"
     assert str(y_cid) in sources, "Y→X must be in the bundle"
+
+
+# Phase 7.4.4: drop the application-layer Python self-loop guards so
+# the public tool surface matches the DB-level loosening from Phase
+# 7.3. Pre-7.4.4, DEMO7's sme-cron blocked here despite the migration
+# claiming success.
+
+def test_create_edge_accepts_self_loop(agent_factory):
+    """create_edge (Phase 3.9 legacy shim) must accept from = to."""
+    sme, cid = _setup_sme_with_component(agent_factory)
+    out = components.create_edge(sme, {
+        "source_id": cid, "target_id": cid,
+        "edge_type": "calls", "identifier": "/self",
+    })
+    assert str(out["from_component_id"]) == str(cid)
+    assert str(out["to_component_id"]) == str(cid)
+
+
+def test_upsert_edge_outbound_accepts_self_loop(agent_factory):
+    """upsert_edge_outbound must accept from = to (the canonical write
+    path post-Phase-3.9)."""
+    sme, cid = _setup_sme_with_component(agent_factory)
+    out = components.upsert_edge_outbound(sme, {
+        "from_component_id": cid, "to_component_id": cid,
+        "edge_type": "triggers", "identifier": "daily-rebalance",
+    })
+    assert str(out["from_component_id"]) == str(cid)
+    assert str(out["to_component_id"]) == str(cid)
+
+
+def test_bind_edge_accepts_self_target(agent_factory):
+    """bind_edge must accept resolving a dangling outgoing to the
+    caller's own component (e.g. cron self-trigger discovered later)."""
+    sme, cid = _setup_sme_with_component(agent_factory)
+    # Create a dangling outgoing first (to=NULL).
+    dangling = components.upsert_edge_outbound(sme, {
+        "from_component_id": cid,
+        "edge_type": "calls", "identifier": "/recursive",
+    })
+    bound = components.bind_edge(sme, str(dangling["id"]), cid)
+    assert str(bound["from_component_id"]) == str(cid)
+    assert str(bound["to_component_id"]) == str(cid)

@@ -982,19 +982,23 @@ def spawn_child_agent(
     transfer_edge_ids: list[str] | None = None,
     transfer_flow_ids: list[str] | None = None,
     transfer_attribution_ids: list[str] | None = None,
+    transfer_catalog_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Phase 4 + 4.1 + 4.2. SPLIT: carve a new component + idle SME out
-    of the caller's component. Child source_slice is subtracted
-    atomically. Phase 4.1 added: strict top-level source_slice guard,
+    """Phase 4 + 4.1 + 4.2 + 7.4.2. SPLIT: carve a new component + idle
+    SME out of the caller's component. Child source_slice is subtracted
+    atomically. Phase 4.1: strict top-level source_slice guard,
     [split-welcome] BW task, optional edge + flow transfers.
-    Phase 4.2 adds: transfer_attribution_ids for moving attributions
-    whose evidence belongs to the carved slice (parallels edges/flows).
-    Without this, split parents end up carrying stale attributions
-    semantically owned by the child."""
+    Phase 4.2: transfer_attribution_ids for hostname/evidence carve.
+    Phase 7.4.2: transfer_catalog_ids — atomically move catalog rows
+    (the surfaces the carved-out concern exposes) to the child. Runs
+    BEFORE flow transfer so flow.incoming_catalog_id refs land
+    correctly. Without this, post-split callers resolve to the wrong
+    component when binding to the carved-out endpoint."""
     return mutation_tool.spawn_child_agent(
         agent_id, consolidation_id, child_agent_id,
         child_component_data, child_source_slice, split_briefing,
         transfer_edge_ids, transfer_flow_ids, transfer_attribution_ids,
+        transfer_catalog_ids,
     )
 
 

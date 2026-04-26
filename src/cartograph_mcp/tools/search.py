@@ -16,32 +16,50 @@ from shared import embedding as emb
 from shared.db import execute, execute_one
 
 
+# Phase 7.4.4: lean projections per table. Pre-7.4.4 we did SELECT *
+# which inlined the 1024-d embedding vector + heavy JSONB blobs
+# (component_doc_md, source_slice, metadata, evidence, context) on
+# every result row — DEMO7 SMEs reported single calls returning 50–
+# 115KB and blowing their tool-result token budgets, forcing jq
+# workarounds. Search-then-fetch pattern: agents get just enough to
+# triage matches here, then call get_component(id) / get_attributions
+# (id) / etc. for full detail on hits they care about.
 _VALID_TABLES = {
-    "components": "SELECT c.*, 1 - (c.embedding <=> %s::vector) AS similarity "
+    "components": "SELECT c.id, c.canonical_name, c.display_name, "
+                  "       c.component_type, c.status, "
+                  "       1 - (c.embedding <=> %s::vector) AS similarity "
                   "FROM components c "
                   "WHERE c.embedding IS NOT NULL "
                   "ORDER BY c.embedding <=> %s::vector ASC "
                   "LIMIT %s",
-    "attributions": "SELECT a.*, 1 - (a.embedding <=> %s::vector) AS similarity "
+    "attributions": "SELECT a.id, a.component_id, a.plane, a.resource_type, "
+                    "       a.identifier, a.confidence, "
+                    "       1 - (a.embedding <=> %s::vector) AS similarity "
                     "FROM attributions a "
                     "WHERE a.embedding IS NOT NULL "
                     "ORDER BY a.embedding <=> %s::vector ASC "
                     "LIMIT %s",
-    "unresolved": "SELECT u.*, 1 - (u.embedding <=> %s::vector) AS similarity "
+    "unresolved": "SELECT u.id, u.found_in_component_id, u.reference_type, "
+                  "       u.reference_value, u.resolved, "
+                  "       1 - (u.embedding <=> %s::vector) AS similarity "
                   "FROM unresolved u "
                   "WHERE u.embedding IS NOT NULL "
                   "ORDER BY u.embedding <=> %s::vector ASC "
                   "LIMIT %s",
-    "edges": "SELECT e.*, 1 - (e.embedding <=> %s::vector) AS similarity "
+    "edges": "SELECT e.id, e.from_component_id, e.to_component_id, "
+             "       e.edge_type, e.identifier, e.confidence, "
+             "       1 - (e.embedding <=> %s::vector) AS similarity "
              "FROM edges e "
              "WHERE e.embedding IS NOT NULL "
              "ORDER BY e.embedding <=> %s::vector ASC "
              "LIMIT %s",
     # Phase 7.4 follow-up: catalog rows live in their own table now,
-    # embedded at write time with "{kind}: {identifier}" — same shape
-    # as edges. Lets SMEs do "find an endpoint similar to /payments/charge"
-    # across the org without walking get_component_edges per component.
-    "catalogs": "SELECT c.*, 1 - (c.embedding <=> %s::vector) AS similarity "
+    # embedded at write time with "{kind}: {identifier}". Lets SMEs do
+    # "find an endpoint similar to /payments/charge" across the org
+    # without walking get_component_edges per component.
+    "catalogs": "SELECT c.id, c.component_id, c.kind, c.identifier, "
+                "       c.confidence, "
+                "       1 - (c.embedding <=> %s::vector) AS similarity "
                 "FROM catalogs c "
                 "WHERE c.embedding IS NOT NULL "
                 "ORDER BY c.embedding <=> %s::vector ASC "

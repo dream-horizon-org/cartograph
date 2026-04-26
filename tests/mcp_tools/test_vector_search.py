@@ -104,3 +104,11 @@ def test_end_to_end_embed_and_search(agent_factory):
     top = out["results"][0]
     assert top["canonical_name"] == "dream11/feeds-aggregator"
     assert top["similarity"] > 0.5
+    # Phase 7.4.4 lean projection: result rows must NOT carry the raw
+    # 1024-d embedding vector or heavy JSONB blobs (component_doc_md,
+    # source_slice, metadata). Search-then-fetch pattern: agents
+    # follow up with get_component(id) for full detail. Pre-7.4.4
+    # SMEs hit 50–115KB responses that blew their tool-result budget.
+    forbidden = {"embedding", "component_doc_md", "source_slice", "metadata"}
+    leaked = forbidden & set(top.keys())
+    assert not leaked, f"vector_search components leaked heavy fields: {leaked}"
