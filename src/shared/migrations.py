@@ -90,20 +90,15 @@ def _migrate_edges_asymmetric(cur) -> None:
           END IF;
         END$$
     """)
-    cur.execute("""
-        DO $$
-        BEGIN
-          IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint
-            WHERE conname = 'edges_no_self_loop_v2'
-          ) THEN
-            ALTER TABLE edges ADD CONSTRAINT edges_no_self_loop_v2
-              CHECK (from_component_id IS NULL
-                     OR to_component_id IS NULL
-                     OR from_component_id <> to_component_id);
-          END IF;
-        END$$
-    """)
+    # Phase 7.3: drop self-loop CHECK constraints to allow legitimate
+    # self-invocation patterns (cron self-trigger, recursive component
+    # calls, service publish+consume on the same topic). Two
+    # constraints existed: `edges_check` from the original CREATE
+    # TABLE (hard from <> to), and `edges_no_self_loop_v2` from the
+    # Phase 3.9 nullable-endpoint refactor (allowed if either side
+    # null). Both go.
+    cur.execute("ALTER TABLE edges DROP CONSTRAINT IF EXISTS edges_no_self_loop_v2")
+    cur.execute("ALTER TABLE edges DROP CONSTRAINT IF EXISTS edges_check")
 
 
 def _create_flows_table(cur) -> None:
