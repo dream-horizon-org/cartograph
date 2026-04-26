@@ -104,7 +104,17 @@ def upsert_catalog(
 
 def get_my_catalogs(agent_id: str) -> list[dict]:
     """Catalog rows for components owned by this agent. Includes a
-    `caller_count` field so the caller can spot orphans at a glance."""
+    `caller_count` field so the caller can spot orphans at a glance.
+
+    Phase 7.4.4: switched from `JOIN resource_component_agents rca` to
+    `EXISTS (...)` to avoid the post-absorb duplication bug. After
+    `absorb_agent` re-points target's RCA rows to the survivor, the
+    survivor can have N RCA rows pointing at the same component (one
+    per inherited resource). The old JOIN returned one catalog row per
+    matching RCA row; EXISTS short-circuits, so each catalog appears
+    exactly once. DEMO7 sme-f9bde48a saw 12 rows for 6 distinct
+    catalogs post-merge — this is that fix.
+    """
     require_active_agent(agent_id)
     return execute(
         """
@@ -125,9 +135,11 @@ def get_my_catalogs(agent_id: str) -> list[dict]:
                  0
                ) AS caller_count
           FROM catalogs c
-          JOIN resource_component_agents rca
-            ON rca.component_id = c.component_id
-         WHERE rca.agent_id = %s
+         WHERE EXISTS (
+           SELECT 1 FROM resource_component_agents rca
+            WHERE rca.component_id = c.component_id
+              AND rca.agent_id = %s
+         )
          ORDER BY c.kind, c.identifier
         """,
         (agent_id,),
@@ -140,6 +152,7 @@ def get_my_catalog_callers(agent_id: str, catalog_id: str | None = None) -> dict
     catalog_id → list of {caller_id (source), edge_id, edge_type,
     identifier}. Pass catalog_id to filter to one row."""
     require_active_agent(agent_id)
+    # Phase 7.4.4: EXISTS instead of JOIN on RCA — see get_my_catalogs note.
     where_extra = "AND c.id = %s::uuid" if catalog_id else ""
     params = [agent_id] + ([catalog_id] if catalog_id else [])
     rows = execute(
@@ -148,8 +161,6 @@ def get_my_catalog_callers(agent_id: str, catalog_id: str | None = None) -> dict
                e.id AS edge_id, e.from_component_id AS caller_id,
                e.edge_type, e.identifier AS edge_identifier
           FROM catalogs c
-          JOIN resource_component_agents rca
-            ON rca.component_id = c.component_id
           JOIN edges e
             ON e.to_component_id = c.component_id
            AND e.identifier = c.identifier
@@ -162,7 +173,11 @@ def get_my_catalog_callers(agent_id: str, catalog_id: str | None = None) -> dict
                WHEN 'data_source'    THEN ARRAY['reads_from','writes_to']
                WHEN 'trigger_target' THEN ARRAY['triggers']
              END)
-         WHERE rca.agent_id = %s {where_extra}
+         WHERE EXISTS (
+           SELECT 1 FROM resource_component_agents rca
+            WHERE rca.component_id = c.component_id
+              AND rca.agent_id = %s
+         ) {where_extra}
         """,
         params,
     )
@@ -185,6 +200,7 @@ def get_unmatched_callers(agent_id: str) -> list[dict]:
       - missing catalog row (call upsert_catalog)
       - caller error (raise clarification)
     """
+    # Phase 7.4.4: EXISTS instead of JOIN on RCA — see get_my_catalogs note.
     require_active_agent(agent_id)
     return execute(
         """
@@ -192,9 +208,11 @@ def get_unmatched_callers(agent_id: str) -> list[dict]:
                e.to_component_id AS target_component_id,
                e.edge_type, e.identifier
           FROM edges e
-          JOIN resource_component_agents rca
-            ON rca.component_id = e.to_component_id
-         WHERE rca.agent_id = %s
+         WHERE EXISTS (
+           SELECT 1 FROM resource_component_agents rca
+            WHERE rca.component_id = e.to_component_id
+              AND rca.agent_id = %s
+         )
            AND e.from_component_id IS NOT NULL
            AND NOT EXISTS (
                  SELECT 1 FROM catalogs c
@@ -219,14 +237,17 @@ def get_orphan_catalogs(agent_id: str) -> list[dict]:
     """Catalogs owned by agent that no bound caller currently matches.
     Companion to get_unmatched_callers — together they show the
     catalog-coverage health of the agent's components."""
+    # Phase 7.4.4: EXISTS instead of JOIN on RCA — see get_my_catalogs note.
     require_active_agent(agent_id)
     return execute(
         """
         SELECT c.*
           FROM catalogs c
-          JOIN resource_component_agents rca
-            ON rca.component_id = c.component_id
-         WHERE rca.agent_id = %s
+         WHERE EXISTS (
+           SELECT 1 FROM resource_component_agents rca
+            WHERE rca.component_id = c.component_id
+              AND rca.agent_id = %s
+         )
            AND NOT EXISTS (
                  SELECT 1 FROM edges e
                   WHERE e.to_component_id = c.component_id

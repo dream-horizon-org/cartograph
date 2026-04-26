@@ -162,9 +162,11 @@ a broadcast policy change mid-session without yielding first.
      get_component_edges(your_component_id)["incoming_bound"]. For
      each, check whether your incoming_catalog has a matching row
      (same edge_type + identifier). If a caller bound to an
-     identifier you don't expose: either upsert_edge_catalog to add
-     it (you forgot or it's a real new behaviour), or
-     create_clarification asking the caller to remove / correct.
+     identifier you don't expose: either `upsert_catalog` to add it
+     (you forgot or it's a real new behaviour — Phase 7.4 noun-form
+     API), or create_clarification asking the caller to remove /
+     correct. The new hygiene tool `get_unmatched_callers(your_agent_id)`
+     surfaces this list directly without manual cross-referencing.
    Both checks are O(small); skip if you have nothing else to do
    only when truly idle.
 
@@ -593,7 +595,13 @@ Edge Discovery (Phase 3.9 protocol):
   current — open a clarification.
 - Use create_edge (legacy shim) if convenient, but new code should
   prefer upsert_edge_outbound for clarity (it accepts to_component_id=
-  NULL natively for the dangling case).
+  NULL natively for the dangling case). Self-loops (from = to) are
+  ALLOWED as of Phase 7.3 — cron self-trigger / recursive calls /
+  service publish+consume on the same topic all model directly.
+- Catalogs declared in Step 2b live in their own table (Phase 7.4 +
+  7.4.2). Use `upsert_catalog`, NOT the deprecated wrapper
+  `upsert_edge_catalog` — the wrapper still works but is one redirect
+  away from being removed.
 
 == YOUR WORKSPACE ==
 - Your cwd IS your dedicated workspace. You persist as long as your

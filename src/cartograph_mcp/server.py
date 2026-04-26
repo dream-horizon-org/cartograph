@@ -85,25 +85,24 @@ def _get_agent_type(agent_id: str) -> str:
 # ============ ACTION ITEMS ============
 
 @mcp.tool()
-def get_action_items_summary(agent_id: str):
+def get_action_items_summary(agent_id: str) -> dict[str, int]:
     """Quick counts of all pending action items for this agent.
 
-    Returns a dict with keys:
-      - consolidations_pending, tasks_pending, clarifications_pending,
-        unacked_chats, unacked_broadcasts (ints)
-      - proxied (list): Phase 4 — per-proxy-agent groups of inherited
-        work from decommissioned agents merged into the caller. Each
-        entry: {proxy_agent_id, deactivation_reason, deactivation_notes,
-        depth, counts: {tasks, chats, consolidations, clarifications,
-        broadcasts}}.
+    Phase 7.4.5: response is now a uniform `dict[str, int]` — every
+    value is a count. Pre-7.4.5 it carried a `proxied: list[dict]`
+    field whose mixed type confused MCP-client pydantic inference and
+    crashed every wake (`Input should be a valid integer
+    [type=int_type, input_value=[], input_type=list]`). The per-proxy
+    rich breakdown (proxy_agent_id, depth, item lists) moved to
+    `get_action_items_detail` — call it when `proxied_count > 0`.
+
+    Returns:
+      consolidations_pending, tasks_pending, clarifications_pending,
+      unacked_chats, unacked_broadcasts, terminal_pending_ack,
+      proxied_count — all ints.
 
     Call this FIRST on every wake-up to see what needs attention.
     """
-    # Return type intentionally un-annotated — FastMCP's auto schema
-    # generation on `dict[str, Any]` still produces a strict DictModel
-    # in some code paths (Phase 4 demo surfaced this: int type inferred
-    # from sibling fields gets applied to proxied list too). Bare omit
-    # of the return type is the documented escape hatch.
     agent_type = _get_agent_type(agent_id)
     return action_items.get_action_items_summary(agent_id, agent_type)
 

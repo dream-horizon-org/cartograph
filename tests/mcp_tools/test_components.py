@@ -247,13 +247,18 @@ def test_create_edge(agent_factory):
     assert str(edge["to_component_id"]) == cid_b
 
 
-def test_create_edge_self_loop_rejected(agent_factory):
+def test_create_edge_self_loop_accepted(agent_factory):
+    """Phase 7.3 + 7.4.4: self-loops are PERMITTED (cron self-trigger,
+    recursive component-level calls, service publish+consume on the
+    same topic). Pre-7.4.4 the Python guard rejected them despite
+    Phase 7.3 dropping the DB CHECK constraints."""
     cid = _sme_with_component(agent_factory, "sme-a", "dream11/a")
-    with pytest.raises(ValueError, match="no self-loops"):
-        components.create_edge(
-            "sme-a",
-            {"source_id": cid, "target_id": cid, "edge_type": "calls", "identifier": "x"},
-        )
+    out = components.create_edge(
+        "sme-a",
+        {"source_id": cid, "target_id": cid, "edge_type": "calls", "identifier": "x"},
+    )
+    assert str(out["from_component_id"]) == str(cid)
+    assert str(out["to_component_id"]) == str(cid)
 
 
 def test_create_edge_not_owner_of_source(agent_factory):

@@ -55,30 +55,48 @@ def _merge_and_absorb(agent_factory):
 # ---------- summary ----------
 
 
-def test_summary_has_proxied_field_empty_when_no_proxies(agent_factory):
+def test_summary_has_proxied_count_zero_when_no_proxies(agent_factory):
+    """Phase 7.4.5: summary returns proxied_count (int), NOT a list."""
     agent_factory("lone", "sme")
     out = action_items.get_action_items_summary("lone", "sme")
-    assert out["proxied"] == []
+    assert out["proxied_count"] == 0
     # Legacy fields still present.
     for k in ("consolidations_pending", "tasks_pending", "clarifications_pending",
-              "unacked_chats", "unacked_broadcasts"):
+              "unacked_chats", "unacked_broadcasts", "terminal_pending_ack",
+              "proxied_count"):
         assert k in out
 
 
-def test_summary_proxied_reflects_pending_inherited_work(agent_factory):
+def test_summary_response_shape_is_uniform_dict_str_int(agent_factory):
+    """Phase 7.4.5 regression guard: every summary value must be an int.
+    Pre-7.4.5 the `proxied: list` field broke the MCP client's pydantic
+    inference (it inferred dict[str, int] from the int siblings, then
+    crashed on the list). DEMO7 resolver hit this on every wake."""
     _merge_and_absorb(agent_factory)
     execute_mutate(
         """INSERT INTO tasks (owner_agent_id, worker_agent_id, description, status)
            VALUES ('admin', 'sme-b', 'inherited', 'BW')"""
     )
     out = action_items.get_action_items_summary("sme-a", "sme")
-    assert len(out["proxied"]) == 1
-    group = out["proxied"][0]
-    assert group["proxy_agent_id"] == "sme-b"
-    assert group["deactivation_reason"] == "merged"
-    assert group["counts"]["tasks"] == 1
+    for k, v in out.items():
+        assert isinstance(v, int), f"summary[{k}] = {v!r} (type {type(v).__name__}); expected int"
+
+
+def test_summary_proxied_count_reflects_pending_inherited_work(agent_factory):
+    _merge_and_absorb(agent_factory)
+    execute_mutate(
+        """INSERT INTO tasks (owner_agent_id, worker_agent_id, description, status)
+           VALUES ('admin', 'sme-b', 'inherited', 'BW')"""
+    )
+    out = action_items.get_action_items_summary("sme-a", "sme")
+    # One absorbed proxy → proxied_count == 1.
+    assert out["proxied_count"] == 1
     # 'my' pending counts do NOT include the proxied task.
     assert out["tasks_pending"] == 0
+    # Rich per-proxy breakdown lives on detail now.
+    detail = action_items.get_action_items_detail("sme-a", "sme")
+    assert len(detail["proxied"]) == 1
+    assert detail["proxied"][0]["proxy_agent_id"] == "sme-b"
 
 
 # ---------- detail ----------
@@ -128,26 +146,27 @@ def test_trigger_scanner_returns_zero_for_non_survivor(agent_factory):
     assert proxies.scan("lone") == 0
 
 
-# ---------- 4.1.1 — pydantic schema regression ----------
+# ---------- 4.1.1 + 7.4.5 — pydantic schema regression ----------
 
-def test_summary_response_is_valid_against_mcp_tool_return_type(agent_factory):
-    """The MCP wrapper declares dict[str, Any] for get_action_items_summary
-    so pydantic accepts both int counts and the proxied list bucket in
-    the same response. Regression guard for the demo-run blocker where
-    dict[str, int] couldn't serialize the proxied list."""
+def test_summary_response_uniform_int_shape(agent_factory):
+    """Phase 7.4.5: the MCP wrapper declares `dict[str, int]` for
+    get_action_items_summary. Every value in the response must be an
+    int — that's the *whole point* of the 7.4.5 reshape, since mixed
+    types broke the MCP client's pydantic inference. Regression guard
+    against re-introducing the proxied list (or any non-int field)
+    into the summary response. The rich per-proxy breakdown lives on
+    get_action_items_detail."""
     _merge_and_absorb(agent_factory)
     execute_mutate(
         """INSERT INTO tasks (owner_agent_id, worker_agent_id, description, status)
            VALUES ('admin', 'sme-b', 'inherited', 'BW')"""
     )
     out = action_items.get_action_items_summary("sme-a", "sme")
-    # Legacy int fields present + list proxied coexist.
-    assert isinstance(out["tasks_pending"], int)
-    assert isinstance(out["proxied"], list)
-    assert len(out["proxied"]) == 1
-    # Pydantic-like structural check on the proxied entry.
-    group = out["proxied"][0]
-    for k in ("proxy_agent_id", "deactivation_reason",
-              "deactivation_notes", "depth", "counts"):
-        assert k in group
-    assert isinstance(group["counts"], dict)
+    assert "proxied" not in out, (
+        "summary must NOT carry a `proxied` list — moved to detail in 7.4.5"
+    )
+    assert "proxied_count" in out
+    for k, v in out.items():
+        assert isinstance(v, int), (
+            f"summary[{k}] = {v!r} ({type(v).__name__}); summary must be all-int"
+        )

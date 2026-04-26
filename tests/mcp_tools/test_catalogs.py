@@ -116,6 +116,35 @@ def test_get_my_catalogs_empty_for_no_components(agent_factory):
     assert cat.get_my_catalogs("loner") == []
 
 
+def test_get_my_catalogs_no_duplicates_when_multiple_rca_rows(agent_factory):
+    """Phase 7.4.4 regression guard: when an SME owns one component but
+    that component has multiple RCA rows (e.g. post-absorb the survivor
+    has its original RCA row + the inherited resource's RCA row, both
+    pointing at the survivor's component), get_my_catalogs MUST return
+    each catalog exactly once.
+
+    Pre-7.4.4 the JOIN on RCA multiplied each catalog by N RCA rows.
+    DEMO7 sme-f9bde48a saw 12 rows for 6 distinct catalogs post-merge
+    — this test reproduces that shape and asserts the fix.
+    """
+    sme, cid = _setup_sme(agent_factory, "dup")
+    cat.upsert_catalog(sme, cid, "endpoint", "GET /a")
+    cat.upsert_catalog(sme, cid, "endpoint", "GET /b")
+    # Simulate the post-absorb state: a SECOND RCA row pointing the
+    # same agent at the same component via a different resource (which
+    # is exactly what absorb_agent's RCA repoint produces).
+    r2 = _res.upsert_resource("iter-dup", "github", "repo", "o/dup-second")
+    execute_mutate(
+        """INSERT INTO resource_component_agents (resource_id, component_id, agent_id)
+           VALUES (%s, %s, %s)""",
+        (r2["id"], cid, sme),
+    )
+    out = cat.get_my_catalogs(sme)
+    ids = [str(r["id"]) for r in out]
+    assert len(ids) == len(set(ids)), f"duplicates in get_my_catalogs: {ids}"
+    assert len(out) == 2  # two distinct catalogs declared, two returned
+
+
 # ========== get_my_catalog_callers ==========
 
 

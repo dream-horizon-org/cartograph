@@ -68,25 +68,26 @@ def _count_unacked_broadcasts(agent_id: str, agent_type: str) -> int:
 def get_action_items_summary(agent_id: str, agent_type: str) -> dict:
     """Quick counts of everything pending for this agent.
 
-    Phase 4: includes a `proxied` bucket if the survivor has inherited
-    work from any decommissioned agent in their merge chain. Counts are
-    per-proxy-agent so the agent sees "3 unacked chats from merged-in X,
-    1 pending task from merged-in Y" — not a blended blob. Keeps the
-    "wind down old identities, then act fresh" triage model clean.
+    Phase 7.4.5: response is now a uniform `dict[str, int]` — every
+    value is a count. Pre-7.4.5 the `proxied` field was a `list[dict]`,
+    which broke the MCP client's pydantic inference (it inferred
+    `dict[str, int]` from the 6 int siblings, then choked on the list
+    with `Input should be a valid integer [type=int_type, input_value=
+    [], input_type=list]`). DEMO7 resolver hit this on every wake.
+
+    Per-proxy breakdown (proxy_agent_id, deactivation_reason, depth,
+    per-item counts) lives on `get_action_items_detail` — call it when
+    proxied_count > 0 to triage which inherited identity needs
+    attention.
+
+    Returns:
+      {consolidations_pending, tasks_pending, clarifications_pending,
+       unacked_chats, unacked_broadcasts, terminal_pending_ack,
+       proxied_count} — all ints.
     """
     # Lazy-import to avoid a circular dep (proxy imports from tools/ too).
     from cartograph_mcp.tools import proxy as proxy_tool
     proxied_groups = proxy_tool.get_my_proxy_items(agent_id).get("proxied", [])
-    proxied_counts = [
-        {
-            "proxy_agent_id": g["proxy_agent_id"],
-            "deactivation_reason": g["deactivation_reason"],
-            "deactivation_notes": g["deactivation_notes"],
-            "depth": g["depth"],
-            "counts": {k: len(v) for k, v in g["items"].items()},
-        }
-        for g in proxied_groups
-    ]
     # Phase 7.1: terminal-pending-ack — entities I'm a participant of
     # that have closed but I haven't ack'd. Trigger scanner re-wakes
     # me until the count drops to zero.
@@ -99,7 +100,7 @@ def get_action_items_summary(agent_id: str, agent_type: str) -> dict:
         "unacked_chats": _count_unacked_chats(agent_id),
         "unacked_broadcasts": _count_unacked_broadcasts(agent_id, agent_type),
         "terminal_pending_ack": len(terminal_pending),
-        "proxied": proxied_counts,
+        "proxied_count": len(proxied_groups),
     }
 
 

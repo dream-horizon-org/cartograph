@@ -132,14 +132,19 @@ def test_outbound_dangling_write(agent_factory):
     assert row["to_component_id"] is None
 
 
-def test_outbound_self_loop_refused(agent_factory):
+def test_outbound_self_loop_accepted(agent_factory):
+    """Phase 7.3 + 7.4.4: self-loops are PERMITTED. See
+    test_self_loops.py for the full coverage; this regression guard
+    just confirms upsert_edge_outbound is no longer the Python-side
+    blocker that DEMO7's sme-cron hit."""
     _iter(agent_factory, "i", "github")
     cid_a = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
-    with pytest.raises(ValueError, match="must differ"):
-        components.upsert_edge_outbound("sme-a", {
-            "from_component_id": cid_a, "to_component_id": cid_a,
-            "edge_type": "calls", "identifier": "x",
-        })
+    out = components.upsert_edge_outbound("sme-a", {
+        "from_component_id": cid_a, "to_component_id": cid_a,
+        "edge_type": "calls", "identifier": "x",
+    })
+    assert str(out["from_component_id"]) == str(cid_a)
+    assert str(out["to_component_id"]) == str(cid_a)
 
 
 def test_outbound_owner_only(agent_factory):
