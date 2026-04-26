@@ -7,13 +7,16 @@
     covering Phase 4 + 4.1 + 4.2 (mutation/proxy lifecycle) + Phase 5 (admin UI tweaks +
     audit + insights + persistence toggle) + Phase 7 (terminal acks, pre-merge handoff,
     self-loops, catalogs first-class) + Phase 7.4.2 (flows reference catalogs first-class +
-    catalog cascade in mutation + admin UI catalog endpoints). This is a structured
-    14-phase test — each phase verifies a specific feature surface.
+    catalog cascade in mutation + admin UI catalog endpoints) + Phase 7.4.4 + 7.4.5
+    (DEMO7-round-1 bug fixes — self-loop guards dropped, transfer_catalog_ids exposed,
+    vector_search lean projection, get_my_catalogs dedup post-merge, get_action_items
+    _summary uniform-int, SME prompt cleanup). This is a structured 16-phase test — each
+    phase verifies a specific feature surface.
 
     == REPORT-BACK CONVENTIONS ==
 
     Tag every status / observation message with one of:
-      [DEMO7-PHASE-N]    section header (N = 1..14)
+      [DEMO7-PHASE-N]    section header (N = 1..16)
       [DEMO7-OK]         a verification passed
       [DEMO7-FAIL]       a verification failed (note expected vs actual)
       [DEMO7-BUG]        unexpected behavior worth flagging
@@ -90,18 +93,32 @@
     REPORT [DEMO7-PHASE-3] section header.
     REPORT [DEMO7-OK] / [DEMO7-FAIL] for each verification.
 
-    == PHASE 4 — Self-loop edge (Phase 7.3) ==
+    == PHASE 4 — Self-loop edge (Phase 7.3 + 7.4.4) ==
 
-    sme-cron creates a bound edge from cron-rebalance to ITSELF:
-      upsert_edge_outbound(from=cron_component_id, to=cron_component_id,
-                           edge_type='triggers', identifier='daily-rebalance')
+    sme-cron exercises self-loops on ALL THREE write paths (Phase 7.4.4
+    dropped the Python guards that DEMO7-round-1 blocked on):
 
-    This used to be blocked by edges_no_self_loop_v2 + edges_check CHECK
-    constraints. Phase 7.3 dropped both. Verify the call succeeds.
+    4a. upsert_edge_outbound with from = to:
+        upsert_edge_outbound(from=cron_component_id, to=cron_component_id,
+                             edge_type='triggers', identifier='daily-rebalance')
+
+    4b. create_edge (legacy shim) with source = target:
+        create_edge({source_id=cron_component_id, target_id=cron_component_id,
+                     edge_type='calls', identifier='self-recurse'})
+
+    4c. bind_edge resolving a dangling outgoing back to self:
+        - First create dangling: upsert_edge_outbound(from=cron, to=NULL,
+          edge_type='calls', identifier='lazy-self')
+        - Then resolve: bind_edge(dangling_id, to_component_id=cron_component_id)
+
+    Pre-7.4.4 ALL THREE blocked with verbatim "must differ (no self-loops)" /
+    "Cannot bind to self (no self-loops)" — that's the exact bug DEMO7-round-1
+    surfaced as [DEMO7-BUG Phase-4 self-loop]. Phase 7.4.4 dropped the
+    application-layer Python guards. All three should now succeed.
 
     REPORT [DEMO7-PHASE-4] section header.
-    REPORT [DEMO7-OK] if the self-loop edge was created without error.
-    REPORT [DEMO7-FAIL] if the call raised CheckViolation.
+    REPORT [DEMO7-OK] for each of 4a / 4b / 4c (3 separate lines).
+    REPORT [DEMO7-FAIL] with verbatim error if any path still raises.
 
     == PHASE 5 — Merge nomination + auto-escalation + resolver review ==
 
@@ -411,14 +428,115 @@
     REPORT [DEMO7-PHASE-14] section header.
     REPORT [DEMO7-OK] / [DEMO7-FAIL] for each of 14a–14c.
 
+    == PHASE 15 — Phase 7.4.4 fix verifications (DEMO7-round-1 regressions) ==
+
+    DEMO7-round-1 surfaced 3 holes that I (Claude) missed; all 3 fixed in
+    commit ead74bf. Verify the fixes hold:
+
+    15a. spawn_child_agent MCP wrapper exposes transfer_catalog_ids:
+         Phase 7 (split) above already uses this param. Confirm by checking
+         the spawn_child_agent response carries `transferred_catalogs >= 1`
+         when transfer_catalog_ids was passed. Pre-7.4.4 the param was
+         silently dropped at the wrapper boundary even though SMEs supplied
+         it — sme-payments-split flagged "the parent monolith-x still owns
+         the original POST /payments/charge catalog row" because the
+         transfer never fired.
+
+         Cross-verify on the data side: after Phase 7 split, query
+         get_my_catalogs(sme-payments-split) — the carved POST
+         /payments/charge catalog should appear under the CHILD's component,
+         not the parent's. If both show it (or only parent shows it),
+         [DEMO7-FAIL] — the wrapper plumb still missing.
+
+    15b. Phase 7.3 self-loop guards stay dead:
+         This is the same as PHASE 4 above (4a + 4b + 4c). Just confirm
+         all three sub-results from PHASE 4 were [DEMO7-OK]. If any was
+         [DEMO7-FAIL] with "no self-loops" verbatim, the Python guard
+         regressed.
+
+    15c. vector_search lean projection:
+         Any agent calls:
+           vector_search(agent_id, 'auth verify endpoint', 'components', 5)
+         Verify the response shape:
+           - Each result row has keys: {id, canonical_name, display_name,
+             component_type, status, similarity}
+           - Each result row does NOT carry: embedding, component_doc_md,
+             source_slice, metadata (these used to inflate responses to
+             50–115KB).
+           - Total response size is small (rough check: < 5KB for 5 rows).
+
+         Then call vector_search on each of attributions / unresolved /
+         edges / catalogs and confirm none of those leak embedding or
+         heavy JSONB blobs either.
+
+    REPORT [DEMO7-PHASE-15] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL] for each of 15a / 15b / 15c.
+
+    == PHASE 16 — Phase 7.4.5 fix verifications (DEMO7-round-1 pre-existing bugs) ==
+
+    DEMO7-round-1 also surfaced 3 pre-existing bugs (insights cad0edf5,
+    d4c923dc, plus the resolver's get_action_items_summary crashes); all
+    fixed in commit 9b94805. Verify:
+
+    16a. get_my_catalogs no duplicates post-merge:
+         After Phase 6 absorb completes, sme-auth-1 (the merge survivor)
+         calls get_my_catalogs(sme-auth-1).
+         Verify:
+           - Each catalog id appears EXACTLY ONCE in the response.
+           - The total row count equals the distinct count.
+           - Specifically: POST /verify (sme-auth-1's original) and
+             POST /refresh (transferred from sme-auth-2) each appear once.
+
+         Pre-7.4.5 the JOIN-on-RCA cardinality bug caused each catalog to
+         appear 2× post-merge (sme-f9bde48a saw 12 rows for 6 distinct
+         catalogs in DEMO7-round-1). [DEMO7-FAIL] if any catalog id
+         repeats.
+
+    16b. get_action_items_summary uniform-int shape:
+         resolver (which has at least one closed consolidation in
+         terminal_pending_ack from Phase 6) calls
+         get_action_items_summary(resolver_id).
+
+         Verify:
+           - Response is a flat dict with keys: consolidations_pending,
+             tasks_pending, clarifications_pending, unacked_chats,
+             unacked_broadcasts, terminal_pending_ack, **proxied_count**.
+           - EVERY value is an int (no list anywhere).
+           - The response does NOT crash with "Input should be a valid
+             integer [type=int_type, input_value=[], input_type=list]".
+           - Specifically: `proxied` field is GONE; `proxied_count` field
+             is present.
+
+         Pre-7.4.5 this crashed on every wake. [DEMO7-FAIL] if pydantic
+         error returns OR if the response carries a `proxied: list` field.
+
+         Then call get_action_items_detail(resolver_id) and verify the
+         rich per-proxy breakdown lives there: response has both `my` and
+         `proxied` buckets, and `proxied` is a list of dicts with
+         {proxy_agent_id, deactivation_reason, depth, items}.
+
+    16c. SME prompt update — upsert_catalog (not upsert_edge_catalog):
+         Spawn ONE fresh SME (e.g. sme-prompt-check). On its first wake,
+         it should declare its catalog using `upsert_catalog`. If it uses
+         `upsert_edge_catalog` instead, the Phase 7.4.5 prompt cleanup
+         didn't reach the materialisation hygiene cycle.
+
+         Cross-verify: ask the SME via send_chat (admin → sme-prompt-check)
+         "Which tool should you use to declare a new endpoint catalog
+         row?" — the response should mention `upsert_catalog` not the
+         deprecated wrapper.
+
+    REPORT [DEMO7-PHASE-16] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL] for each of 16a / 16b / 16c.
+
     == FINAL SCORECARD ==
 
-    Once all 14 phases complete, emit a [DEMO7-RESULT] block with one line per
+    Once all 16 phases complete, emit a [DEMO7-RESULT] block with one line per
     phase:
       [DEMO7-RESULT] Phase 1 setup ................. PASS / FAIL — short summary
       [DEMO7-RESULT] Phase 2 catalogs .............. PASS / FAIL — ...
       [DEMO7-RESULT] Phase 3 unmatched callers ..... PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 4 self-loop ............. PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 4 self-loop ............. PASS / FAIL — ... (3 sub-results)
       [DEMO7-RESULT] Phase 5 merge nominate ........ PASS / FAIL — ...
       [DEMO7-RESULT] Phase 6 handoff+absorb+ack .... PASS / FAIL — ...
       [DEMO7-RESULT] Phase 7 split+transfers ....... PASS / FAIL — ...
@@ -429,6 +547,8 @@
       [DEMO7-RESULT] Phase 12 flows-on-catalogs .... PASS / FAIL — ...
       [DEMO7-RESULT] Phase 13 catalog vector_search  PASS / FAIL — ...
       [DEMO7-RESULT] Phase 14 admin UI catalogs .... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 15 7.4.4 fix verify ..... PASS / FAIL — ... (3 sub-results)
+      [DEMO7-RESULT] Phase 16 7.4.5 fix verify ..... PASS / FAIL — ... (3 sub-results)
 
     Plus list every [DEMO7-BUG] line you emitted earlier (if any) at the bottom of
     the scorecard so the user can quickly identify what to investigate.
