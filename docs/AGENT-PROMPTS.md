@@ -87,7 +87,23 @@ Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULAR
 - Plus: per-plane read-only MCP (e.g. github-reader on github plane).
 - Shared: `ack_terminal`, `record_insight`.
 
-**Granularity rule (most important):** one resource row = ONE candidate deployable component. Sub-artifacts (branches, workflows, listeners, DNS records, log groups) go in parent row's `metadata` JSONB — NEVER as separate rows. Per-plane: github/deploy = repo; cloud = service/store/job (R53→ALB→TG→ASG walked as one); telemetry = catalogued service; config = logical store / key prefix. Coarse sanity check before yielding: count is hundreds-to-low-thousands for mid-size org; if >2× expected, raise blocker before SME storm.
+**Granularity rule (most important):** one resource row = ONE candidate deployable component. Sub-artifacts (branches, workflows, listeners, DNS records, log groups) go in parent row's `metadata` JSONB — NEVER as separate rows. Per-plane: github/deploy = repo; cloud = service/store/job (R53→ALB→TG→ASG walked as one); telemetry = walk catalog + infra inventory + DB/queue surfaces + trace-derived deps (see below); config = logical store / key prefix. Coarse sanity check before yielding: count is hundreds-to-low-thousands for mid-size org; if >2× expected, raise blocker before SME storm.
+
+**Telemetry-plane discovery (most-missed surface):** the provider's service catalog only lists APM-instrumented applications. Databases, caches, queues, brokers may NOT be there at all — they live in dimension/metric space. Walk all four surfaces:
+1. **Service catalog** → applications/lambdas/workers (resource_type=`service`).
+2. **Infrastructure / host inventory** → VMs, containers, K8s workloads (resource_type=`host_group` or `k8s_workload`).
+3. **DB / message-broker surfaces** (provider-specific):
+   - Datadog: Database Monitoring (DBM) for SQL DBs; AWS/GCP/Azure integrations for RDS/ElastiCache/MemoryDB/MSK; integration metric prefixes (postgres.*, redis.*, kafka.*).
+   - New Relic: Infrastructure → AWS/GCP/Azure entity types (DBInstance, CacheCluster, KafkaCluster).
+   - Honeycomb: derive from span attribute keys (db.system / db.name / messaging.system / messaging.destination).
+   - **Last9**: service catalog only lists apps; databases/caches/brokers must be derived from metric label streams (look for `db_instance`, `cache_cluster`, `kafka_topic`, or distinct values of `service_type` / `component_type` dimensions).
+   - Splunk Observability: services + dimensions endpoint.
+   Emit one row per discovered store/broker (resource_type = `db` / `cache` / `queue` / `topic` / `broker`).
+4. **Trace-derived dependencies** → service-map / dependency view. Catch any downstream targets (e.g. third-party APIs) that didn't appear in 1-3.
+
+Per-provider auth via `get_secret(plane="telemetry", key=<provider>_api_key)` — common keys: `datadog_api_key` + `datadog_app_key`, `newrelic_api_key`, `honeycomb_api_key`, `last9_api_key`, `splunk_token`. Raise blocker if missing.
+
+`upsert_resource` is idempotent on `(plane, resource_type, identifier)` — if the same logical component appears in multiple surface scans, the second call updates metadata rather than duplicating.
 
 **Tool installation flow:** install globally via bash → raise dummy blocker → orchestrator resolves → fresh re-invoke picks up new MCP from `.mcp.json`.
 

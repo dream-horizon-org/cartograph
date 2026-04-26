@@ -125,8 +125,91 @@ Per-plane rules:
   * Ignore raw networking primitives (SGs, subnets, VPCs) — those are
     infra context, not components.
 
-- {plane} = telemetry: ONE row per service entry in the provider catalog
-  (resource_type='service'). NOT per trace, log line, metric, or dashboard.
+- {plane} = telemetry: ONE row per discovered component, NOT per trace /
+  log line / metric / dashboard. Telemetry providers (Datadog, New Relic,
+  Honeycomb, Last9, Splunk Observability, Grafana, Tempo, ...) surface
+  components across multiple internal models — your job is to enumerate
+  ALL component types they expose, not just the obvious "service catalog".
+
+  Walk these surfaces in order:
+
+  1. SERVICE CATALOG (applications, lambdas, workers): the provider's
+     primary catalog typically lists APM-instrumented services. Emit
+     one row per entry, resource_type='service', identifier=
+     <provider-canonical-service-name>. Include the provider URL +
+     telemetry env (prod/staging) in metadata so SMEs can link back.
+
+  2. INFRASTRUCTURE / HOST INVENTORY (VMs, containers, K8s nodes):
+     query the host/infrastructure surface (Datadog Infrastructure,
+     New Relic Infrastructure, Honeycomb Hosts, Last9 Infra). Emit
+     one row per logical host group, resource_type='host_group' or
+     'k8s_workload'. Skip individual pods/replicas — fold into the
+     workload row's metadata.
+
+  3. DATA-STORE / MESSAGE-BROKER SURFACES (the most-missed): databases,
+     caches, queues, brokers may NOT appear in the service catalog at
+     all — many providers carry them only in dimension/metric space.
+     Sources to check (provider-specific):
+       * Datadog: Database Monitoring (DBM) for SQL DBs;
+         AWS/GCP/Azure integration views for RDS / ElastiCache /
+         MemoryDB / MSK; integration-specific dashboards (postgres.*,
+         redis.*, kafka.* metric prefixes).
+       * New Relic: Infrastructure → AWS / GCP / Azure entity types
+         (DBInstance, CacheCluster, KafkaCluster).
+       * Honeycomb: derive from span attribute keys
+         (db.system / db.name / messaging.system / messaging.destination)
+         in the trace store — these don't appear as services but ARE
+         components.
+       * Last9: service catalog only lists apps; databases, caches and
+         brokers must be derived from metric label streams (look for
+         label keys like `db_instance`, `cache_cluster`, `kafka_topic`,
+         or distinct values of `service_type` / `component_type`
+         dimensions).
+       * Splunk Observability: services + dimensions endpoint.
+     Emit one row per discovered store/broker, resource_type=
+     'db' / 'cache' / 'queue' / 'topic' / 'broker' as appropriate.
+     identifier = the provider-canonical id (e.g. RDS instance id,
+     Redis cluster name, Kafka topic name).
+
+  4. TRACE-DERIVED DEPENDENCIES (last sweep): if the provider exposes
+     a service-map / dependency view, scan it for downstream targets
+     that DIDN'T surface in 1-3 (rare but happens — e.g. a third-party
+     API that's only a span destination). Add as resource_type=
+     'external-service' or 'data_source' depending on type.
+
+  Per-provider auth: get the credential key via list_secrets_for_plane
+  + get_secret. Common keys: `datadog_api_key` + `datadog_app_key`,
+  `newrelic_api_key`, `honeycomb_api_key`, `last9_api_key`,
+  `splunk_token`. Raise a blocker if missing.
+
+  Example upserts (the iterator picks resource_type per surface):
+
+    upsert_resource(plane="telemetry", resource_type="service",
+                    identifier="payments-svc",
+                    access_desc="Datadog APM service",
+                    metadata={{"provider":"datadog",
+                               "env":"prod",
+                               "url":"https://app.datadoghq.com/services/payments-svc"}})
+
+    upsert_resource(plane="telemetry", resource_type="db",
+                    identifier="payments-db-prod",
+                    access_desc="RDS Postgres surfaced via Datadog DBM",
+                    metadata={{"provider":"datadog",
+                               "engine":"postgres",
+                               "discovered_via":"db.system span attribute"}})
+
+    upsert_resource(plane="telemetry", resource_type="queue",
+                    identifier="orders.created",
+                    access_desc="Kafka topic surfaced via metric labels",
+                    metadata={{"provider":"last9",
+                               "broker":"msk-prod",
+                               "discovered_via":"kafka_topic label"}})
+
+  De-duplication: if the same logical component appears under multiple
+  surface scans (e.g. payments-db-prod in both DBM AND host inventory),
+  emit ONE row — upsert_resource is idempotent on
+  (plane, resource_type, identifier), so the second call updates
+  metadata rather than duplicating.
 
 - {plane} = config (supporter): ONE row per logical config store or key
   prefix, NOT per individual key. Config SMEs enrich existing components
