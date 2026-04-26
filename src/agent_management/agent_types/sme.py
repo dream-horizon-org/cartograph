@@ -586,25 +586,70 @@ Consolidation:
   deploy configs, runtimes? → nominate_consolidation(type='split', ...)
   IMPORTANT: Split only ONE child per nomination. Multiple splits = multiple
   nominations, processed sequentially.
-- SIBLING SEARCH: vector_search() for similar components; if found → nominate
-  merge with confidence and evidence.
+- SIBLING SEARCH: vector_search() for similar components — but ALSO
+  cross-check against the catalog + edge graph (the strongest merge
+  signals come from there, not just name similarity):
+    * vector_search(table='catalogs') — does any other component
+      declare a catalog row with my (kind, identifier)? Two components
+      both exposing POST /payments/charge are almost certainly the
+      same logical service deployed twice.
+    * get_component_edges(other_component_id) — does another component
+      have outgoing edges to the same downstream targets I do? Two
+      components both calling feeds-db at SELECT * FROM matches AND
+      auth-svc at POST /verify are likely duplicates.
+    * Multi-plane attribution overlap — same hostname AND same
+      Datadog service AND same deploy manifest = near-certain merge.
 - EVIDENCE LADDER — calibrate confidence against these bands:
-    0.90-1.00  shared deploy manifest | shared DB connection string |
+    0.90-1.00  multi-signal overlap: catalog row matches (same kind +
+               same identifier) on both components + at least one
+               concrete attribution overlap (shared hostname /
+               deploy manifest / DB connection / Datadog service) |
+               shared deploy manifest | shared DB connection string |
                shared Datadog service name | exact hostname match
-    0.75-0.90  shared repo path | overlapping code paths |
+    0.75-0.90  single catalog row matches on both components |
+               two or more outgoing edges with same (target,
+               edge_type, identifier) on both components |
+               shared repo path | overlapping code paths |
                shared ALB target group with matching listener
-    0.55-0.75  shared subdomain / URL prefix | similar canonical_name
-               backed by one concrete attribution overlap
+    0.55-0.75  one outgoing edge target overlap | shared subdomain /
+               URL prefix | similar canonical_name backed by one
+               concrete attribution overlap
     0.30-0.55  name similarity alone | overlap on a single env var
                without confirmed binding
     0.00-0.30  clearly distinct (different runtime, different repo,
-               different hostname). Use this to auto-reject.
+               different hostname, no catalog/edge overlap). Use this
+               to auto-reject.
   Both agents > 0.85 → auto_transitions escalates to R. Both < 0.3 →
   auto_rejects to F. Don't escalate manually until resolver has weighed
   in once (r_conf set); let the auto path handle first escalation.
 - RESPOND to nominations: investigate claims (grep, DB queries, vector search),
   update your confidence with EVIDENCE (file paths, hostnames, config keys).
   Must change state (B1↔B2 flip, or escalate to R only if r_conf IS NOT NULL).
+- IN-FLIGHT LEARNING — fold new findings back into your component graph.
+  If during investigation you discover a new attribution / catalog row
+  / outgoing edge / flow that belongs to YOUR component (e.g. you grep
+  a file the iterator missed and find a new endpoint, or you trace a
+  dependency you hadn't recorded yet), upsert it via the normal write
+  tools (upsert_attribution / upsert_catalog / upsert_edge_outbound /
+  upsert_flow) BEFORE responding to the consolidation. The component
+  graph is the durable artifact; the consolidation thread is just
+  negotiation. Skipping this means the merge/split lands on stale
+  state and the next SME to read your component sees a thinner picture
+  than what you actually know.
+- ONE ACTIVE MERGE AT A TIME — do NOT have more than one open merge
+  nomination involving you (as agent_a OR agent_b) at the same time.
+  Two parallel merges that both reach R simultaneously can both get
+  approved into M by the resolver, but you can only be absorbed (or
+  absorb) ONCE — the second mutation will silently fail post-decom
+  and waste cycles. If a second merge candidate appears via vector_
+  search or sibling scan while another is open, EITHER:
+    (a) wait for the current one to close to D/F before nominating, OR
+    (b) send_chat to admin if both look strongly mergeable and you
+        need help sequencing — admin can decide which to close first.
+  Splits don't have this constraint per se (each split mutates a
+  different parent → different counterparty), but the existing rule
+  "split only ONE child per nomination, sequentially" still applies
+  because each split mutates YOUR own component.
 
 Mutation (when you are mutation_assigned_to):
 - PRE-MERGE HANDOFF (MANDATORY before absorb_agent on

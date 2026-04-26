@@ -151,6 +151,19 @@ Per-provider auth via `get_secret(plane="telemetry", key=<provider>_api_key)` �
 
 **Edge Discovery:** resolve outbound calls using the catalog-aware ladder. One edge per specific call/query (identifier carries detail; multiple calls to the same endpoint = ONE bound row, metadata accumulates). Record flows for every catalog → outgoing link (powers blast-radius / impact analysis).
 
+**Consolidation evidence ladder** — calibrate confidence from these signals (richest first):
+- **0.90-1.00** multi-signal overlap (catalog row matches on both + concrete attribution overlap), shared deploy manifest, shared DB connection, shared Datadog service name, exact hostname match.
+- **0.75-0.90** single catalog row matches (same kind+identifier on both components), two or more outgoing edges with same (target, edge_type, identifier) on both, shared repo path, shared ALB target group with matching listener.
+- **0.55-0.75** one outgoing edge target overlap, shared subdomain / URL prefix, similar canonical_name backed by one concrete attribution overlap.
+- **0.30-0.55** name similarity alone, single env var overlap.
+- **0.00-0.30** clearly distinct → auto-reject.
+
+Use `vector_search(table='catalogs')` AND `get_component_edges(other)` during sibling search — catalog overlap and edge-target overlap are stronger signals than name/embedding similarity alone.
+
+**In-flight learning during consolidation:** if you discover new attributions / catalogs / edges / flows about YOUR component while investigating, upsert them via the normal write tools BEFORE responding. The component graph is the durable artifact; the consolidation thread is just negotiation.
+
+**One active merge at a time:** do NOT have more than one open merge nomination involving you (as agent_a OR agent_b) at the same time. Two parallel merges that reach R simultaneously can both get approved into M, but you can only be absorbed (or absorb) ONCE — the second mutation silently fails and wastes cycles. Wait for the current to close to D/F before nominating, or send_chat to admin if both look strongly mergeable.
+
 **Rules:** only modify YOUR own components. Embed everything at write time (tools do this automatically). Back every claim with evidence. Always use YOUR `agent_id`. Retry once on tool failure, then blocker or skip.
 
 ---
@@ -168,9 +181,26 @@ Per-provider auth via `get_secret(plane="telemetry", key=<provider>_api_key)` �
 - Shared: `ack_terminal` — after every `complete_consolidation` D and `review_consolidation` F, you AND the mutation POC must ack via `ack_terminal('consolidation', id)` to confirm comprehension. Trigger scanner re-wakes you on every cycle until you ack.
 - `record_insight` for self-improvement.
 
-**Per-wake routine:** action_items_summary → admin messages first → for each R: read thread, verify evidence claims (attributions, hostnames, metadata via `get_attributions` / `get_component` / `vector_search`), basic sanity checks (shared hostname? same runtime? glaring contradictions?), then `review_consolidation` to M (with `mutation_assigned_to`) / B1/B2 (need more info) / F (clearly wrong). For each MD: verify mutation, `complete_consolidation` → D, ack_terminal. Yield after batch — natural backpressure.
+**Per-wake routine:**
+1. `get_action_items_summary` → admin messages first.
+2. **Pre-batch participant scan** (NEW): before approving anything, read all R + in-flight (M/MD) rows via `get_my_consolidations`. Build a participant map `{agent_id: [in-flight cons_ids]}` — your conflict ledger.
+3. For each R row: read thread, verify evidence (attributions, catalogs via `get_component_edges`, hostnames, vector_search), sanity check (shared hostname? catalog overlap? edge-target overlap? glaring contradictions?).
+4. **Participant conflict check** (NEW) before approving X to M: if any participant of X already appears in another M/MD-state consolidation (via the conflict ledger), DEFER X — keep at R with a note ("Deferred — agent <X> mid-mutation in <Y>; will re-review after <Y> closes"). Avoids parallel mutations on the same agent (the second silently fails post-decommission).
+5. If clean + evidence checks out: `review_consolidation` → M (with `mutation_assigned_to` per the Absorber Pick below).
+6. If something off: → B1/B2 with reasoning. If clearly wrong: → F.
+7. For each MD: verify mutation, `complete_consolidation` → D, then `ack_terminal('consolidation', id)`. Yield. Trigger manager re-wakes.
 
-**Rules:** gatekeeper only — review and approve; SMEs execute. Only raise issues if something is fundamentally wrong (don't nitpick). When approving merge: ALWAYS set `mutation_assigned_to`. Process in batches, yield, sleep — trigger manager re-wakes. Retry once on tool failure, then skip and move to next.
+**Absorber Pick (merge `mutation_assigned_to`)** — pick the RICHER side along this priority order, NOT just "more planes":
+1. Plane coverage (count of distinct planes with attributions).
+2. Attribution count.
+3. Catalog count.
+4. Outgoing edge count.
+5. `component_doc_md` length.
+6. `source_slice` resource coverage.
+
+Rationale: cascade transfers attributions / catalogs / edges / flows from absorbed → survivor, but the absorbed `component_doc_md` becomes a frozen tombstone — only the pre-merge handoff clarification preserves its content. Picking the richer side as absorber minimises information loss. (Splits: `mutation_assigned_to` always = `agent_a`.)
+
+**Rules:** gatekeeper only — review and approve; SMEs execute. Only raise issues if something is fundamentally wrong (don't nitpick). When approving merge: ALWAYS set `mutation_assigned_to` per Absorber Pick. Process in batches, yield, sleep — trigger manager re-wakes. Retry once on tool failure, then skip and move to next.
 
 ---
 ## 5. Prompt Injection Points
