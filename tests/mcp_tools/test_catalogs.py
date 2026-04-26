@@ -215,3 +215,21 @@ def test_upsert_edge_catalog_shim_forwards(agent_factory):
     )
     assert row is not None
     assert row["kind"] == "endpoint"
+
+
+def test_vector_search_includes_catalogs(agent_factory):
+    """Phase 7.4 follow-up: vector_search now scans the catalogs table."""
+    from cartograph_mcp.tools import search as search_tool
+    sme, cid = _setup_sme(agent_factory, "vsc")
+    cat.upsert_catalog(sme, cid, "endpoint", "GET /payments/charge")
+    out = search_tool.vector_search(sme, "payments charge endpoint", "catalogs", 5)
+    if out["query_embedded"]:
+        idents = [r["identifier"] for r in out["results"]]
+        assert "GET /payments/charge" in idents
+
+
+def test_vector_search_rejects_unknown_table(agent_factory):
+    from cartograph_mcp.tools import search as search_tool
+    agent_factory("v-rt", "sme")
+    with pytest.raises(ValueError, match="Invalid table"):
+        search_tool.vector_search("v-rt", "x", "bogus", 5)

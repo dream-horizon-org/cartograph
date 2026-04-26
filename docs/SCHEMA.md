@@ -814,6 +814,7 @@ Embeddings generated at write time via `cartograph-db` MCP. No batch step.
 | `attributions` | `"{resource_type}: {identifier}"`                      | Fuzzy resource lookup across planes                                                                    |
 | `unresolved`   | `"{reference_type}: {reference_value}"`                | Match dangling refs to components                                                                      |
 | `edges`        | `"{edge_type}: {identifier}"`                          | Fuzzy match calls across components — e.g., match `GET /scorecard/cricket` to `GET /cricket/scorecard` |
+| `catalogs`     | `"{kind}: {identifier}"`                               | Phase 7.4. Find similar exposed surfaces across components — "find an endpoint similar to /payments/charge" |
 
 
 Lookup protocol for **outbound references** (refs an SME finds in its

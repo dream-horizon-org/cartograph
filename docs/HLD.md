@@ -285,7 +285,7 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `get_flow(component_id, incoming_edge_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9. Outgoing edges triggered by this incoming. |
 | `get_flow_inverse(component_id, outgoing_edge_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9. Incoming edges that trigger this outgoing. |
 | `get_unresolved(component_id)` | ✓ | ✓ | ✓ | ✓ | |
-| `vector_search(agent_id, query, table, limit)` | ✓ | ✓ | ✓ | ✓ | Embeds query with `mxbai-embed-large` (Phase 3.7), KNN-cosines against the target table. Returns `{query_embedded: bool, results}`. Tables: components / attributions / unresolved / edges. Limit clamped [1, 50]. |
+| `vector_search(agent_id, query, table, limit)` | ✓ | ✓ | ✓ | ✓ | Embeds query with `mxbai-embed-large` (Phase 3.7), KNN-cosines against the target table. Returns `{query_embedded: bool, results}`. Tables: components / attributions / unresolved / edges / **catalogs** (Phase 7.4 follow-up). Limit clamped [1, 50]. |
 
 #### Notifications (live · Phase 2.3)
 

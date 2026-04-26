@@ -37,6 +37,15 @@ _VALID_TABLES = {
              "WHERE e.embedding IS NOT NULL "
              "ORDER BY e.embedding <=> %s::vector ASC "
              "LIMIT %s",
+    # Phase 7.4 follow-up: catalog rows live in their own table now,
+    # embedded at write time with "{kind}: {identifier}" — same shape
+    # as edges. Lets SMEs do "find an endpoint similar to /payments/charge"
+    # across the org without walking get_component_edges per component.
+    "catalogs": "SELECT c.*, 1 - (c.embedding <=> %s::vector) AS similarity "
+                "FROM catalogs c "
+                "WHERE c.embedding IS NOT NULL "
+                "ORDER BY c.embedding <=> %s::vector ASC "
+                "LIMIT %s",
 }
 
 
