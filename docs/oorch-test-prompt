@@ -6,13 +6,14 @@
     You are orchestrating a comprehensive end-to-end verification dance for Cartograph
     covering Phase 4 + 4.1 + 4.2 (mutation/proxy lifecycle) + Phase 5 (admin UI tweaks +
     audit + insights + persistence toggle) + Phase 7 (terminal acks, pre-merge handoff,
-    self-loops, catalogs first-class). This is a structured 11-phase test — each phase
-    verifies a specific feature surface.
+    self-loops, catalogs first-class) + Phase 7.4.2 (flows reference catalogs first-class +
+    catalog cascade in mutation + admin UI catalog endpoints). This is a structured
+    14-phase test — each phase verifies a specific feature surface.
 
     == REPORT-BACK CONVENTIONS ==
 
     Tag every status / observation message with one of:
-      [DEMO7-PHASE-N]    section header (N = 1..11)
+      [DEMO7-PHASE-N]    section header (N = 1..14)
       [DEMO7-OK]         a verification passed
       [DEMO7-FAIL]       a verification failed (note expected vs actual)
       [DEMO7-BUG]        unexpected behavior worth flagging
@@ -145,7 +146,7 @@
           REPORT [DEMO7-OK] if handoff happened in this order; [DEMO7-FAIL] if
           sme-auth-1 absorbed without the clarification.
 
-      6b. ABSORB (4.1 cascade):
+      6b. ABSORB (4.1 cascade + 7.4.2 catalog cascade):
           sme-auth-1 calls absorb_agent(consolidation_id, target=sme-auth-2,
                                         deactivation_reason='merged',
                                         deactivation_notes='auth-svc-v2 folded in')
@@ -156,6 +157,17 @@
             - sme-auth-2.merged_into_agent_id = sme-auth-1
             - sme-auth-2's attributions transferred to sme-auth-1's component
             - sme-auth-2's component status = 'decommissioned'
+            - The absorb_agent response now carries `cascade.catalogs` >= 0
+              (Phase 7.4.2). For sme-auth-2's catalogs from Phase 2:
+              POST /verify, POST /refresh — sme-auth-1 also declared
+              POST /verify, so the (kind, identifier) collision drops
+              sme-auth-2's POST /verify catalog AND any flows referencing
+              it (cascade-delete via FK). POST /refresh re-points to
+              sme-auth-1's component (no collision).
+            - Spot-check: sme-auth-1 calls get_my_catalogs() and verifies
+              both POST /verify and POST /refresh are now under its
+              component. POST /verify caller_count should reflect bound
+              edges (kyc-svc still binds to it).
 
       6c. EXECUTE + COMPLETE (Phase 4):
           sme-auth-1 calls execute_mutation → status M → MD.
@@ -190,14 +202,22 @@
       - component_data with appropriate canonical_name, display_name
       - child_source_slice (the carved-out subset of monolith's slice)
       - briefing: "You are the payments-svc carved from monolith-x. Your scope: ..."
-      - transfer_edge_ids: [the bound edge for /payments/charge]
-      - transfer_flow_ids: []  (or whatever flows exist)
+      - transfer_catalog_ids: [the catalog id for POST /payments/charge — Phase 7.4.2]
+      - transfer_edge_ids: [any bound edges originating from the payments side]
+      - transfer_flow_ids: [flow rows whose component_id == monolith AND
+        whose incoming_catalog_id is in transfer_catalog_ids]
       - transfer_attribution_ids: [any attributions belonging to the payments part]
 
     Verify:
       - sme-payments-split exists with status='idle'
       - The new component has split_from_component_id pointing to monolith
-      - The transferred edges/attributions now belong to sme-payments-split
+      - The transferred catalogs / edges / attributions now belong to
+        sme-payments-split (the response carries
+        `transferred_catalogs`, `transferred_edges`,
+        `transferred_attributions` counters — Phase 7.4.2)
+      - The transferred flow's `incoming_catalog_id` still points at the
+        same catalog row (which is now under the child) — flow integrity
+        preserved across the split
       - A welcome [split-welcome] task exists for sme-payments-split
 
     sme-monolith calls execute_mutation → MD. Resolver calls complete_consolidation → D.
@@ -276,21 +296,139 @@
     REPORT [DEMO7-PHASE-11] section header.
     REPORT [DEMO7-OK] / [DEMO7-FAIL] / [DEMO7-NOTE] (if no HTTP access).
 
+    == PHASE 12 — Flows reference catalogs first-class (Phase 7.4.2) ==
+
+    The most important new mechanic: a flow's incoming is canonically a
+    catalog row (NOT an edge id). This phase exercises declaration,
+    fan-out, both read tools, the new contract on get_flow_inverse,
+    and the negative-path validation.
+
+    12a. DECLARE A FLOW (single):
+         sme-monolith owns a catalog "POST /payments/charge" (declared
+         in Phase 2) and a bound outgoing edge to feeds-db at
+         "INSERT ledger" (declared in Phase 3 or freshly here via
+         upsert_edge_outbound). Wire them:
+           upsert_flow(
+             agent_id=sme-monolith,
+             component_id=monolith_component_id,
+             incoming_catalog_id=<POST /payments/charge catalog id>,
+             outgoing_edge_id=<INSERT ledger edge id>,
+             metadata={"src": "code"}, confidence=0.9,
+           )
+         Verify the returned row has incoming_catalog_id set (NOT
+         incoming_edge_id — that column does not exist anymore).
+
+    12b. FAN-OUT (one catalog → multiple outgoings):
+         Add a SECOND outgoing from monolith — e.g. a publishes_to
+         to a notify topic — and wire a second flow:
+           upsert_flow(monolith, monolith_id, charge_catalog_id,
+                       <notify edge id>)
+         Confirm get_flow(monolith_id, charge_catalog_id) returns
+         BOTH outgoings (set-based fan-out).
+
+    12c. INVERSE LOOKUP (contract change verification):
+         get_flow_inverse(monolith_id, <INSERT ledger edge id>) should
+         return CATALOG ROWS (not edge rows). Verify the returned row
+         has a `kind` field (catalog rows do; edge rows don't) and
+         that its id matches charge_catalog_id.
+
+    12d. NEGATIVE PATH — foreign-component catalog refused:
+         sme-monolith tries to upsert_flow using sme-cron's catalog id
+         as incoming_catalog_id (a catalog NOT belonging to monolith's
+         component). Should raise ValueError matching
+         "does not belong to component".
+
+    12e. CATALOG CASCADE — flow disappears when catalog is deleted:
+         Take a synthetic catalog (kind='topic', identifier='test.delete-me')
+         on monolith's component, wire one flow on it, then DELETE the
+         catalog (orchestrator can use bash + curl + the database, OR
+         have sme-monolith do it via SQL through MCP if available, OR
+         skip and report [DEMO7-NOTE] if no path). Verify the flow row
+         is gone (FK ON DELETE CASCADE).
+
+    REPORT [DEMO7-PHASE-12] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL] for each of 12a–12e.
+
+    == PHASE 13 — Vector search on catalogs (Phase 7.4 follow-up) ==
+
+    Catalogs are embedded at write time ("{kind}: {identifier}") and
+    surfaced via vector_search.
+
+    sme-auth-1 calls:
+      vector_search(agent_id=sme-auth-1, query_text='login verify endpoint',
+                    table='catalogs', limit=5)
+
+    Verify:
+      - The response shape is {query_embedded: bool, results: [...]}.
+      - If query_embedded is True, the results array is non-empty AND
+        sme-auth-1's POST /verify catalog appears (or a near-match) in
+        the top 5.
+      - If query_embedded is False (Ollama unreachable), report
+        [DEMO7-NOTE] explaining the embedding pipeline is down — that's
+        a graceful-degrade contract, not a failure.
+
+    Then call:
+      vector_search(agent_id=sme-monolith, query_text='charge payment',
+                    table='catalogs', limit=5)
+    Verify monolith's POST /payments/charge appears.
+
+    Cross-check: vector_search with table='edges' for the same queries
+    should NOT return catalog-shaped rows anymore (catalogs are not in
+    edges post-Phase-7.4). Just bound + dangling rows.
+
+    REPORT [DEMO7-PHASE-13] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL] for each query + the cross-check.
+
+    == PHASE 14 — Admin UI catalog endpoints (Phase 7.4.2) ==
+
+    These FE-facing endpoints were silently broken pre-7.4.2 (returning 0 /
+    empty for every component). Verify via curl from bash:
+
+    14a. /api/components.catalog_count > 0:
+         curl -s 'http://localhost:8200/api/components?q=auth' | \
+           python3 -c "import sys,json; d=json.load(sys.stdin); \
+             print([(c['canonical_name'], c['edge_count']) for c in d['components']])"
+         Verify: sme-auth-1's component has edge_count.catalog >= 2
+         (POST /verify + POST /refresh + any from absorb of sme-auth-2).
+
+    14b. /api/component/{id}/drilldown.edges.catalog populated:
+         curl -s "http://localhost:8200/api/component/<auth-1-component-id>/drilldown" | \
+           python3 -c "import sys,json; d=json.load(sys.stdin); \
+             print('catalog rows:', len(d['edges']['catalog'])); \
+             [print(' ', c.get('catalog_kind'), c.get('identifier')) for c in d['edges']['catalog']]"
+         Verify: catalog rows are non-empty AND each carries
+         `catalog_kind` (e.g. 'endpoint') alongside identifier.
+
+    14c. /api/graph flows[].incoming_catalog_id present:
+         curl -s 'http://localhost:8200/api/graph' | \
+           python3 -c "import sys,json; d=json.load(sys.stdin); \
+             print('flows:', len(d['flows'])); \
+             [print(' ', list(f.keys())) for f in d['flows'][:1]]"
+         Verify: flow rows carry `incoming_catalog_id` (NOT
+         `incoming_edge_id` — that field name no longer exists in the
+         payload).
+
+    REPORT [DEMO7-PHASE-14] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL] for each of 14a–14c.
+
     == FINAL SCORECARD ==
 
-    Once all 11 phases complete, emit a [DEMO7-RESULT] block with one line per
+    Once all 14 phases complete, emit a [DEMO7-RESULT] block with one line per
     phase:
-      [DEMO7-RESULT] Phase 1 setup ............... PASS / FAIL — short summary
-      [DEMO7-RESULT] Phase 2 catalogs ............ PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 3 unmatched callers ... PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 4 self-loop ........... PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 5 merge nominate ...... PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 6 handoff+absorb+ack .. PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 7 split+transfers ..... PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 8 proxy inheritance ... PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 9 insights ............ PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 10 persistence toggle . PASS / FAIL — ...
-      [DEMO7-RESULT] Phase 11 mcp audit .......... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 1 setup ................. PASS / FAIL — short summary
+      [DEMO7-RESULT] Phase 2 catalogs .............. PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 3 unmatched callers ..... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 4 self-loop ............. PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 5 merge nominate ........ PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 6 handoff+absorb+ack .... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 7 split+transfers ....... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 8 proxy inheritance ..... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 9 insights .............. PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 10 persistence toggle ... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 11 mcp audit ............ PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 12 flows-on-catalogs .... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 13 catalog vector_search  PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 14 admin UI catalogs .... PASS / FAIL — ...
 
     Plus list every [DEMO7-BUG] line you emitted earlier (if any) at the bottom of
     the scorecard so the user can quickly identify what to investigate.
