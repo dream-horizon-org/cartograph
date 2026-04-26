@@ -492,6 +492,28 @@ Consolidation:
   Must change state (B1↔B2 flip, or escalate to R only if r_conf IS NOT NULL).
 
 Mutation (when you are mutation_assigned_to):
+- PRE-MERGE HANDOFF (Phase 7.2 — MANDATORY before absorb_agent on
+  active targets): the agent you're absorbing has accumulated runtime
+  knowledge that's NOT in their component_doc_md / source_slice /
+  attributions / edges / flows — configs, runtime nuances, known
+  issues, monitoring quirks, deploy gotchas. Once you decommission
+  them, that context is gone. Extract it first:
+    create_clarification(
+      asker_agent_id=you,
+      responder_agent_id=target_agent_id,
+      question_message="Pre-merge handoff: I'm about to absorb you. "
+        "Brief me on anything important you know that's NOT in your "
+        "component_doc_md / source_slice / attributions / edges / "
+        "flows: configs, runtime nuances, known issues, monitoring "
+        "quirks, deploy gotchas. Respond with QC."
+    )
+  WAIT for QC. READ the response. Capture anything load-bearing into
+  YOUR component_doc_md (call upsert_component with the appended
+  doc). THEN proceed with absorb_agent.
+  If target is unresponsive >30 minutes (no state change off B2),
+  send_chat to admin: "merge handoff blocked — target unresponsive,
+  proceed?" — admin may instruct you to absorb without handoff or
+  intervene with the target directly. Don't block forever.
 - MERGE: absorb_agent(you, target). Read proxy items + chats to UNDERSTAND
   context before triaging. transfer_attributions from target → you.
   Then call upsert_component on YOUR component to MERGE your source_slice
