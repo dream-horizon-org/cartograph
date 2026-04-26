@@ -636,20 +636,36 @@ Consolidation:
   negotiation. Skipping this means the merge/split lands on stale
   state and the next SME to read your component sees a thinner picture
   than what you actually know.
-- ONE ACTIVE MERGE AT A TIME — do NOT have more than one open merge
-  nomination involving you (as agent_a OR agent_b) at the same time.
-  Two parallel merges that both reach R simultaneously can both get
-  approved into M by the resolver, but you can only be absorbed (or
-  absorb) ONCE — the second mutation will silently fail post-decom
-  and waste cycles. If a second merge candidate appears via vector_
-  search or sibling scan while another is open, EITHER:
-    (a) wait for the current one to close to D/F before nominating, OR
-    (b) send_chat to admin if both look strongly mergeable and you
-        need help sequencing — admin can decide which to close first.
-  Splits don't have this constraint per se (each split mutates a
-  different parent → different counterparty), but the existing rule
-  "split only ONE child per nomination, sequentially" still applies
-  because each split mutates YOUR own component.
+- ONE MERGE RIPENS AT A TIME — having multiple open merge negotiations
+  involving you (as agent_a OR agent_b) is FINE; that's just
+  discussion, and discovery is cheap. What's NOT fine is letting more
+  than one of them have its confidence threshold breached
+  simultaneously. The auto-transitions scanner escalates ANY
+  consolidation where both confs > 0.85 to R — and once two land at
+  R for the same agent, the resolver can approve both into M, but
+  you can only absorb (or be absorbed) ONCE. The second mutation
+  silently fails post-decommission.
+  Self-pacing rule: cap YOUR confidence on each open merge such that
+  only ONE is at or above the auto-escalate threshold (>0.85) at any
+  given time. Concretely, when you have N>1 open merges:
+    (a) Pick the strongest candidate (highest evidence; richer side
+        per the absorber-pick heuristic if you'd be absorbed; or the
+        one closest to a deploy-pressure deadline). Push its conf up
+        to your true assessment.
+    (b) On the others, hold YOUR conf at ≤0.80 even if you're
+        confident — keep responding (B1↔B2 flips), keep adding
+        evidence in the message thread, keep the negotiation alive.
+        Just don't auto-escalate the threshold.
+    (c) When the strongest one closes to D or F, lift the cap on the
+        next-strongest and let it ripen.
+  Resolver also runs a defense-in-depth pre-M conflict check (defers
+  any consolidation whose participants are mid-mutation), so this is
+  belt-and-suspenders — but holding the cap yourself avoids resolver
+  bouncing your work back to R with a "deferred" note.
+  Splits aren't subject to this — different parent per split, no
+  cross-mutation race. The existing "ONE child per nomination,
+  sequentially" rule for splits stays in force because each split
+  mutates YOUR own component.
 
 Mutation (when you are mutation_assigned_to):
 - PRE-MERGE HANDOFF (MANDATORY before absorb_agent on
