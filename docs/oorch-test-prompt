@@ -318,7 +318,53 @@
     The most important new mechanic: a flow's incoming is canonically a
     catalog row (NOT an edge id). This phase exercises declaration,
     fan-out, both read tools, the new contract on get_flow_inverse,
-    and the negative-path validation.
+    the negative-path validation, AND seeds enough flows across the
+    topology so the admin can validate the 3D graph viz interactively
+    (LOS BFS, junction conflation, hover zones).
+
+    ★ MANDATORY VIZ-SEEDING STEP — every SME with at least one catalog
+    AND at least one outgoing edge MUST declare ≥2 flows. The admin
+    will click edges in the 3D graph after the demo and watch LOS
+    chains light up — this only works if real flow rows exist.
+
+    Per-SME flow targets (orchestrator: assign these in each SME's
+    next-wake task brief if not done autonomously):
+
+      sme-auth-1 (after merge — owns POST /verify + POST /refresh +
+        absorbed POST /login from sme-auth-2):
+          • flow: catalog(POST /verify)  → outgoing edge of your choice
+            (e.g. a bound edge auth-svc → feeds-db "SELECT user_token")
+          • flow: catalog(POST /refresh) → another outgoing
+          → results in 2 visible LOS chain origins on auth-svc
+
+      sme-monolith (before split — owns POST /payments/charge +
+        GET /feeds/scores):
+          • flow: catalog(POST /payments/charge) → bound outgoing
+            (monolith → feeds-db "INSERT ledger")
+          • flow: catalog(POST /payments/charge) → second outgoing
+            (monolith → notify "payment.completed")  [fan-out demo]
+          • flow: catalog(GET /feeds/scores) → bound outgoing
+            (monolith → feeds-cache "GET live:scores")
+          → results in fan-out junction visible on monolith
+
+      sme-payments-split (post-split, owns the carved POST
+        /payments/charge):
+          • re-declare 1 flow: catalog(POST /payments/charge) →
+            outgoing edge (payments-split → feeds-db "INSERT ledger"
+            — re-create if needed)
+          → confirms split-side flows render correctly post-mutation
+
+      sme-cron (owns trigger_target daily-rebalance + the self-loop
+        edge from Phase 4):
+          • flow: catalog(daily-rebalance) → self-loop edge
+          → demonstrates self-loop participating in flow rendering
+
+    Total target: ≥6 flow rows across the topology. The admin will
+    confirm /api/graph returns flows.length >= 6 AND can click any
+    bound edge to watch the LOS chain animate.
+
+    REPORT [DEMO7-NOTE] with the per-SME flow count after PHASE-12
+    completes so the admin can spot under-seeding.
 
     12a. DECLARE A FLOW (single):
          sme-monolith owns a catalog "POST /payments/charge" (declared
