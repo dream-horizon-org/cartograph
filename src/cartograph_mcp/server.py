@@ -33,6 +33,7 @@ from cartograph_mcp.tools import proxy as proxy_tool
 from cartograph_mcp.tools import search as search_tool
 from cartograph_mcp.tools import sleep as sleep_tool
 from cartograph_mcp.tools import insights as insights_tool
+from cartograph_mcp.tools import terminal_acks as terminal_acks_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1474,6 +1475,27 @@ def reset_agent(agent_id: str, target_agent_id: str) -> dict[str, Any]:
         )
     logger.info("Orchestrator %s force-reset agent %s", agent_id, target_agent_id)
     return {"reset": True, "agent_id": target_agent_id}
+
+
+# ============ TERMINAL ACKS (Phase 7.1) ============
+
+
+@mcp.tool()
+def ack_terminal(agent_id: str, entity_type: str, entity_id: str) -> dict[str, Any]:
+    """Acknowledge a terminal-state entity (task TC, consolidation D/F,
+    clarification CC/QR) so the trigger scanner stops re-waking you.
+
+    Validates: entity_type ∈ {'task','consolidation','clarification'},
+    entity exists, entity is in a terminal state, and you are a
+    participant. Idempotent — calling twice returns
+    {acked: false, already_acked: true}.
+
+    Phase 7.1 replaced Phase 5.5's auto-ack at write site. Closure
+    announcements now land unacked; you'll be re-woken on every cycle
+    until you call this for each terminal entity in your
+    `terminal_pending_ack` list.
+    """
+    return terminal_acks_tool.ack_terminal(agent_id, entity_type, entity_id)
 
 
 # ============ AGENT INSIGHTS (Phase 5.9) ============

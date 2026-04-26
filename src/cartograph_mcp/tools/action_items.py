@@ -87,12 +87,18 @@ def get_action_items_summary(agent_id: str, agent_type: str) -> dict:
         }
         for g in proxied_groups
     ]
+    # Phase 7.1: terminal-pending-ack — entities I'm a participant of
+    # that have closed but I haven't ack'd. Trigger scanner re-wakes
+    # me until the count drops to zero.
+    from trigger_management.scanners import terminal_acks as _term_scan
+    terminal_pending = _term_scan.scan_terminal_pending_ack(agent_id)
     return {
         "consolidations_pending": _count_consolidations(agent_id, agent_type),
         "tasks_pending": _count_tasks(agent_id),
         "clarifications_pending": _count_clarifications(agent_id),
         "unacked_chats": _count_unacked_chats(agent_id),
         "unacked_broadcasts": _count_unacked_broadcasts(agent_id, agent_type),
+        "terminal_pending_ack": len(terminal_pending),
         "proxied": proxied_counts,
     }
 
@@ -161,6 +167,7 @@ def get_action_items_detail(agent_id: str, agent_type: str) -> dict:
     "this is me vs legacy to wind down" mental model.
     """
     from cartograph_mcp.tools import proxy as proxy_tool
+    from trigger_management.scanners import terminal_acks as _term_scan
     proxied = proxy_tool.get_my_proxy_items(agent_id).get("proxied", [])
     return {
         "my": {
@@ -169,6 +176,8 @@ def get_action_items_detail(agent_id: str, agent_type: str) -> dict:
             "clarifications": _get_clarification_details(agent_id),
             "chats": _get_unacked_chat_details(agent_id),
             "broadcasts": _get_unacked_broadcast_details(agent_id, agent_type),
+            # Phase 7.1: terminal entities awaiting my explicit ack.
+            "terminal_pending_ack": _term_scan.scan_terminal_pending_ack(agent_id),
         },
         "proxied": proxied,
     }

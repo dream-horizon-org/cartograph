@@ -408,13 +408,13 @@ def review_consolidation(
     }
     if mutation_assigned_to:
         metadata["mutation_assigned_to"] = mutation_assigned_to
-    # Phase 5.5: F is terminal — pre-stamp acked_at so the rejected
-    # consolidation doesn't keep waking the agent.
-    acked_clause = "now()" if new_status == "F" else "NULL"
+    # Phase 7.1: REVERTED Phase 5.5 auto-ack. Terminal F announcement
+    # lands unacked; trigger scanner re-wakes participants via
+    # terminal_acks until they explicitly ack.
     execute(
-        f"""INSERT INTO communications
-              (from_agent, to_agent, type, source_id, text, metadata, acked_at)
-           VALUES (%s, %s, 'consolidation', %s, %s, %s::jsonb, {acked_clause})""",
+        """INSERT INTO communications
+              (from_agent, to_agent, type, source_id, text, metadata)
+           VALUES (%s, %s, 'consolidation', %s, %s, %s::jsonb)""",
         (agent_id, to_agent, consolidation_id, message, json.dumps(metadata)),
     )
     return updated
@@ -515,16 +515,17 @@ def complete_consolidation(agent_id: str, consolidation_id: str, message: str) -
         "role": "resolver",
     }
     # Notify both parties so their triggers see the terminal state.
-    # Phase 5.5: D is terminal — pre-stamp acked_at on every announcement
-    # so neither party keeps getting re-notified about the closed work.
+    # Phase 7.1: REVERTED Phase 5.5 auto-ack. Terminal D announcements
+    # land unacked; both participants must explicitly ack via
+    # terminal_acks before they stop being woken on this entity.
     notify = [cons["agent_a_id"]]
     if cons["agent_b_id"]:
         notify.append(cons["agent_b_id"])
     for to_agent in notify:
         execute(
             """INSERT INTO communications
-                  (from_agent, to_agent, type, source_id, text, metadata, acked_at)
-               VALUES (%s, %s, 'consolidation', %s, %s, %s::jsonb, now())""",
+                  (from_agent, to_agent, type, source_id, text, metadata)
+               VALUES (%s, %s, 'consolidation', %s, %s, %s::jsonb)""",
             (agent_id, to_agent, consolidation_id, message, json.dumps(metadata)),
         )
     return updated

@@ -230,6 +230,15 @@ def absorb_agent(
         (agent_id, deactivation_reason, deactivation_notes, target_agent_id),
     )
 
+    # 1a. Phase 7.1: bulk-ack any terminal entities the target was a
+    # participant of but hadn't acked. Without this, the target's row
+    # would sit forever in terminal_acks's negative space — stuck-state
+    # queries would always show them. Audit-trail loss is acceptable
+    # per design discussion: the deactivation_reason column already
+    # records that this agent was decommissioned at this time.
+    from cartograph_mcp.tools import terminal_acks as _term_acks
+    _term_acks.auto_ack_for_decommission(target_agent_id)
+
     # 2. Union source_slice onto survivor's component.
     merged_slice = None
     if survivor_component_id and target_component_id:

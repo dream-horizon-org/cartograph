@@ -716,6 +716,25 @@ def run_migrations() -> None:
                 "metadata JSONB NOT NULL DEFAULT '{}'"
             )
 
+            # Phase 7.1: terminal_acks — explicit acknowledgement of an
+            # entity's terminal state (TC for tasks, D/F for consolidations,
+            # CC/QR for clarifications) by a participant. Replaces Phase
+            # 5.5's auto-ack on terminal communication rows. The trigger
+            # scanner reads this table to figure out who still needs to be
+            # woken on a closed entity. Once a participant acks, they stop
+            # being notified about that entity.
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS terminal_acks (
+                    entity_type TEXT NOT NULL CHECK (entity_type IN (
+                                  'task', 'consolidation', 'clarification'
+                                )),
+                    entity_id   UUID NOT NULL,
+                    agent_id    TEXT NOT NULL REFERENCES agent_runs(agent_id) ON DELETE CASCADE,
+                    acked_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (entity_type, entity_id, agent_id)
+                )"""
+            )
+
             # Phase 5.10: mcp_audit — blanket per-call audit log of every
             # MCP tool invocation. Stores the agent_id + tool name +
             # args_hash (sha1 of canonicalised args; full args NOT
@@ -867,6 +886,9 @@ def _create_indexes(cur) -> None:
         "CREATE INDEX IF NOT EXISTS idx_mcp_audit_agent_time ON mcp_audit(agent_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_mcp_audit_tool ON mcp_audit(tool_name)",
         "CREATE INDEX IF NOT EXISTS idx_mcp_audit_created ON mcp_audit(created_at DESC)",
+
+        # Phase 7.1: terminal-state acks
+        "CREATE INDEX IF NOT EXISTS idx_term_acks_agent ON terminal_acks(agent_id)",
     ]
     for idx in indexes:
         cur.execute(idx)

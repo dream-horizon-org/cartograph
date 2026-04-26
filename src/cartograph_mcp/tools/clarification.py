@@ -123,13 +123,13 @@ def respond_clarification(
         "state_transition": {"from": current, "to": new_status},
         "role": "asker" if is_asker else "responder",
     }
-    # Phase 5.5: CC + QR are terminal — pre-stamp acked_at so the
-    # asker's inbox doesn't keep re-notifying about a closed clarification.
-    acked_clause = "now()" if new_status in ("CC", "QR") else "NULL"
+    # Phase 7.1: REVERTED Phase 5.5 auto-ack. Terminal CC/QR announcements
+    # land unacked; participants must explicitly ack via terminal_acks
+    # before the trigger scanner stops re-waking them.
     execute(
-        f"""INSERT INTO communications
-              (from_agent, to_agent, type, source_id, text, metadata, acked_at)
-           VALUES (%s, %s, 'clarification', %s, %s, %s::jsonb, {acked_clause})""",
+        """INSERT INTO communications
+              (from_agent, to_agent, type, source_id, text, metadata)
+           VALUES (%s, %s, 'clarification', %s, %s, %s::jsonb)""",
         (agent_id, other, clarification_id, message, json.dumps(metadata)),
     )
     return updated

@@ -177,14 +177,14 @@ def respond_task(
     }
     if new_status == "BO" and blocker_detail:
         metadata["blocker_detail"] = blocker_detail
-    # Phase 5.5: when the new status is terminal for the recipient
-    # (TC closes both sides), pre-stamp acked_at so the survivor's
-    # inbox doesn't keep re-notifying about a closed task.
-    acked_clause = "now()" if new_status == "TC" else "NULL"
+    # Phase 7.1: REVERTED Phase 5.5 auto-ack. Terminal announcement comm
+    # rows now land unacked; the trigger scanner picks them up via the
+    # terminal_acks table and re-wakes participants until they call
+    # ack_terminal explicitly.
     execute_mutate(
-        f"""INSERT INTO communications
-              (from_agent, to_agent, type, source_id, text, metadata, acked_at)
-           VALUES (%s, %s, 'task', %s, %s, %s::jsonb, {acked_clause})""",
+        """INSERT INTO communications
+              (from_agent, to_agent, type, source_id, text, metadata)
+           VALUES (%s, %s, 'task', %s, %s, %s::jsonb)""",
         (agent_id, other, task_id, message, _json.dumps(metadata)),
     )
 
