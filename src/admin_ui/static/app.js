@@ -2135,7 +2135,7 @@ function lightOfSight(link) {
       }
       for (const f of graphSnapshot.flows) {
         if (f.component_id !== destComponentId) continue;
-        if (!flowIncomings.includes(f.incoming_edge_id)) continue;
+        if (!flowIncomings.includes(f.incoming_catalog_id)) continue;
         if (visitedOutgoing.has(f.outgoing_edge_id)) continue;
         visitedOutgoing.add(f.outgoing_edge_id);
         nextOutgoingIds.add(f.outgoing_edge_id);
@@ -2339,7 +2339,7 @@ function renderFlowList(flows) {
   // Group by incoming_edge_id to show fan-out structure.
   const byIncoming = {};
   for (const f of flows) {
-    (byIncoming[f.incoming_edge_id] ||= []).push(f);
+    (byIncoming[f.incoming_catalog_id] ||= []).push(f);
   }
   return Object.entries(byIncoming).map(([incomingId, rows]) => {
     const incoming = graphSnapshot.edgeById[incomingId];
@@ -2629,7 +2629,7 @@ function hoverZoneResolve(link, zone) {
       for (const f of graphSnapshot.flows) {
         if (f.component_id === srcNode.id
             && f.outgoing_edge_id === underlying.id) {
-          feederIds.push(f.incoming_edge_id);
+          feederIds.push(f.incoming_catalog_id);
         }
       }
     }
@@ -2665,7 +2665,7 @@ function hoverZoneResolve(link, zone) {
     const incomingCandidates = effectiveFlowIncomingsForEdge(underlying.id);
     for (const f of graphSnapshot.flows) {
       if (f.component_id === tgtNode.id
-          && incomingCandidates.includes(f.incoming_edge_id)) {
+          && incomingCandidates.includes(f.incoming_catalog_id)) {
         downstreamIds.push(f.outgoing_edge_id);
       }
     }
@@ -3117,15 +3117,29 @@ function _renderComponentDetailHtml(data) {
         <span class="muted">→ ${e.to_component_id || '?'}</span></li>`
     ).join('') + '</ul>'
   ) : '';
+  // Phase 7.4.2: catalog rows have a noun-form `kind` + identifier and
+  // are owned by the component itself, so the "→ to_component_id" arrow
+  // doesn't apply — render kind + identifier + confidence inline.
+  const catalogBucketHtml = (rows) => rows.length ? (
+    `<h5>Catalog (${rows.length})</h5><ul class="cat-catalog-list">` +
+    rows.map(c => {
+      const kind = c.catalog_kind || c.kind || c.edge_type || '';
+      const conf = c.confidence != null
+        ? ` <span class="muted">· conf ${Number(c.confidence).toFixed(2)}</span>`
+        : '';
+      return `<li><span class="cat-kind">${escapeHtml(kind)}</span>
+        <code>${escapeHtml(c.identifier)}</code>${conf}</li>`;
+    }).join('') + '</ul>'
+  ) : '';
   const edgesHtml = '<h4>Edges</h4>' +
     edgeBucketHtml('Bound in', edges.bound_in || []) +
     edgeBucketHtml('Bound out', edges.bound_out || []) +
-    edgeBucketHtml('Catalog', edges.catalog || []) +
+    catalogBucketHtml(edges.catalog || []) +
     edgeBucketHtml('Dangling out', edges.dangling_out || []);
   const flowsHtml = flows.length
     ? '<h4>Flows</h4><ul>' +
       flows.map(f =>
-        `<li>incoming <code>${f.incoming_edge_id.slice(0, 8)}</code> →
+        `<li>catalog <code>${f.incoming_catalog_id.slice(0, 8)}</code> →
           outgoing <code>${f.outgoing_edge_id.slice(0, 8)}</code></li>`
       ).join('') + '</ul>'
     : '';

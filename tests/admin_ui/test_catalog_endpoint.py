@@ -64,6 +64,26 @@ def test_list_returns_basic_fields(client, component_factory):
     assert c["edge_count"] == {"bound": 0, "catalog": 0, "dangling": 0}
 
 
+def test_catalog_count_sourced_from_catalogs_table(client, component_factory):
+    """Phase 7.4.2 regression guard: /api/components.catalog_count must
+    count rows in the `catalogs` table, not `edges WHERE from IS NULL`
+    (which is always empty post-Phase-7.4 migration)."""
+    c = component_factory("ec")
+    execute_returning(
+        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
+           VALUES (%s::uuid, 'endpoint', 'GET /a', 'test') RETURNING id""",
+        (c["id"],),
+    )
+    execute_returning(
+        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
+           VALUES (%s::uuid, 'topic', 'orders.created', 'test') RETURNING id""",
+        (c["id"],),
+    )
+    r = client.get("/api/components")
+    row = next(x for x in r.json()["components"] if x["canonical_name"] == "ec")
+    assert row["edge_count"]["catalog"] == 2
+
+
 def test_type_filter(client, component_factory):
     component_factory("a", ctype="application")
     component_factory("b", ctype="database")
@@ -162,10 +182,10 @@ def test_drilldown_edge_buckets(client, component_factory):
            VALUES (%s, %s, 'calls', 'GET /b', 'test') RETURNING id""",
         (other["id"], c["id"]),
     )
-    # catalog on center: from=NULL, to=center
+    # Phase 7.4.2: catalog on center lives in `catalogs` table.
     execute_returning(
-        """INSERT INTO edges (from_component_id, to_component_id, edge_type, identifier, discovered_by)
-           VALUES (NULL, %s, 'calls', 'GET /catalog', 'test') RETURNING id""",
+        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
+           VALUES (%s::uuid, 'endpoint', 'GET /catalog', 'test') RETURNING id""",
         (c["id"],),
     )
     # dangling out: from=center, to=NULL

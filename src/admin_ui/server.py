@@ -737,6 +737,11 @@ def create_app() -> FastAPI:
             params.append(plane)
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
+        # Phase 7.4.2: catalog_count now sources from `catalogs` table
+        # (Phase 7.4 promoted catalogs to a first-class noun-form table;
+        # the old `edges WHERE from IS NULL` query returned 0 for every
+        # row post-migration). Bound + dangling continue to come from
+        # `edges` since they're caller-owned.
         rows = execute(
             f"""SELECT c.id, c.canonical_name, c.display_name,
                        c.component_type, c.status,
@@ -749,10 +754,7 @@ def create_app() -> FastAPI:
                          WHERE e_bound.from_component_id IS NOT NULL
                            AND e_bound.to_component_id IS NOT NULL
                        ) AS bound_count,
-                       COUNT(DISTINCT e_cat.id) FILTER (
-                         WHERE e_cat.from_component_id IS NULL
-                           AND e_cat.to_component_id = c.id
-                       ) AS catalog_count,
+                       COUNT(DISTINCT cat.id) AS catalog_count,
                        COUNT(DISTINCT e_dang.id) FILTER (
                          WHERE e_dang.to_component_id IS NULL
                            AND e_dang.from_component_id = c.id
@@ -765,7 +767,7 @@ def create_app() -> FastAPI:
                 LEFT JOIN attributions a ON a.component_id = c.id
                 LEFT JOIN edges e_bound
                   ON (e_bound.from_component_id = c.id OR e_bound.to_component_id = c.id)
-                LEFT JOIN edges e_cat ON e_cat.to_component_id = c.id
+                LEFT JOIN catalogs cat ON cat.component_id = c.id
                 LEFT JOIN edges e_dang ON e_dang.from_component_id = c.id
                 {where_sql}
                 GROUP BY c.id
@@ -811,29 +813,51 @@ def create_app() -> FastAPI:
                ORDER BY plane, resource_type, identifier""",
             (component_id,),
         )
+        # Phase 7.4.2: edges table only carries bound + dangling rows.
+        # Catalogs are sourced from the `catalogs` table separately and
+        # reshaped into the legacy edge-row shape (id, target_id=
+        # component_id, edge_type derived from kind, kind='catalog') so
+        # FE consumers don't need a payload-shape change.
         all_edges = execute(
             """SELECT id, from_component_id, to_component_id,
                       edge_type, identifier, confidence, metadata,
                       CASE
                         WHEN from_component_id IS NOT NULL
                              AND to_component_id IS NOT NULL THEN 'bound'
-                        WHEN from_component_id IS NULL THEN 'catalog'
                         ELSE 'dangling'
                       END AS kind
                FROM edges
                WHERE from_component_id = %s::uuid OR to_component_id = %s::uuid""",
             (component_id, component_id),
         )
+        catalog_rows = execute(
+            """SELECT id, NULL::uuid AS from_component_id,
+                      component_id AS to_component_id,
+                      CASE kind
+                        WHEN 'endpoint'       THEN 'calls'
+                        WHEN 'topic'          THEN 'publishes_to'
+                        WHEN 'queue'          THEN 'consumes_from'
+                        WHEN 'data_source'    THEN 'reads_from'
+                        WHEN 'trigger_target' THEN 'triggers'
+                      END AS edge_type,
+                      identifier, confidence, metadata,
+                      kind AS catalog_kind,
+                      'catalog' AS kind
+               FROM catalogs
+               WHERE component_id = %s::uuid
+               ORDER BY kind, identifier""",
+            (component_id,),
+        )
         edges = {
             "bound_in":      [e for e in all_edges
                               if e["kind"] == "bound" and str(e["to_component_id"]) == component_id],
             "bound_out":     [e for e in all_edges
                               if e["kind"] == "bound" and str(e["from_component_id"]) == component_id],
-            "catalog":       [e for e in all_edges if e["kind"] == "catalog"],
+            "catalog":       catalog_rows,
             "dangling_out":  [e for e in all_edges if e["kind"] == "dangling"],
         }
         flows = execute(
-            """SELECT id, incoming_edge_id, outgoing_edge_id, confidence
+            """SELECT id, incoming_catalog_id, outgoing_edge_id, confidence
                FROM flows WHERE component_id = %s::uuid""",
             (component_id,),
         )
@@ -924,7 +948,7 @@ def create_app() -> FastAPI:
         )
         flows = execute(
             """SELECT f.id, f.component_id,
-                      f.incoming_edge_id, f.outgoing_edge_id,
+                      f.incoming_catalog_id, f.outgoing_edge_id,
                       f.confidence
                FROM flows f
                JOIN components c ON c.id = f.component_id

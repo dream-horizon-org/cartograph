@@ -218,17 +218,17 @@ def test_absorb_preserves_chain_history_for_transitive_merges(agent_factory):
 
 def test_absorb_cascade_moves_attributions_edges_flows(agent_factory):
     s = _m_state_merge(agent_factory)
-    # Seed evidence on target (comp_b): 1 attribution, 1 catalog edge,
-    # 1 outgoing bound edge, 1 flow linking them.
+    # Seed evidence on target (comp_b): 1 attribution, 1 catalog row
+    # (Phase 7.4: own table), 1 outgoing bound edge, 1 flow linking the
+    # catalog → outgoing.
     attr = execute_one(
         """INSERT INTO attributions (component_id, plane, resource_type, identifier)
            VALUES (%s, 'github', 'repo', 'o/b#evidence') RETURNING id""",
         (s["comp_b"],),
     )
     cat = execute_one(
-        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
-                              identifier, discovered_by)
-           VALUES (NULL, %s, 'calls', 'POST /b', 'test') RETURNING id""",
+        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
+           VALUES (%s::uuid, 'endpoint', 'POST /b', 'test') RETURNING id""",
         (s["comp_b"],),
     )
     ds = execute_one(
@@ -242,7 +242,7 @@ def test_absorb_cascade_moves_attributions_edges_flows(agent_factory):
         (s["comp_b"], ds["id"]),
     )
     flow = execute_one(
-        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+        """INSERT INTO flows (component_id, incoming_catalog_id, outgoing_edge_id,
                               discovered_by)
            VALUES (%s, %s, %s, 'test') RETURNING id""",
         (s["comp_b"], cat["id"], out["id"]),
@@ -250,23 +250,30 @@ def test_absorb_cascade_moves_attributions_edges_flows(agent_factory):
 
     result = mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
 
-    # All cascade counts recorded.
+    # All cascade counts recorded. Phase 7.4.2: edges == 1 (only the bound
+    # out — catalogs no longer live in `edges`); catalogs == 1 (the new
+    # cascade); flows == 1.
     assert result["cascade"]["attributions"] == 1
-    assert result["cascade"]["edges"] == 2  # cat + out
+    assert result["cascade"]["edges"] == 1
+    assert result["cascade"]["catalogs"] == 1
     assert result["cascade"]["flows"] == 1
 
     # Attribution now on survivor.
     row = execute_one("SELECT component_id FROM attributions WHERE id=%s", (attr["id"],))
     assert str(row["component_id"]) == str(s["comp_a"])
     # Catalog now on survivor.
-    row = execute_one("SELECT to_component_id FROM edges WHERE id=%s", (cat["id"],))
-    assert str(row["to_component_id"]) == str(s["comp_a"])
+    row = execute_one("SELECT component_id FROM catalogs WHERE id=%s", (cat["id"],))
+    assert str(row["component_id"]) == str(s["comp_a"])
     # Bound outgoing now from survivor.
     row = execute_one("SELECT from_component_id FROM edges WHERE id=%s", (out["id"],))
     assert str(row["from_component_id"]) == str(s["comp_a"])
-    # Flow now on survivor.
-    row = execute_one("SELECT component_id FROM flows WHERE id=%s", (flow["id"],))
+    # Flow now on survivor (catalog ref unchanged — catalog itself moved).
+    row = execute_one(
+        "SELECT component_id, incoming_catalog_id FROM flows WHERE id=%s",
+        (flow["id"],),
+    )
     assert str(row["component_id"]) == str(s["comp_a"])
+    assert str(row["incoming_catalog_id"]) == str(cat["id"])
 
 
 def test_absorb_cascade_attributions_off(agent_factory):
@@ -308,9 +315,8 @@ def test_absorb_cascade_edges_off(agent_factory):
 def test_absorb_cascade_flows_off(agent_factory):
     s = _m_state_merge(agent_factory)
     cat = execute_one(
-        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
-                              identifier, discovered_by)
-           VALUES (NULL, %s, 'calls', 'POST /x', 'test') RETURNING id""",
+        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
+           VALUES (%s::uuid, 'endpoint', 'POST /x', 'test') RETURNING id""",
         (s["comp_b"],),
     )
     ds = execute_one(
@@ -324,27 +330,34 @@ def test_absorb_cascade_flows_off(agent_factory):
         (s["comp_b"], ds["id"]),
     )
     flow = execute_one(
-        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+        """INSERT INTO flows (component_id, incoming_catalog_id, outgoing_edge_id,
                               discovered_by)
            VALUES (%s, %s, %s, 'test') RETURNING id""",
         (s["comp_b"], cat["id"], out["id"]),
     )
-    # Cascade edges ON but flows OFF — edges move, flow stays.
+    # Cascade edges ON but flows OFF — edges + catalogs move, flow stays.
+    # Phase 7.4.2: catalog cascade is unconditional (it precedes flow
+    # cascade so flow.incoming_catalog_id refs stay consistent). With
+    # cascade_flows=False, the flow stays on the target — but its
+    # catalog ref now points at a row whose component_id is the survivor.
+    # The flow row itself is still on comp_b.
     result = mutation.absorb_agent(
         "sme-a", s["cons_id"], "sme-b", cascade_flows=False,
     )
-    assert result["cascade"]["edges"] >= 2
+    assert result["cascade"]["edges"] == 1
+    assert result["cascade"]["catalogs"] == 1
     assert result["cascade"]["flows"] == 0
     row = execute_one("SELECT component_id FROM flows WHERE id=%s", (flow["id"],))
     assert str(row["component_id"]) == str(s["comp_b"])  # flow unchanged
 
 
 def test_absorb_cascade_empty_body_produces_zero_counts(agent_factory):
-    """No attributions/edges/flows on target → all counts 0, absorb still succeeds."""
+    """No attributions/edges/catalogs/flows on target → all counts 0, absorb succeeds."""
     s = _m_state_merge(agent_factory)
     result = mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
     assert result["cascade"] == {
-        "attributions": 0, "edges": 0, "flows": 0, "collapsed_edges": 0
+        "attributions": 0, "edges": 0, "flows": 0,
+        "catalogs": 0, "collapsed_edges": 0,
     }
 
 
@@ -595,10 +608,11 @@ def test_spawn_with_transfer_flow_ids_moves_flows(agent_factory):
         "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
         (json.dumps({ra: {"paths": ["x/", "y/"]}}), s["comp_a"]),
     )
+    # Phase 7.4.2: catalog goes to catalogs table, transferred via the new
+    # transfer_catalog_ids param on spawn_child_agent.
     cat = execute_one(
-        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
-                              identifier, discovered_by)
-           VALUES (NULL, %s, 'calls', 'POST /y', 'test') RETURNING id""",
+        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
+           VALUES (%s::uuid, 'endpoint', 'POST /y', 'test') RETURNING id""",
         (s["comp_a"],),
     )
     ds = execute_one(
@@ -612,24 +626,29 @@ def test_spawn_with_transfer_flow_ids_moves_flows(agent_factory):
         (s["comp_a"], ds["id"]),
     )
     flow = execute_one(
-        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+        """INSERT INTO flows (component_id, incoming_catalog_id, outgoing_edge_id,
                               discovered_by)
            VALUES (%s, %s, %s, 'test') RETURNING id""",
         (s["comp_a"], cat["id"], out["id"]),
     )
-    # Transfer both edges (so flow refs are still valid at target) + the flow.
+    # Transfer the catalog (so flow incoming ref stays valid post-move),
+    # the outgoing edge, and the flow itself.
     result = mutation.spawn_child_agent(
         "sme-a", s["cons_id"], "sme-child",
         {"canonical_name": "o/c", "display_name": "c",
          "component_type": "application"},
         {ra: {"paths": ["y/"]}},
         "carve y/",
-        transfer_edge_ids=[str(cat["id"]), str(out["id"])],
+        transfer_catalog_ids=[str(cat["id"])],
+        transfer_edge_ids=[str(out["id"])],
         transfer_flow_ids=[str(flow["id"])],
     )
-    assert result["transferred_edges"] == 2
+    assert result["transferred_catalogs"] == 1
+    assert result["transferred_edges"] == 1
     assert result["transferred_flows"] == 1
     row = execute_one("SELECT component_id FROM flows WHERE id=%s", (flow["id"],))
+    assert str(row["component_id"]) == str(result["child_component_id"])
+    row = execute_one("SELECT component_id FROM catalogs WHERE id=%s", (cat["id"],))
     assert str(row["component_id"]) == str(result["child_component_id"])
 
 
@@ -825,12 +844,10 @@ def test_transfer_edges_invalid_direction_rejected(agent_factory):
 
 def test_transfer_flows_merge_rewrites_component_id(agent_factory):
     s = _m_state_merge(agent_factory)
-    # Catalog on comp_b (incoming side), bound to a separate component (outgoing).
+    # Phase 7.4.2: catalog row on comp_b lives in `catalogs` table.
     cat = execute_one(
-        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
-                              identifier, discovered_by)
-           VALUES (NULL, %s, 'calls', 'POST /x', 'test')
-           RETURNING id""",
+        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
+           VALUES (%s::uuid, 'endpoint', 'POST /x', 'test') RETURNING id""",
         (s["comp_b"],),
     )
     ds = execute_one(
@@ -845,7 +862,7 @@ def test_transfer_flows_merge_rewrites_component_id(agent_factory):
         (s["comp_b"], ds["id"]),
     )
     flow = execute_one(
-        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+        """INSERT INTO flows (component_id, incoming_catalog_id, outgoing_edge_id,
                               discovered_by)
            VALUES (%s, %s, %s, 'test') RETURNING id""",
         (s["comp_b"], cat["id"], out["id"]),
@@ -936,38 +953,40 @@ def test_get_stale_edges_empty_when_no_dead_neighbors(agent_factory):
     assert comp_tool.get_stale_edges("sme-a") == []
 
 
-def test_get_stale_flows_surfaces_flow_with_dead_incoming(agent_factory):
+def test_get_stale_flows_surfaces_flow_with_dead_outgoing_target(agent_factory):
+    """Phase 7.4.2: stale-flow staleness is keyed on the OUTGOING
+    edge's target being decommissioned. Incoming is now always a
+    catalog row owned by the same component as the flow — so there is
+    no incoming-side counterparty to die."""
     from cartograph_mcp.tools import components as comp_tool
     _iter(agent_factory)
     ca, _ = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
     cb, _ = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
-    # Bound edge from sme-b → sme-a (caller = sme-b).
-    incoming = execute_one(
-        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
-                              identifier, discovered_by)
-           VALUES (%s, %s, 'calls', 'POST /x', 'test')
-           RETURNING id""",
-        (cb, ca),
+    # sme-a exposes an endpoint (catalog) — the flow's incoming.
+    incoming_cat = execute_one(
+        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
+           VALUES (%s::uuid, 'endpoint', 'POST /x', 'test') RETURNING id""",
+        (ca,),
     )
-    # sme-a has an outgoing dangling edge.
+    # sme-a's outgoing bound edge points at sme-b's component.
     outgoing = execute_one(
         """INSERT INTO edges (from_component_id, to_component_id, edge_type,
                               identifier, discovered_by)
-           VALUES (%s, NULL, 'calls', 'https://gone.example', 'test')
+           VALUES (%s, %s, 'calls', 'GET /b', 'test')
            RETURNING id""",
-        (ca,),
+        (ca, cb),
     )
-    # Flow on sme-a chaining incoming → outgoing.
+    # Flow on sme-a chaining catalog → outgoing.
     execute_mutate(
-        """INSERT INTO flows (component_id, incoming_edge_id, outgoing_edge_id,
+        """INSERT INTO flows (component_id, incoming_catalog_id, outgoing_edge_id,
                               discovered_by)
            VALUES (%s, %s, %s, 'test')""",
-        (ca, incoming["id"], outgoing["id"]),
+        (ca, incoming_cat["id"], outgoing["id"]),
     )
-    # Decommission sme-b's component (makes incoming edge's from-side dead).
+    # Decommission sme-b's component (makes outgoing edge's target dead).
     execute_mutate(
         "UPDATE components SET status='decommissioned' WHERE id=%s", (cb,)
     )
     rows = comp_tool.get_stale_flows("sme-a")
     assert len(rows) == 1
-    assert rows[0]["incoming_other_status"] == "decommissioned"
+    assert rows[0]["outgoing_other_status"] == "decommissioned"

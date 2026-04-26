@@ -332,11 +332,25 @@ STEP 3 — Outbound references you find while reading your resource
   new component because similarity was low" — you create at most
   one (your own, in Step 1).
 
-STEP 4 — Flows (Phase 3.9). For each of YOUR incoming edges (rows in
-  get_component_edges(yours)["incoming_bound"]), declare which of
-  YOUR outgoing edges fire when that incoming is hit. One
-  upsert_flow per (incoming, outgoing) link. Multiple flow rows for
-  the same incoming = fan-out (normal). Set-based, not sequenced.
+STEP 4 — Flows (Phase 3.9 + 7.4.2). For each of YOUR catalog rows
+  (the surfaces YOU declared in Step 2 — get_component_edges(yours)
+  ["incoming_catalog"]), declare which of YOUR outgoing edges fire
+  when that surface is hit. One `upsert_flow(component_id,
+  incoming_catalog_id=<your catalog row id>, outgoing_edge_id=<your
+  outgoing edge id>)` per link. Multiple flow rows for the same
+  catalog = fan-out (normal). Set-based, not sequenced.
+
+  IMPORTANT (Phase 7.4.2): the flow's incoming is ALWAYS a catalog
+  id from the `catalogs` table — NOT an edge id. This is because a
+  flow describes "when MY surface fires, MY downstreams trigger" —
+  the surface is canonically your catalog declaration, independent
+  of which caller hit it. Bound caller edges map to your catalog via
+  the (target, edge_type, identifier) triple, but they are NOT the
+  flow anchor.
+
+  If you don't yet have a catalog row for a surface, declare it
+  FIRST via upsert_catalog (Step 2), then anchor flows on it. No
+  catalog → no flow.
 
   Discovery sources:
     - Code reading: trace from endpoint handler down through method

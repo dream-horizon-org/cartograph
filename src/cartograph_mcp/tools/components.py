@@ -585,31 +585,38 @@ def bind_edge(agent_id: str, edge_id: str, to_component_id: str) -> dict:
 def upsert_flow(
     agent_id: str,
     component_id: str,
-    incoming_edge_id: str,
+    incoming_catalog_id: str,
     outgoing_edge_id: str,
     metadata: dict | None = None,
     confidence: float = 1.0,
 ) -> dict:
-    """Link an incoming edge to an outgoing edge inside one component.
-    Set-based (many-to-many): one incoming can fan out to multiple
-    outgoings; multiple incomings can share an outgoing.
+    """Link an incoming catalog (the surface the component exposes) to
+    an outgoing edge inside the component. Set-based (many-to-many):
+    one catalog can fan out to multiple outgoings; multiple catalogs
+    can share an outgoing.
+
+    Phase 7.4.2: incoming is canonically a catalog row (Phase 7.4 moved
+    catalogs out of `edges`). Pre-7.4 the parameter was `incoming_edge_id`
+    pointing at a catalog-shaped edge; the role is unchanged, only the
+    table reference is.
 
     Validates:
       - SME owns component_id via RCA
-      - incoming_edge.to_component_id   == component_id
-      - outgoing_edge.from_component_id == component_id
+      - catalog row exists at incoming_catalog_id
+      - catalog.component_id == component_id
+      - outgoing_edge exists, outgoing.from_component_id == component_id
 
-    Idempotent on (component_id, incoming_edge_id, outgoing_edge_id).
+    Idempotent on (component_id, incoming_catalog_id, outgoing_edge_id).
     Re-call accumulates metadata + max confidence.
     """
     _assert_sme(agent_id)
     component_id = str(component_id or "").strip()
-    incoming_edge_id = str(incoming_edge_id or "").strip()
+    incoming_catalog_id = str(incoming_catalog_id or "").strip()
     outgoing_edge_id = str(outgoing_edge_id or "").strip()
-    if not component_id or not incoming_edge_id or not outgoing_edge_id:
-        raise ValueError("component_id, incoming_edge_id, outgoing_edge_id required")
-    if incoming_edge_id == outgoing_edge_id:
-        raise ValueError("incoming and outgoing must be different edges")
+    if not component_id or not incoming_catalog_id or not outgoing_edge_id:
+        raise ValueError(
+            "component_id, incoming_catalog_id, outgoing_edge_id required"
+        )
     if not (0.0 <= float(confidence) <= 1.0):
         raise ValueError("confidence must be in [0.0, 1.0]")
     if not _sme_owns_component(agent_id, component_id):
@@ -618,18 +625,24 @@ def upsert_flow(
             "cannot record flows on it."
         )
 
-    incoming = execute_one("SELECT id, to_component_id, from_component_id FROM edges WHERE id = %s", (incoming_edge_id,))
-    if incoming is None:
-        raise ValueError(f"Incoming edge {incoming_edge_id} not found")
-    outgoing = execute_one("SELECT id, to_component_id, from_component_id FROM edges WHERE id = %s", (outgoing_edge_id,))
+    catalog = execute_one(
+        "SELECT id, component_id FROM catalogs WHERE id = %s::uuid",
+        (incoming_catalog_id,),
+    )
+    if catalog is None:
+        raise ValueError(f"Incoming catalog {incoming_catalog_id} not found")
+    if str(catalog["component_id"]) != str(component_id):
+        raise ValueError(
+            f"Incoming catalog {incoming_catalog_id} does not belong to component "
+            f"{component_id} (it belongs to {catalog['component_id']})."
+        )
+
+    outgoing = execute_one(
+        "SELECT id, from_component_id FROM edges WHERE id = %s",
+        (outgoing_edge_id,),
+    )
     if outgoing is None:
         raise ValueError(f"Outgoing edge {outgoing_edge_id} not found")
-
-    if str(incoming["to_component_id"] or "") != str(component_id):
-        raise ValueError(
-            f"Incoming edge {incoming_edge_id} does not point at component "
-            f"{component_id} (its to_component_id is {incoming['to_component_id']})."
-        )
     if str(outgoing["from_component_id"] or "") != str(component_id):
         raise ValueError(
             f"Outgoing edge {outgoing_edge_id} does not originate from component "
@@ -639,44 +652,47 @@ def upsert_flow(
     metadata = metadata or {}
     row = execute_returning(
         """INSERT INTO flows
-           (component_id, incoming_edge_id, outgoing_edge_id,
+           (component_id, incoming_catalog_id, outgoing_edge_id,
             confidence, metadata, discovered_by)
-           VALUES (%s, %s, %s, %s, %s::jsonb, %s)
-           ON CONFLICT (component_id, incoming_edge_id, outgoing_edge_id)
+           VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s::jsonb, %s)
+           ON CONFLICT (component_id, incoming_catalog_id, outgoing_edge_id)
            DO UPDATE
              SET metadata = flows.metadata || EXCLUDED.metadata,
                  confidence = GREATEST(flows.confidence, EXCLUDED.confidence),
                  updated_at = now()
            RETURNING *""",
-        (component_id, incoming_edge_id, outgoing_edge_id,
+        (component_id, incoming_catalog_id, outgoing_edge_id,
          float(confidence), json.dumps(metadata), agent_id),
     )
     return row
 
 
-def get_flow(agent_id: str, component_id: str, incoming_edge_id: str) -> list[dict]:
-    """All outgoing edges in the flow triggered by `incoming_edge_id`
-    inside `component_id`. Open to all active agents."""
+def get_flow(agent_id: str, component_id: str, incoming_catalog_id: str) -> list[dict]:
+    """All outgoing edges fired when the catalog at `incoming_catalog_id`
+    on `component_id` is hit. Open to all active agents."""
     _caller(agent_id)
     return execute(
         """SELECT e.* FROM flows f
            JOIN edges e ON e.id = f.outgoing_edge_id
-           WHERE f.component_id = %s AND f.incoming_edge_id = %s
+           WHERE f.component_id = %s::uuid
+             AND f.incoming_catalog_id = %s::uuid
            ORDER BY e.edge_type, e.identifier""",
-        (component_id, incoming_edge_id),
+        (component_id, incoming_catalog_id),
     )
 
 
 def get_flow_inverse(agent_id: str, component_id: str, outgoing_edge_id: str) -> list[dict]:
-    """All incoming edges that trigger `outgoing_edge_id` inside
-    `component_id` (reverse lookup of get_flow). Open to all active
-    agents."""
+    """All incoming CATALOGS whose hit triggers `outgoing_edge_id` on
+    `component_id` (reverse lookup of get_flow). Returns catalog rows
+    (Phase 7.4.2: incoming is a catalog, not an edge). Open to all
+    active agents."""
     _caller(agent_id)
     return execute(
-        """SELECT e.* FROM flows f
-           JOIN edges e ON e.id = f.incoming_edge_id
-           WHERE f.component_id = %s AND f.outgoing_edge_id = %s
-           ORDER BY e.edge_type, e.identifier""",
+        """SELECT c.* FROM flows f
+           JOIN catalogs c ON c.id = f.incoming_catalog_id
+           WHERE f.component_id = %s::uuid
+             AND f.outgoing_edge_id = %s::uuid
+           ORDER BY c.kind, c.identifier""",
         (component_id, outgoing_edge_id),
     )
 
@@ -989,10 +1005,14 @@ def get_stale_edges(agent_id: str) -> list[dict]:
 
 
 def get_stale_flows(agent_id: str) -> list[dict]:
-    """Return flows on this SME's component where the referenced
-    incoming or outgoing edge's counterparty component is decommissioned.
-    Tells the caller which flow rows have at least one dead
-    edge-endpoint so they can rewire or delete.
+    """Return flows on this SME's component where the OUTGOING edge's
+    target component is decommissioned. Tells the caller which flow
+    rows fan out into a dead component so they can rewire or delete.
+
+    Phase 7.4.2: incoming is a catalog row owned by the same component
+    as the flow, so it can never have a "dead counterparty" — catalogs
+    cascade-delete with their owner. Only the outgoing-side staleness
+    matters now.
     """
     _caller(agent_id)
     my_comp = execute_one(
@@ -1010,17 +1030,10 @@ def get_stale_flows(agent_id: str) -> list[dict]:
     return execute(
         """SELECT
                f.id AS flow_id, f.component_id,
-               f.incoming_edge_id, f.outgoing_edge_id,
+               f.incoming_catalog_id, f.outgoing_edge_id,
+               cin.kind AS incoming_kind,
+               cin.identifier AS incoming_identifier,
                CASE
-                 WHEN ein.from_component_id IS NULL THEN 'catalog'
-                 WHEN ein.to_component_id IS NULL THEN 'dangling'
-                 ELSE 'bound'
-               END AS incoming_kind,
-               ein.edge_type AS incoming_edge_type,
-               ein.identifier AS incoming_identifier,
-               cin.status AS incoming_other_status,
-               CASE
-                 WHEN eout.from_component_id IS NULL THEN 'catalog'
                  WHEN eout.to_component_id IS NULL THEN 'dangling'
                  ELSE 'bound'
                END AS outgoing_kind,
@@ -1028,16 +1041,11 @@ def get_stale_flows(agent_id: str) -> list[dict]:
                eout.identifier AS outgoing_identifier,
                cout.status AS outgoing_other_status
            FROM flows f
-           JOIN edges ein  ON ein.id = f.incoming_edge_id
-           JOIN edges eout ON eout.id = f.outgoing_edge_id
-           -- Pull the component "on the other side" for each edge:
-           -- for incoming, the caller IS from_component_id (or NULL for catalog).
-           -- for outgoing, the callee IS to_component_id (or NULL for dangling).
-           LEFT JOIN components cin  ON cin.id  = ein.from_component_id
+           JOIN catalogs cin ON cin.id = f.incoming_catalog_id
+           JOIN edges eout   ON eout.id = f.outgoing_edge_id
            LEFT JOIN components cout ON cout.id = eout.to_component_id
            WHERE f.component_id = %s
-             AND (cin.status = 'decommissioned'
-                  OR cout.status = 'decommissioned')
+             AND cout.status = 'decommissioned'
            ORDER BY f.updated_at DESC""",
         (my_comp_id,),
     )

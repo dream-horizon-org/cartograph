@@ -292,7 +292,40 @@ def absorb_agent(
             (agent_id, target_agent_id),
         )
 
-    cascade_result = {"attributions": 0, "edges": 0, "flows": 0, "collapsed_edges": 0}
+    cascade_result = {
+        "attributions": 0, "edges": 0, "flows": 0,
+        "catalogs": 0, "collapsed_edges": 0,
+    }
+
+    # Phase 7.4.2: catalogs of the target must move BEFORE flows so the
+    # flow.incoming_catalog_id refs land on rows whose component_id
+    # matches the new flow.component_id (the survivor). Collision rule:
+    # if survivor already declares a catalog at the same (kind,
+    # identifier), drop target's row — cascade-deletes any flows that
+    # referenced it, which is correct (survivor's wiring wins post-merge).
+    if survivor_component_id and target_component_id:
+        execute_mutate(
+            """DELETE FROM catalogs t
+               WHERE t.component_id = %s::uuid
+                 AND EXISTS (
+                   SELECT 1 FROM catalogs s
+                    WHERE s.component_id = %s::uuid
+                      AND s.kind = t.kind
+                      AND s.identifier = t.identifier
+                 )""",
+            (target_component_id, survivor_component_id),
+        )
+        moved_cats = execute(
+            "SELECT id FROM catalogs WHERE component_id = %s::uuid",
+            (target_component_id,),
+        )
+        if moved_cats:
+            execute_mutate(
+                """UPDATE catalogs SET component_id = %s::uuid, updated_at = now()
+                   WHERE component_id = %s::uuid""",
+                (survivor_component_id, target_component_id),
+            )
+            cascade_result["catalogs"] = len(moved_cats)
 
     # Steps 5-7 only run when both components exist AND the respective
     # cascade flag is on. Cascades use the mutation-scoped transfer_*
@@ -361,6 +394,7 @@ def spawn_child_agent(
     transfer_edge_ids: list[str] | None = None,
     transfer_flow_ids: list[str] | None = None,
     transfer_attribution_ids: list[str] | None = None,
+    transfer_catalog_ids: list[str] | None = None,
 ) -> dict:
     """SPLIT: carve out a new component + new SME from the caller's scope.
 
@@ -555,6 +589,29 @@ def spawn_child_agent(
     collapsed_edges = 0
     transferred_flows = 0
     transferred_attributions = 0
+    transferred_catalogs = 0
+    # Phase 7.4.2: catalogs first because flows reference them. Skipping
+    # the inner mutation gate (this is a self-split — no counterparty —
+    # and the spawn block above already validated the caller is the POC).
+    if transfer_catalog_ids:
+        cat_ids = [str(c) for c in transfer_catalog_ids]
+        # Validate every requested catalog belongs to the parent.
+        cats = execute(
+            "SELECT id FROM catalogs WHERE id = ANY(%s::uuid[]) AND component_id = %s::uuid",
+            (cat_ids, parent_component_id),
+        )
+        if len(cats) != len(cat_ids):
+            found = {str(c["id"]) for c in cats}
+            missing = [c for c in cat_ids if c not in found]
+            raise ValueError(
+                f"Catalog ids not on parent {parent_component_id}: {missing}"
+            )
+        execute_mutate(
+            """UPDATE catalogs SET component_id = %s::uuid, updated_at = now()
+               WHERE id = ANY(%s::uuid[])""",
+            (child_component_id, cat_ids),
+        )
+        transferred_catalogs = len(cat_ids)
     if transfer_edge_ids:
         r = transfer_edges(
             agent_id, consolidation_id, list(transfer_edge_ids),
@@ -582,6 +639,7 @@ def spawn_child_agent(
         "collapsed_edges": collapsed_edges,
         "transferred_flows": transferred_flows,
         "transferred_attributions": transferred_attributions,
+        "transferred_catalogs": transferred_catalogs,
     }
 
 
@@ -845,9 +903,14 @@ def transfer_flows(
     flow_ids: list[str],
 ) -> dict:
     """Mutation-scoped flow transfer. Re-points `flows.component_id` on
-    the given flows to the consolidation's target component.
+    the given flows to the consolidation's target component. The
+    incoming_catalog_id and outgoing_edge_id refs are unchanged (Phase
+    7.4.2: incoming is a catalog row, transferred separately when a
+    parent component's catalogs move to a child during split, or
+    cascade-deleted on merge when the absorbed component is
+    decommissioned).
 
-    Rejects on (component_id, incoming_edge_id, outgoing_edge_id)
+    Rejects on (component_id, incoming_catalog_id, outgoing_edge_id)
     collision — flows are unique per triple, so a duplicate at the
     target means the target already has that wiring and caller should
     delete one side explicitly.
@@ -863,7 +926,7 @@ def transfer_flows(
     cons = _assert_mutation_gate(agent_id, consolidation_id)
 
     flows = execute(
-        "SELECT id, component_id, incoming_edge_id, outgoing_edge_id "
+        "SELECT id, component_id, incoming_catalog_id, outgoing_edge_id "
         "FROM flows WHERE id = ANY(%s)",
         (flow_ids,),
     )

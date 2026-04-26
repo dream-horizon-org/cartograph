@@ -195,57 +195,58 @@ def seed_components() -> dict[str, str]:
 
 
 def seed_edges(ids: dict[str, str]) -> dict[str, str]:
-    """Insert catalog + bound + dangling edges. Returns edge_key → edge_id."""
+    """Insert catalog (catalogs table, Phase 7.4) + bound + dangling
+    edges (edges table). Returns merged key → id map. Catalog keys use
+    the `catalog::` prefix; bound `bound::`; dangling `dangling::`."""
     edges: dict[str, str] = {}
 
     # --- catalog rows: each application exposes its endpoints ---
+    # Phase 7.4.2: catalogs live in `catalogs` table with noun-form
+    # `kind` enum. All seeds below are 'endpoint' (HTTP-style); other
+    # kinds (topic/queue/data_source/trigger_target) follow the same
+    # shape if added later.
     catalog_defs = [
-        ("mock/feeds-api",    "calls", "GET /scores"),
-        ("mock/feeds-api",    "calls", "GET /match/:id"),
-        ("mock/auth-svc",     "calls", "POST /verify"),
-        ("mock/auth-svc",     "calls", "POST /refresh"),
-        ("mock/kyc-svc",      "calls", "POST /identity"),
-        ("mock/kyc-svc",      "calls", "GET /status"),
-        ("mock/payments-svc", "calls", "POST /charge"),
-        ("mock/payments-svc", "calls", "POST /refund"),
-        ("mock/payments-svc", "calls", "GET /balance"),
+        ("mock/feeds-api",    "endpoint", "GET /scores"),
+        ("mock/feeds-api",    "endpoint", "GET /match/:id"),
+        ("mock/auth-svc",     "endpoint", "POST /verify"),
+        ("mock/auth-svc",     "endpoint", "POST /refresh"),
+        ("mock/kyc-svc",      "endpoint", "POST /identity"),
+        ("mock/kyc-svc",      "endpoint", "GET /status"),
+        ("mock/payments-svc", "endpoint", "POST /charge"),
+        ("mock/payments-svc", "endpoint", "POST /refund"),
+        ("mock/payments-svc", "endpoint", "GET /balance"),
         # Chain-demo catalogs (each hop exposes its endpoint)
-        ("mock/q", "calls", "q.handle"),
-        ("mock/r", "calls", "r.handle"),
-        ("mock/s", "calls", "s.handle"),
-        ("mock/t", "calls", "t.handle"),
-        ("mock/u", "calls", "u.handle"),
-        ("mock/y", "calls", "y.handle"),
-        ("mock/z", "calls", "z.handle"),
+        ("mock/q", "endpoint", "q.handle"),
+        ("mock/r", "endpoint", "r.handle"),
+        ("mock/s", "endpoint", "s.handle"),
+        ("mock/t", "endpoint", "t.handle"),
+        ("mock/u", "endpoint", "u.handle"),
+        ("mock/y", "endpoint", "y.handle"),
+        ("mock/z", "endpoint", "z.handle"),
         # --- Orphan catalogs (no bound caller → render as incoming stubs) ---
         # p exposes an endpoint nothing in the graph calls → inbound stub at p.
-        ("mock/p", "calls", "p.admin_ping"),
+        ("mock/p", "endpoint", "p.admin_ping"),
         # s exposes a debug endpoint nothing calls → inbound stub at s.
-        ("mock/s", "calls", "s.debug"),
-        # --- Fan-out demo catalogs (A has two orphan inbounds; B's b1/b2
-        # have bound callers from A so they stay hidden; C exposes c1 +
-        # c2 but only c1 has a bound caller so c2 is an orphan; same for
-        # D where d2 is orphan).
-        ("mock/fan-a", "calls", "a1"),
-        ("mock/fan-a", "calls", "a2"),
-        ("mock/fan-b", "calls", "b1"),
-        ("mock/fan-b", "calls", "b2"),
-        ("mock/fan-c", "calls", "c1"),
-        ("mock/fan-c", "calls", "c2"),
-        ("mock/fan-d", "calls", "d1"),
-        ("mock/fan-d", "calls", "d2"),
+        ("mock/s", "endpoint", "s.debug"),
+        # --- Fan-out demo catalogs ---
+        ("mock/fan-a", "endpoint", "a1"),
+        ("mock/fan-a", "endpoint", "a2"),
+        ("mock/fan-b", "endpoint", "b1"),
+        ("mock/fan-b", "endpoint", "b2"),
+        ("mock/fan-c", "endpoint", "c1"),
+        ("mock/fan-c", "endpoint", "c2"),
+        ("mock/fan-d", "endpoint", "d1"),
+        ("mock/fan-d", "endpoint", "d2"),
     ]
-    for canonical, etype, ident in catalog_defs:
+    for canonical, kind, ident in catalog_defs:
         row = execute_returning(
-            """INSERT INTO edges
-               (from_component_id, to_component_id, edge_type, identifier,
-                metadata, confidence, discovered_by)
-               VALUES (NULL, %s, %s, %s, %s::jsonb, 0.95, 'mock-seed')
-               ON CONFLICT (to_component_id, edge_type, identifier)
-                 WHERE from_component_id IS NULL
-               DO UPDATE SET metadata = EXCLUDED.metadata, last_seen_at = now()
+            """INSERT INTO catalogs
+               (component_id, kind, identifier, metadata, confidence, discovered_by)
+               VALUES (%s::uuid, %s, %s, %s::jsonb, 0.95, 'mock-seed')
+               ON CONFLICT (component_id, kind, identifier)
+               DO UPDATE SET metadata = EXCLUDED.metadata, updated_at = now()
                RETURNING id""",
-            (ids[canonical], etype, ident, json.dumps(MOCK_TAG)),
+            (ids[canonical], kind, ident, json.dumps(MOCK_TAG)),
         )
         edges[f"catalog::{canonical}::{ident}"] = str(row["id"])
 
@@ -350,15 +351,13 @@ def seed_edges(ids: dict[str, str]) -> dict[str, str]:
 
 
 def seed_flows(ids: dict[str, str], edges: dict[str, str]) -> int:
-    """Insert flows so light-of-sight has paths to traverse. Returns row count."""
-    # feeds-api: incoming (someone calls us) → outgoings we fire.
-    # We don't have an inbound to feeds-api in the bound set, so craft one
-    # by adding a synthetic "admin-ui → feeds-api" ish row? Actually:
-    # the catalog rows for feeds-api (from=NULL) are viable "incoming"
-    # anchors since they represent the exposed endpoint; the flow uses
-    # them as incoming_edge_id.
-    # But flows.incoming_edge.to_component_id must equal component_id →
-    # catalog rows satisfy that (from=NULL, to=feeds-api). Perfect.
+    """Insert flows so light-of-sight has paths to traverse. Returns row count.
+
+    Phase 7.4.2: flow.incoming is canonically a catalog row (a surface
+    the component exposes). We use the `catalog::{canonical}::{ident}`
+    keys from seed_edges directly as incoming_catalog_id. The outgoing
+    is a bound or dangling edge from the same component.
+    """
 
     flow_defs = [
         # When GET /scores hits feeds-api → reads db + cache, may check auth.
@@ -462,10 +461,10 @@ def seed_flows(ids: dict[str, str], edges: dict[str, str]) -> int:
             continue
         execute_mutate(
             """INSERT INTO flows
-               (component_id, incoming_edge_id, outgoing_edge_id,
+               (component_id, incoming_catalog_id, outgoing_edge_id,
                 metadata, confidence, discovered_by)
-               VALUES (%s, %s, %s, %s::jsonb, 0.85, 'mock-seed')
-               ON CONFLICT (component_id, incoming_edge_id, outgoing_edge_id)
+               VALUES (%s::uuid, %s::uuid, %s::uuid, %s::jsonb, 0.85, 'mock-seed')
+               ON CONFLICT (component_id, incoming_catalog_id, outgoing_edge_id)
                DO UPDATE SET metadata = EXCLUDED.metadata, updated_at = now()""",
             (ids[component_canonical], edges[in_key], edges[out_key],
              json.dumps(MOCK_TAG)),
@@ -512,25 +511,35 @@ def seed_source_slices(ids: dict[str, str]) -> None:
 
 
 def cleanup() -> dict[str, int]:
-    """Delete every mock row. Order matters due to FKs."""
-    # Flows reference mock edges; cascade via edges delete.
-    # Edges where metadata has mock=true:
+    """Delete every mock row. Order matters due to FKs.
+
+    Phase 7.4.2: catalogs in their own table; deleting them cascades
+    flows that referenced them via incoming_catalog_id ON DELETE CASCADE.
+    """
+    # Catalogs first (cascades flow rows whose incoming was a mock catalog).
+    nc_cat = execute_mutate(
+        "DELETE FROM catalogs WHERE (metadata->>'mock')::boolean IS TRUE",
+    )
+    # Edges where metadata has mock=true (bound + dangling rows).
     ne = execute_mutate(
         "DELETE FROM edges WHERE (metadata->>'mock')::boolean IS TRUE",
     )
-    # Attributions we added:
+    # Attributions we added.
     na = execute_mutate(
         "DELETE FROM attributions WHERE resource_type = 'mock_marker'",
     )
-    # Components we added (by canonical_name prefix):
+    # Components we added (by canonical_name prefix).
     nc = execute_mutate(
         "DELETE FROM components WHERE canonical_name LIKE 'mock/%%'",
     )
-    # Flows that referenced deleted edges already cascaded, but belt:
+    # Flows that didn't ride any cascade (defensive).
     nf = execute_mutate(
         "DELETE FROM flows WHERE discovered_by = 'mock-seed'",
     )
-    return {"edges": ne, "attributions": na, "components": nc, "flows_residual": nf}
+    return {
+        "catalogs": nc_cat, "edges": ne, "attributions": na,
+        "components": nc, "flows_residual": nf,
+    }
 
 
 # ----------------- entry point -----------------

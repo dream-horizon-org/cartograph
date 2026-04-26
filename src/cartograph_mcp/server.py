@@ -692,41 +692,43 @@ def bind_edge(
 def upsert_flow(
     agent_id: str,
     component_id: str,
-    incoming_edge_id: str,
+    incoming_catalog_id: str,
     outgoing_edge_id: str,
     metadata: dict[str, Any] | None = None,
     confidence: float = 1.0,
 ) -> dict[str, Any]:
-    """[Phase 3.9] Link an incoming edge to an outgoing edge inside one
-    of YOUR components. Set-based (many-to-many): one incoming can fan
-    out to multiple outgoings; multiple incomings can share an
-    outgoing. SME-ONLY (must own component_id).
+    """[Phase 3.9 + 7.4.2] Link an incoming catalog (a surface YOUR
+    component exposes) to an outgoing edge inside one of YOUR
+    components. Set-based (many-to-many): one catalog can fan out to
+    multiple outgoings; multiple catalogs can share an outgoing. SME-
+    ONLY (must own component_id; catalog must belong to component).
 
-    Validates that incoming_edge.to_component_id == component_id and
-    outgoing_edge.from_component_id == component_id (Python-side, not
-    DB triggers — clearer errors).
+    Validates that catalog.component_id == component_id (Phase 7.4.2:
+    incoming is a catalog row, not an edge) and
+    outgoing_edge.from_component_id == component_id.
 
-    Idempotent on (component_id, incoming, outgoing). Re-call
-    accumulates metadata + max confidence.
+    Idempotent on (component_id, incoming_catalog_id, outgoing_edge_id).
+    Re-call accumulates metadata + max confidence.
 
-    Use during Edge Discovery: for each of your incoming edges,
-    declare which of your outgoing edges fire when it's hit. Powers
-    blast-radius / impact analysis.
+    Use during Edge Discovery: for each of your catalog rows (exposed
+    surfaces), declare which of your outgoing edges fire when the
+    surface is hit. Powers blast-radius / impact analysis.
     """
     return components_tool.upsert_flow(
-        agent_id, component_id, incoming_edge_id, outgoing_edge_id,
+        agent_id, component_id, incoming_catalog_id, outgoing_edge_id,
         metadata, confidence,
     )
 
 
 @mcp.tool()
 def get_flow(
-    agent_id: str, component_id: str, incoming_edge_id: str
+    agent_id: str, component_id: str, incoming_catalog_id: str
 ) -> dict[str, list[dict[str, Any]]]:
-    """[Phase 3.9] Outgoing edges in the flow triggered by this incoming
-    edge inside the component. Open to all active agents."""
+    """[Phase 3.9 + 7.4.2] Outgoing edges fired when the catalog at
+    incoming_catalog_id on component_id is hit. Open to all active
+    agents."""
     return {
-        "outgoing": components_tool.get_flow(agent_id, component_id, incoming_edge_id)
+        "outgoing": components_tool.get_flow(agent_id, component_id, incoming_catalog_id)
     }
 
 
@@ -734,8 +736,10 @@ def get_flow(
 def get_flow_inverse(
     agent_id: str, component_id: str, outgoing_edge_id: str
 ) -> dict[str, list[dict[str, Any]]]:
-    """[Phase 3.9] Incoming edges that trigger this outgoing edge inside
-    the component. Open to all active agents."""
+    """[Phase 3.9 + 7.4.2] Incoming catalog rows whose hit triggers this
+    outgoing edge inside the component. Returns catalog rows (Phase
+    7.4.2: incoming is a catalog, not an edge). Open to all active
+    agents."""
     return {
         "incoming": components_tool.get_flow_inverse(agent_id, component_id, outgoing_edge_id)
     }

@@ -102,24 +102,32 @@ def _migrate_edges_asymmetric(cur) -> None:
 
 
 def _create_flows_table(cur) -> None:
-    """Phase 3.9: flows table — set-based link between incoming and
-    outgoing edges of a component, owned by the component's SME."""
+    """Phase 3.9: flows table — set-based link between incoming surface
+    and outgoing edge of a component, owned by the component's SME.
+
+    Phase 7.4.2: incoming is now canonically a catalog row (NOT NULL FK
+    to catalogs). Pre-7.4 it pointed at an edges row whose
+    from_component_id IS NULL; that role moved to `catalogs` in Phase
+    7.4 and the FK followed in 7.4.2.
+    """
+    # FK on `incoming_catalog_id` is added in a follow-up ALTER block
+    # AFTER the `catalogs` table is created later in run_migrations
+    # (Phase 7.4 + 7.4.2). Keeping the CREATE FK-free preserves fresh-
+    # DB initialisation order (flows table is created before catalogs).
     cur.execute("""
         CREATE TABLE IF NOT EXISTS flows (
-          id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          component_id      UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
-          incoming_edge_id  UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
-          outgoing_edge_id  UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
-          confidence        FLOAT NOT NULL DEFAULT 1.0,
-          metadata          JSONB NOT NULL DEFAULT '{}',
-          discovered_by     TEXT NOT NULL,
-          created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-          updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-          UNIQUE (component_id, incoming_edge_id, outgoing_edge_id)
+          id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          component_id         UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+          incoming_catalog_id  UUID,
+          outgoing_edge_id     UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+          confidence           FLOAT NOT NULL DEFAULT 1.0,
+          metadata             JSONB NOT NULL DEFAULT '{}',
+          discovered_by        TEXT NOT NULL,
+          created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_flows_component ON flows(component_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_flows_incoming ON flows(incoming_edge_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_flows_outgoing ON flows(outgoing_edge_id)")
 
 
@@ -762,6 +770,79 @@ def run_migrations() -> None:
             cur.execute(
                 "DELETE FROM edges WHERE from_component_id IS NULL"
             )
+
+            # Phase 7.4.2: flows.incoming was historically an edges row
+            # (a catalog row, where from_component_id IS NULL). Phase
+            # 7.4 moved catalogs to their own table; the FK from flows
+            # to edges cascade-deleted every flow whose incoming was a
+            # catalog. Make the FK first-class against catalogs.
+            #
+            # Idempotent migration:
+            #   1. drop the old incoming_edge_id column (if it exists)
+            #   2. add incoming_catalog_id column (if not yet present)
+            #   3. delete any orphan flow rows whose catalog ref is NULL
+            #      (no data is recoverable — Phase 7.4 cascade already
+            #      wiped the rows that mattered; this just clears the
+            #      shape so the NOT NULL + FK can land cleanly)
+            #   4. add NOT NULL + FK ON DELETE CASCADE to catalogs
+            #   5. drop old (component_id, incoming_edge_id, outgoing_edge_id)
+            #      unique, add (component_id, incoming_catalog_id, outgoing_edge_id)
+            #   6. drop old idx_flows_incoming, add idx_flows_incoming_catalog
+            cur.execute("""
+                DO $$
+                BEGIN
+                  IF EXISTS (SELECT 1 FROM information_schema.columns
+                              WHERE table_name='flows' AND column_name='incoming_edge_id') THEN
+                    ALTER TABLE flows DROP COLUMN incoming_edge_id;
+                  END IF;
+                END$$
+            """)
+            cur.execute("""
+                ALTER TABLE flows
+                  ADD COLUMN IF NOT EXISTS incoming_catalog_id UUID
+            """)
+            cur.execute("DELETE FROM flows WHERE incoming_catalog_id IS NULL")
+            cur.execute("""
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                                  WHERE table_name='flows'
+                                    AND column_name='incoming_catalog_id'
+                                    AND is_nullable='NO') THEN
+                    ALTER TABLE flows ALTER COLUMN incoming_catalog_id SET NOT NULL;
+                  END IF;
+                  IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                                  WHERE table_name='flows'
+                                    AND constraint_name='flows_incoming_catalog_id_fkey') THEN
+                    ALTER TABLE flows
+                      ADD CONSTRAINT flows_incoming_catalog_id_fkey
+                      FOREIGN KEY (incoming_catalog_id)
+                      REFERENCES catalogs(id) ON DELETE CASCADE;
+                  END IF;
+                END$$
+            """)
+            cur.execute("""
+                DO $$
+                DECLARE old_uniq TEXT;
+                BEGIN
+                  SELECT conname INTO old_uniq FROM pg_constraint
+                   WHERE conrelid='flows'::regclass
+                     AND contype='u'
+                     AND pg_get_constraintdef(oid) LIKE '%incoming_edge_id%';
+                  IF old_uniq IS NOT NULL THEN
+                    EXECUTE 'ALTER TABLE flows DROP CONSTRAINT ' || quote_ident(old_uniq);
+                  END IF;
+                END$$
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS flows_unique_catalog_incoming
+                  ON flows (component_id, incoming_catalog_id, outgoing_edge_id)
+            """)
+            cur.execute("DROP INDEX IF EXISTS idx_flows_incoming")
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_flows_incoming_catalog
+                  ON flows(incoming_catalog_id)
+            """)
 
             # Phase 7.1: terminal_acks — explicit acknowledgement of an
             # entity's terminal state (TC for tasks, D/F for consolidations,
