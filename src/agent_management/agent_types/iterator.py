@@ -148,34 +148,51 @@ Per-plane rules:
 
   3. DATA-STORE / MESSAGE-BROKER SURFACES (the most-missed): databases,
      caches, queues, brokers may NOT appear in the service catalog at
-     all — many providers carry them only in dimension/metric space.
-     Sources to check (provider-specific):
+     all. Use TWO complementary sources (whichever your provider
+     surfaces — try both):
+
+     (a) SERVICE DEPENDENCY GRAPH / TOPOLOGY view — primary source on
+     most APM providers. For each application service in surface 1,
+     pull its downstream dependencies. APM auto-instrumentation
+     captures spans to DBs / caches / queues / brokers even when
+     those aren't first-class catalog entries — they appear as
+     downstream nodes on the service map with span-attribute hints
+     (db.system=postgres, messaging.system=kafka, etc.). Walk every
+     service's downstream and emit one row per distinct store/broker
+     identity. This is the FIRST PLACE to look for a Last9-style
+     provider where the catalog only lists apps.
+
+     (b) PROVIDER-SPECIFIC DB / INTEGRATION SURFACES — cross-check
+     and enrich what (a) found, plus catch components with no app
+     calling them (rare but possible — standalone batch jobs writing
+     to a DB without APM instrumentation):
        * Datadog: Database Monitoring (DBM) for SQL DBs;
          AWS/GCP/Azure integration views for RDS / ElastiCache /
-         MemoryDB / MSK; integration-specific dashboards (postgres.*,
-         redis.*, kafka.* metric prefixes).
+         MemoryDB / MSK; integration metric prefixes (postgres.*,
+         redis.*, kafka.*).
        * New Relic: Infrastructure → AWS / GCP / Azure entity types
          (DBInstance, CacheCluster, KafkaCluster).
-       * Honeycomb: derive from span attribute keys
-         (db.system / db.name / messaging.system / messaging.destination)
-         in the trace store — these don't appear as services but ARE
-         components.
-       * Last9: service catalog only lists apps; databases, caches and
-         brokers must be derived from metric label streams (look for
-         label keys like `db_instance`, `cache_cluster`, `kafka_topic`,
-         or distinct values of `service_type` / `component_type`
-         dimensions).
+       * Honeycomb: span-attribute aggregation across the trace store
+         (db.system, db.name, messaging.system, messaging.destination)
+         — same dataset as (a), but aggregated as distinct entities.
+       * Last9: service-dependency view per app + metric label streams
+         (`db_instance`, `cache_cluster`, `kafka_topic`, distinct
+         values of `service_type` / `component_type` dimensions).
        * Splunk Observability: services + dimensions endpoint.
+
      Emit one row per discovered store/broker, resource_type=
      'db' / 'cache' / 'queue' / 'topic' / 'broker' as appropriate.
      identifier = the provider-canonical id (e.g. RDS instance id,
-     Redis cluster name, Kafka topic name).
+     Redis cluster name, Kafka topic name). De-dup naturally because
+     `upsert_resource` is idempotent on (plane, resource_type,
+     identifier) — finding the same DB via the dependency graph AND
+     the integration view collapses to one row with merged metadata.
 
-  4. TRACE-DERIVED DEPENDENCIES (last sweep): if the provider exposes
-     a service-map / dependency view, scan it for downstream targets
-     that DIDN'T surface in 1-3 (rare but happens — e.g. a third-party
-     API that's only a span destination). Add as resource_type=
-     'external-service' or 'data_source' depending on type.
+  4. EXTERNAL / THIRD-PARTY SERVICES (last sweep): scan the dependency
+     graph for downstream targets that aren't internal apps and
+     aren't recognised stores/brokers — typically third-party APIs
+     (Stripe, Twilio, Slack, etc.). Emit as resource_type=
+     'external-service' so SMEs can later attribute outbound edges.
 
   Per-provider auth: get the credential key via list_secrets_for_plane
   + get_secret. Common keys: `datadog_api_key` + `datadog_app_key`,
