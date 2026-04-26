@@ -34,6 +34,7 @@ from cartograph_mcp.tools import search as search_tool
 from cartograph_mcp.tools import sleep as sleep_tool
 from cartograph_mcp.tools import insights as insights_tool
 from cartograph_mcp.tools import terminal_acks as terminal_acks_tool
+from cartograph_mcp.tools import catalogs as catalogs_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1475,6 +1476,70 @@ def reset_agent(agent_id: str, target_agent_id: str) -> dict[str, Any]:
         )
     logger.info("Orchestrator %s force-reset agent %s", agent_id, target_agent_id)
     return {"reset": True, "agent_id": target_agent_id}
+
+
+# ============ CATALOGS (Phase 7.4 — first-class table) ============
+
+
+@mcp.tool()
+def upsert_catalog(
+    agent_id: str,
+    component_id: str,
+    kind: str,
+    identifier: str,
+    metadata: dict[str, Any] | None = None,
+    confidence: float = 1.0,
+) -> dict[str, Any]:
+    """Phase 7.4: callee declares an exposed thing in their catalog.
+
+    Use noun-form `kind` instead of the verb-form edge_type used in
+    Phase 3.9: 'endpoint' (HTTP), 'topic' (pub/sub), 'queue', 'data_source'
+    (DB / cache / object store), 'trigger_target' (cron-fire-able).
+
+    Idempotent on (component_id, kind, identifier). Owner-only —
+    caller must own component_id via RCA.
+
+    Replaces upsert_edge_catalog (which now forwards here for
+    backwards compat).
+    """
+    return catalogs_tool.upsert_catalog(
+        agent_id, component_id, kind, identifier, metadata, confidence,
+    )
+
+
+@mcp.tool()
+def get_my_catalogs(agent_id: str) -> list[dict[str, Any]]:
+    """List every catalog row I own, with caller_count per row so I
+    can spot orphans at a glance."""
+    return catalogs_tool.get_my_catalogs(agent_id)
+
+
+@mcp.tool()
+def get_my_catalog_callers(
+    agent_id: str, catalog_id: str | None = None
+) -> dict[str, Any]:
+    """For each of my catalogs, return the bound callers matched via
+    kind ↔ edge_type bridging. Pass catalog_id to filter to one row."""
+    return catalogs_tool.get_my_catalog_callers(agent_id, catalog_id)
+
+
+@mcp.tool()
+def get_unmatched_callers(agent_id: str) -> list[dict[str, Any]]:
+    """Bound edges INTO my components that have no matching catalog
+    row. Triage each:
+    - dynamic identifier (DB-like / per-call) → ignore
+    - missing catalog row → call upsert_catalog
+    - caller error (typo, hallucination, deprecated) → raise clarification
+    """
+    return catalogs_tool.get_unmatched_callers(agent_id)
+
+
+@mcp.tool()
+def get_orphan_catalogs(agent_id: str) -> list[dict[str, Any]]:
+    """Catalogs I own that no bound caller currently matches.
+    Companion to get_unmatched_callers — together they show my
+    catalog-coverage health."""
+    return catalogs_tool.get_orphan_catalogs(agent_id)
 
 
 # ============ TERMINAL ACKS (Phase 7.1) ============

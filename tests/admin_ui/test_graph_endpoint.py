@@ -87,10 +87,12 @@ def test_graph_phase_3_10_carries_kind_and_flows(client):
            VALUES (%s, %s, 'calls', 'GET /b', 'sys')""",
         (c_a["id"], c_b["id"]),
     )
-    # Catalog row (from IS NULL)
+    # Phase 7.4: catalogs live in their own table now. Insert there
+    # instead of edges. /api/graph UNIONs them back into the edges
+    # payload with kind='catalog' for FE compatibility.
     execute_mutate(
-        """INSERT INTO edges (from_component_id, to_component_id, edge_type, identifier, discovered_by)
-           VALUES (NULL, %s, 'calls', 'GET /expose', 'sys')""",
+        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
+           VALUES (%s, 'endpoint', 'GET /expose', 'sys')""",
         (c_b["id"],),
     )
     # Dangling (to IS NULL)

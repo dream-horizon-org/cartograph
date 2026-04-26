@@ -369,69 +369,32 @@ def create_edge(agent_id: str, edge_data: dict) -> dict:
 
 
 def upsert_edge_catalog(agent_id: str, edge_data: dict) -> dict:
-    """Callee declares an exposed endpoint / consumed topic / accepted
-    query. Writes a row with from_component_id=NULL, owned by the
-    callee's SME.
+    """DEPRECATED: Phase 7.4 moved catalogs from the `edges` table to a
+    dedicated `catalogs` table with noun-form `kind` enum. This wrapper
+    translates the old verb-form API (edge_type='calls') to the new
+    one (kind='endpoint') via the canonical mapping. New code should
+    call `upsert_catalog` directly.
 
     Required edge_data keys: to_component_id, edge_type, identifier.
-    Optional: metadata, confidence, source_attr_id.
+    Optional: metadata, confidence.
 
-    Idempotent on (to_component_id, edge_type, identifier) WHERE
-    from_component_id IS NULL — re-calling updates metadata + confidence
-    + last_seen_at, never creates a duplicate catalog row.
-
-    Scope: caller must own to_component_id via RCA.
+    Returns the catalog row (NOT an edge row).
     """
-    _assert_sme(agent_id)
-    # Tolerate both str and UUID inputs from callers.
+    from cartograph_mcp.tools import catalogs as _cat
     to_component_id = str(edge_data.get("to_component_id") or "").strip()
     edge_type = str(edge_data.get("edge_type") or "").strip()
     identifier = str(edge_data.get("identifier") or "").strip()
     metadata = edge_data.get("metadata") or {}
     confidence = float(edge_data.get("confidence", 1.0))
-    target_attr_id = edge_data.get("target_attr_id")
-
     if not to_component_id:
         raise ValueError("to_component_id is required for catalog rows")
-    if edge_type not in _VALID_EDGE_TYPES:
-        raise ValueError(
-            f"Invalid edge_type '{edge_type}'. Valid: {sorted(_VALID_EDGE_TYPES)}"
-        )
     if not identifier:
         raise ValueError("identifier is required")
-    if not (0.0 <= confidence <= 1.0):
-        raise ValueError("confidence must be in [0.0, 1.0]")
-    if not _sme_owns_component(agent_id, to_component_id):
-        raise ValueError(
-            f"SME {agent_id} does not own component {to_component_id}. "
-            "You can only declare catalog entries on your own component."
-        )
-
-    vec = emb.vector_literal(emb.embed_text(
-        emb.edge_embed_text(edge_type, identifier)
-    ))
-    row = execute_returning(
-        """INSERT INTO edges
-           (from_component_id, to_component_id, edge_type, identifier,
-            target_attr_id, evidence, confidence, metadata, embedding,
-            discovered_by, last_seen_at)
-           VALUES (NULL, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb,
-                   %s::vector, %s, now())
-           ON CONFLICT (to_component_id, edge_type, identifier)
-             WHERE from_component_id IS NULL
-           DO UPDATE
-             SET metadata = edges.metadata || EXCLUDED.metadata,
-                 confidence = GREATEST(edges.confidence, EXCLUDED.confidence),
-                 target_attr_id = COALESCE(EXCLUDED.target_attr_id, edges.target_attr_id),
-                 embedding = EXCLUDED.embedding,
-                 last_seen_at = now()
-           RETURNING *""",
-        (
-            to_component_id, edge_type, identifier, target_attr_id,
-            json.dumps([]), confidence, json.dumps(metadata), vec, agent_id,
-        ),
+    kind = _cat.edge_type_to_kind(edge_type)
+    return _cat.upsert_catalog(
+        agent_id, to_component_id, kind, identifier,
+        metadata=metadata, confidence=confidence,
     )
-    return row
 
 
 def upsert_edge_outbound(agent_id: str, edge_data: dict) -> dict:
@@ -741,12 +704,33 @@ def get_component_edges(agent_id: str, component_id: str) -> dict:
            ORDER BY edge_type, identifier""",
         (component_id,),
     )
-    incoming_catalog = execute(
-        """SELECT * FROM edges
-           WHERE to_component_id = %s AND from_component_id IS NULL
-           ORDER BY edge_type, identifier""",
+    # Phase 7.4: catalog rows now live in the dedicated `catalogs`
+    # table. We reshape them into the legacy edge-row format (with
+    # from_component_id=NULL + a derived edge_type) so existing FE +
+    # tests consuming get_component_edges keep working unchanged.
+    _catalog_rows = execute(
+        """SELECT id, component_id AS to_component_id, kind, identifier,
+                  metadata, confidence, embedding, discovered_by,
+                  created_at, updated_at AS last_seen_at
+           FROM catalogs
+           WHERE component_id = %s::uuid
+           ORDER BY kind, identifier""",
         (component_id,),
     )
+    _KIND_TO_DEFAULT_EDGE_TYPE = {
+        "endpoint": "calls",
+        "topic": "publishes_to",
+        "queue": "consumes_from",
+        "data_source": "reads_from",
+        "trigger_target": "triggers",
+    }
+    incoming_catalog = []
+    for r in _catalog_rows:
+        incoming_catalog.append({
+            **r,
+            "from_component_id": None,
+            "edge_type": _KIND_TO_DEFAULT_EDGE_TYPE.get(r["kind"], "calls"),
+        })
     outgoing_bound = execute(
         """SELECT * FROM edges
            WHERE from_component_id = %s AND to_component_id IS NOT NULL

@@ -885,22 +885,42 @@ def create_app() -> FastAPI:
                GROUP BY c.id
                ORDER BY c.canonical_name"""
         )
+        # Phase 7.4: catalogs live in their own table now. UNION them
+        # into the edges payload with kind='catalog' + a derived
+        # edge_type so the FE Graph + Globe code (which expects the
+        # legacy three-kind discriminator) keeps working without
+        # a re-shape.
         edges = execute(
-            """SELECT e.id,
-                      e.from_component_id AS source_id,
-                      e.to_component_id   AS target_id,
+            """SELECT e.id::text AS id,
+                      e.from_component_id::text AS source_id,
+                      e.to_component_id::text   AS target_id,
                       e.edge_type, e.identifier, e.confidence, e.metadata,
                       CASE
                         WHEN e.from_component_id IS NOT NULL
                              AND e.to_component_id IS NOT NULL THEN 'bound'
-                        WHEN e.from_component_id IS NULL     THEN 'catalog'
                         ELSE 'dangling'
                       END AS kind
                FROM edges e
                LEFT JOIN components cs ON cs.id = e.from_component_id
                LEFT JOIN components ct ON ct.id = e.to_component_id
                WHERE (cs.id IS NULL OR cs.status != 'decommissioned')
-                 AND (ct.id IS NULL OR ct.status != 'decommissioned')"""
+                 AND (ct.id IS NULL OR ct.status != 'decommissioned')
+               UNION ALL
+               SELECT c.id::text,
+                      NULL AS source_id,
+                      c.component_id::text AS target_id,
+                      CASE c.kind
+                        WHEN 'endpoint'       THEN 'calls'
+                        WHEN 'topic'          THEN 'publishes_to'
+                        WHEN 'queue'          THEN 'consumes_from'
+                        WHEN 'data_source'    THEN 'reads_from'
+                        WHEN 'trigger_target' THEN 'triggers'
+                      END AS edge_type,
+                      c.identifier, c.confidence, c.metadata,
+                      'catalog' AS kind
+               FROM catalogs c
+               JOIN components comp ON comp.id = c.component_id
+                AND comp.status != 'decommissioned'"""
         )
         flows = execute(
             """SELECT f.id, f.component_id,

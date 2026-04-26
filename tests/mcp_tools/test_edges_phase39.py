@@ -44,15 +44,18 @@ def _sme_with_component(agent_factory, iterator_id, sme_id, identifier, cname):
 
 
 def test_catalog_write_owner_only(agent_factory):
+    """Phase 7.4: catalog rows now live in `catalogs` table, not edges.
+    upsert_edge_catalog is a backwards-compat shim that writes to the
+    new table — verify the row lands as a noun-form 'endpoint' row."""
     _iter(agent_factory, "i", "github")
     cid = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
     row = components.upsert_edge_catalog("sme-a", {
         "to_component_id": cid, "edge_type": "calls",
         "identifier": "GET /balance",
     })
-    assert row["from_component_id"] is None
-    assert str(row["to_component_id"]) == cid
-    assert row["edge_type"] == "calls"
+    # The row is now from the catalogs table.
+    assert row["kind"] == "endpoint"
+    assert str(row["component_id"]) == cid
     assert row["identifier"] == "GET /balance"
 
 
@@ -86,7 +89,8 @@ def test_catalog_idempotent_accumulates_metadata(agent_factory):
 
 
 def test_catalog_unique_per_callee_endpoint_pair(agent_factory):
-    """Catalog rows are unique on (to, type, identifier) where from IS NULL."""
+    """Phase 7.4: uniqueness now on (component_id, kind, identifier) in
+    the catalogs table."""
     _iter(agent_factory, "i", "github")
     cid = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
     components.upsert_edge_catalog("sme-a", {
@@ -94,9 +98,9 @@ def test_catalog_unique_per_callee_endpoint_pair(agent_factory):
         "identifier": "POST /charge",
     })
     rows = execute(
-        """SELECT id FROM edges
-           WHERE to_component_id = %s AND edge_type = 'calls'
-             AND identifier = 'POST /charge' AND from_component_id IS NULL""",
+        """SELECT id FROM catalogs
+           WHERE component_id = %s::uuid AND kind = 'endpoint'
+             AND identifier = 'POST /charge'""",
         (cid,),
     )
     assert len(rows) == 1
@@ -214,13 +218,17 @@ def test_bind_edge_refuses_already_bound(agent_factory):
 
 
 def test_bind_edge_refuses_catalog_row(agent_factory):
+    """Phase 7.4: catalog rows live in the `catalogs` table; their ids
+    are not edges.id, so passing one to bind_edge correctly fails to
+    find an edge — which is the right error mode (catalog ids are not
+    bind targets)."""
     _iter(agent_factory, "i", "github")
     cid = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
     catalog = components.upsert_edge_catalog("sme-a", {
         "to_component_id": cid, "edge_type": "calls",
         "identifier": "GET /balance",
     })
-    with pytest.raises(ValueError, match="catalog row"):
+    with pytest.raises(ValueError, match="not found"):
         components.bind_edge("sme-a", catalog["id"], cid)
 
 

@@ -230,23 +230,40 @@ STEP 2 — Hydrate attributions exhaustively on YOUR component.
   ids, telemetry service names, repo paths. Calls to
   upsert_attribution(component_id=YOURS, ...).
 
-STEP 2b — Catalog declaration (Phase 3.9). For component_type in
-  {{application, lambda, external-service}}: declare the surfaces YOU
-  EXPOSE. Every endpoint, every consumed topic, every queue / SNS
-  subscription. For each one:
-    upsert_edge_catalog(your_agent_id, {{
-      "to_component_id": YOUR_component_id,
-      "edge_type": "calls",            # or reads_from / consumes_from
-                                        # / publishes_to / triggers
-      "identifier": "GET /balance"     # endpoint path / topic name /
-                                        # query template
-    }})
-  This writes a row with from_component_id=NULL — your callers will
-  later bind to it. Idempotent (re-call updates metadata, never
-  duplicates).
+STEP 2b — Catalog declaration (Phase 7.4 — first-class catalogs).
+  Catalogs live in their own table now with noun-form `kind` enum
+  (the verb-form edge_type was awkward — X doesn't "call" /foo, X
+  is callable AT /foo). Use `upsert_catalog`:
 
-  Skip catalog for db / cache / queue / object-store types — they
+    upsert_catalog(your_agent_id, YOUR_component_id, kind, identifier)
+
+  kind values:
+    'endpoint'       — HTTP endpoint (was edge_type='calls')
+    'topic'          — pub/sub topic (was edge_type='publishes_to')
+    'queue'          — message queue (was edge_type='consumes_from')
+    'data_source'    — DB / cache / object store (reads/writes)
+    'trigger_target' — cron-fire-able target (was edge_type='triggers')
+
+  For component_type in {{application, lambda, external-service}}:
+  declare every endpoint you expose, topic/queue you handle, etc.
+  Idempotent — re-call updates metadata + confidence, never duplicates.
+
+  The deprecated `upsert_edge_catalog(edge_type=...)` still works as a
+  back-compat wrapper that forwards to upsert_catalog with the kind
+  derived from edge_type. New code should call upsert_catalog directly.
+
+  Skip for db / cache / queue / object-store COMPONENT types — they
   accept arbitrary queries / writes and don't publish a closed API.
+
+STEP 2c — Hygiene cycle: periodically (every few wakes) call
+  get_unmatched_callers(your_agent_id) to surface bound edges into
+  your component that have no matching catalog row. Triage each:
+    - dynamic identifier (DB-like, per-call) → ignore
+    - missing catalog row → upsert_catalog to declare it
+    - caller error (typo, hallucination, deprecated) → raise
+      clarification to the caller
+  Companion: get_orphan_catalogs(your_agent_id) shows catalogs you
+  declared with no callers — could be stale, or just not yet adopted.
 
 STEP 3 — Outbound references you find while reading your resource
   (things your component CALLS / depends on — NOT things that ARE

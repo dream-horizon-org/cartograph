@@ -711,6 +711,58 @@ def run_migrations() -> None:
                 "metadata JSONB NOT NULL DEFAULT '{}'"
             )
 
+            # Phase 7.4: catalogs — promote catalog rows from `edges`
+            # (where from_component_id IS NULL) to a dedicated table
+            # with noun-form `kind` enum (endpoint/topic/queue/
+            # data_source/trigger_target). Edge_type was a verb that
+            # read awkwardly when applied to a callee declaration.
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS catalogs (
+                    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    component_id  UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+                    kind          TEXT NOT NULL CHECK (kind IN (
+                                    'endpoint', 'topic', 'queue',
+                                    'data_source', 'trigger_target'
+                                  )),
+                    identifier    TEXT NOT NULL,
+                    metadata      JSONB NOT NULL DEFAULT '{}',
+                    confidence    FLOAT NOT NULL DEFAULT 1.0,
+                    embedding     vector(1024),
+                    discovered_by TEXT,
+                    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (component_id, kind, identifier)
+                )"""
+            )
+
+            # Phase 7.4 migration: move existing catalog rows from edges
+            # to catalogs. Idempotent — uses ON CONFLICT DO NOTHING and
+            # only deletes successfully-moved rows.
+            cur.execute(
+                """INSERT INTO catalogs
+                       (component_id, kind, identifier, metadata,
+                        confidence, embedding, discovered_by, created_at)
+                   SELECT to_component_id,
+                          CASE edge_type
+                            WHEN 'calls'         THEN 'endpoint'
+                            WHEN 'reads_from'    THEN 'data_source'
+                            WHEN 'writes_to'     THEN 'data_source'
+                            WHEN 'publishes_to'  THEN 'topic'
+                            WHEN 'consumes_from' THEN 'queue'
+                            WHEN 'triggers'      THEN 'trigger_target'
+                            WHEN 'runs_on'       THEN 'data_source'
+                            ELSE 'endpoint'
+                          END,
+                          identifier, metadata, confidence,
+                          embedding, discovered_by, created_at
+                     FROM edges
+                    WHERE from_component_id IS NULL
+                  ON CONFLICT (component_id, kind, identifier) DO NOTHING"""
+            )
+            cur.execute(
+                "DELETE FROM edges WHERE from_component_id IS NULL"
+            )
+
             # Phase 7.1: terminal_acks — explicit acknowledgement of an
             # entity's terminal state (TC for tasks, D/F for consolidations,
             # CC/QR for clarifications) by a participant. Replaces Phase
@@ -884,6 +936,12 @@ def _create_indexes(cur) -> None:
 
         # Phase 7.1: terminal-state acks
         "CREATE INDEX IF NOT EXISTS idx_term_acks_agent ON terminal_acks(agent_id)",
+
+        # Phase 7.4: catalogs first-class
+        "CREATE INDEX IF NOT EXISTS idx_catalogs_component ON catalogs(component_id)",
+        "CREATE INDEX IF NOT EXISTS idx_catalogs_identifier ON catalogs(identifier)",
+        "CREATE INDEX IF NOT EXISTS idx_catalogs_kind ON catalogs(kind)",
+        "CREATE INDEX IF NOT EXISTS idx_catalogs_embedding ON catalogs USING hnsw (embedding vector_cosine_ops)",
     ]
     for idx in indexes:
         cur.execute(idx)
