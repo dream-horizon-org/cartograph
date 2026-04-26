@@ -40,6 +40,8 @@ Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULAR
 
 **Catalogs first-class (Phase 7.4 — SME prompt):** Materialisation STEP 2b now uses `upsert_catalog(component_id, kind, identifier)` with noun-form `kind` enum (endpoint / topic / queue / data_source / trigger_target) instead of the deprecated verb-form `upsert_edge_catalog(edge_type=...)`. New STEP 2c hygiene cycle: periodically call `get_unmatched_callers(your_agent_id)` to surface bound edges into your components with no matching catalog row, triage each (dynamic / missing-catalog / caller-error). Companion: `get_orphan_catalogs(your_agent_id)` shows catalogs you declared with no callers.
 
+**Flows reference catalogs first-class (Phase 7.4.2 — SME prompt):** STEP 4 (flow declaration) now takes `incoming_catalog_id` (NOT an edge id). The flow's incoming surface is canonically YOUR catalog row — bound caller edges bridge to it via `(target, edge_type, identifier)` for rendering / hygiene, but they are NOT the flow anchor. Implication: declare your catalogs (STEP 2b) FIRST, then anchor flows on those catalog ids (STEP 4). No catalog → no flow. Signature: `upsert_flow(component_id, incoming_catalog_id, outgoing_edge_id, metadata?, confidence?)`. `get_flow_inverse(component_id, outgoing_edge_id)` returns rows from the `catalogs` table (was: `edges`).
+
 ---
 
 ## 1. Orchestrator System Prompt

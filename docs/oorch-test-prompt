@@ -1,0 +1,315 @@
+   ---
+    DEMO7 — End-to-end verification (paste this whole block to orchestrator)
+
+    [DEMO7-START]
+
+    You are orchestrating a comprehensive end-to-end verification dance for Cartograph
+    covering Phase 4 + 4.1 + 4.2 (mutation/proxy lifecycle) + Phase 5 (admin UI tweaks +
+    audit + insights + persistence toggle) + Phase 7 (terminal acks, pre-merge handoff,
+    self-loops, catalogs first-class). This is a structured 11-phase test — each phase
+    verifies a specific feature surface.
+
+    == REPORT-BACK CONVENTIONS ==
+
+    Tag every status / observation message with one of:
+      [DEMO7-PHASE-N]    section header (N = 1..11)
+      [DEMO7-OK]         a verification passed
+      [DEMO7-FAIL]       a verification failed (note expected vs actual)
+      [DEMO7-BUG]        unexpected behavior worth flagging
+      [DEMO7-NOTE]       informational observation
+      [DEMO7-RESULT]     final scorecard at the end
+
+    The user will grep these prefixes and paste back to Claude for analysis.
+    DO NOT use these prefixes for anything else.
+
+    == TOPOLOGY ==
+
+    Spawn 4 SMEs covering 4 components:
+      sme-auth-1     → auth-svc (handles HTTP /verify endpoint)
+      sme-auth-2     → auth-svc-v2 (DUPLICATE of auth-svc — should merge)
+      sme-monolith   → monolith-x (contains BOTH "payments" and "feeds" — should split)
+      sme-cron       → cron-rebalance (CRON job, self-triggers daily — exercises self-loop)
+
+    You may use bulk_spawn_smes against a synthetic plane='github' resource set, or
+    create_agent individually. Either is fine.
+
+    == PHASE 1 — Setup + materialisation ==
+
+    Spawn the 4 SMEs. Each materialises its component:
+      - upsert_component with appropriate canonical_name, display_name,
+        component_type='application' (or 'cron' for sme-cron)
+      - upsert_attribution exhaustively (hostnames, deploy configs, etc.)
+
+    REPORT [DEMO7-PHASE-1] when all 4 SMEs have materialised.
+    REPORT [DEMO7-OK] for each component created.
+    List the 4 component_ids.
+
+    == PHASE 2 — Catalogs first-class (Phase 7.4) ==
+
+    Each SME declares catalogs using `upsert_catalog` (noun-form kind, NOT the
+    deprecated upsert_edge_catalog):
+
+      sme-auth-1:    upsert_catalog(component_id, kind='endpoint',
+                                    identifier='POST /verify')
+      sme-auth-1:    upsert_catalog(component_id, kind='endpoint',
+                                    identifier='GET /token')
+      sme-monolith:  upsert_catalog(component_id, kind='endpoint',
+                                    identifier='POST /payments/charge')
+      sme-monolith:  upsert_catalog(component_id, kind='endpoint',
+                                    identifier='GET /feeds/scores')
+      sme-cron:      upsert_catalog(component_id, kind='trigger_target',
+                                    identifier='daily-rebalance')
+
+    Then verify:
+      - sme-auth-1 calls get_my_catalogs() → expect 2 rows (POST /verify + GET /token)
+      - sme-cron   calls get_my_catalogs() → expect 1 row (daily-rebalance)
+
+    REPORT [DEMO7-PHASE-2] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL] for each catalog declaration + each get_my_catalogs result.
+
+    == PHASE 3 — Bound calls + unmatched-caller triage (Phase 7.4) ==
+
+    sme-auth-1 creates an outbound bound call to sme-monolith:
+      upsert_edge_outbound(from=auth-svc_id, to=monolith-x_id,
+                           edge_type='calls', identifier='POST /payments/charge')
+      → matches monolith's catalog. Verify by calling
+        get_my_catalog_callers from sme-monolith and confirm sme-auth-1 appears.
+
+    sme-auth-1 creates a SECOND outbound bound call with a non-matching identifier:
+      upsert_edge_outbound(from=auth-svc_id, to=monolith-x_id,
+                           edge_type='calls', identifier='POST /unknown-endpoint')
+      → does NOT match any monolith catalog. Verify by calling
+        get_unmatched_callers from sme-monolith and confirm '/unknown-endpoint'
+        appears.
+
+    sme-monolith triages: raise a clarification to sme-auth-1 asking "did you mean
+    to call /unknown-endpoint? I don't expose it." (sme-auth-1 should respond with
+    QC saying it was a typo / will fix.)
+
+    REPORT [DEMO7-PHASE-3] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL] for each verification.
+
+    == PHASE 4 — Self-loop edge (Phase 7.3) ==
+
+    sme-cron creates a bound edge from cron-rebalance to ITSELF:
+      upsert_edge_outbound(from=cron_component_id, to=cron_component_id,
+                           edge_type='triggers', identifier='daily-rebalance')
+
+    This used to be blocked by edges_no_self_loop_v2 + edges_check CHECK
+    constraints. Phase 7.3 dropped both. Verify the call succeeds.
+
+    REPORT [DEMO7-PHASE-4] section header.
+    REPORT [DEMO7-OK] if the self-loop edge was created without error.
+    REPORT [DEMO7-FAIL] if the call raised CheckViolation.
+
+    == PHASE 5 — Merge nomination + auto-escalation + resolver review ==
+
+    sme-auth-1 nominates a merge with sme-auth-2 (canonical_name + attributions
+    overlap). Use confidence ≥ 0.85 in the nomination message so it auto-escalates.
+
+    sme-auth-2 responds with confidence ≥ 0.85 (matching).
+
+    The auto_transitions scanner should escalate to R (resolver review) once both
+    scores are ≥ 0.85.
+
+    Resolver reviews: read the consolidation thread, verify evidence, approve with
+    new_status='M' and mutation_assigned_to=sme-auth-1.
+
+    REPORT [DEMO7-PHASE-5] section header.
+    REPORT [DEMO7-OK] for: nomination, response, auto-escalation visible (status='R'),
+                           resolver review (status='M', mutation_assigned_to set).
+
+    For Phase 5.6 verification: read the consolidation thread and confirm each
+    state-change message has metadata.confidence_at_send = {a, b, r}. Report
+    [DEMO7-OK] if every response has the snapshot, [DEMO7-FAIL] otherwise.
+
+    == PHASE 6 — Pre-merge handoff (Phase 7.2) + absorb (Phase 4) + terminal ack
+                (Phase 7.1) ==
+
+    This is the big one — exercises three Phase 7 features in sequence.
+
+      6a. PRE-MERGE HANDOFF (7.2):
+          sme-auth-1 (mutation POC) MUST raise a clarification to sme-auth-2
+          BEFORE absorb_agent:
+            create_clarification(asker=sme-auth-1, responder=sme-auth-2,
+              question_message="Pre-merge handoff: I'm about to absorb you. Brief me
+              on configs / runtime nuances / monitoring quirks NOT in your
+              component_doc_md / source_slice / attributions / edges / flows.
+              Respond with QC.")
+          sme-auth-2 responds with QC and a one-paragraph brief mentioning at least
+          one nuance (e.g., "deploy needs special env var AUTH_SECRET_KEY; on-call
+          rotation in pagerduty schedule SCHED-123").
+          sme-auth-1 reads the response and updates its own component_doc_md via
+          upsert_component to capture the brief.
+
+          REPORT [DEMO7-OK] if handoff happened in this order; [DEMO7-FAIL] if
+          sme-auth-1 absorbed without the clarification.
+
+      6b. ABSORB (4.1 cascade):
+          sme-auth-1 calls absorb_agent(consolidation_id, target=sme-auth-2,
+                                        deactivation_reason='merged',
+                                        deactivation_notes='auth-svc-v2 folded in')
+          with default cascade flags.
+
+          Verify:
+            - sme-auth-2.status = 'decommissioned'
+            - sme-auth-2.merged_into_agent_id = sme-auth-1
+            - sme-auth-2's attributions transferred to sme-auth-1's component
+            - sme-auth-2's component status = 'decommissioned'
+
+      6c. EXECUTE + COMPLETE (Phase 4):
+          sme-auth-1 calls execute_mutation → status M → MD.
+          Resolver calls complete_consolidation → status MD → D.
+
+      6d. TERMINAL ACK (7.1) — the new behaviour:
+          After complete_consolidation, the consolidation status is D. Both
+          sme-auth-1 (still active) AND resolver should now have this consolidation
+          in their `terminal_pending_ack` bucket. Verify by:
+            - sme-auth-1 calls get_action_items_summary → terminal_pending_ack > 0
+            - resolver calls get_action_items_summary → terminal_pending_ack > 0
+            - Each calls ack_terminal('consolidation', consolidation_id).
+            - Re-call get_action_items_summary → terminal_pending_ack drops to 0.
+
+          Verify decommissioned sme-auth-2 was AUTO-ACKED via absorb_agent (i.e.,
+          a row exists in terminal_acks for sme-auth-2 even though it never
+          explicitly acked).
+
+          REPORT [DEMO7-OK] for each verification step.
+
+    REPORT [DEMO7-PHASE-6] section header before any 6X work begins.
+
+    == PHASE 7 — Split + transfers (Phase 4.1) ==
+
+    sme-monolith nominates a split (carve out "payments" into a new component).
+    Status should land directly at R (no B2 — Phase 4 split rule).
+
+    Resolver reviews → M with mutation_assigned_to=sme-monolith.
+
+    sme-monolith calls spawn_child_agent with:
+      - child_id="sme-payments-split"
+      - component_data with appropriate canonical_name, display_name
+      - child_source_slice (the carved-out subset of monolith's slice)
+      - briefing: "You are the payments-svc carved from monolith-x. Your scope: ..."
+      - transfer_edge_ids: [the bound edge for /payments/charge]
+      - transfer_flow_ids: []  (or whatever flows exist)
+      - transfer_attribution_ids: [any attributions belonging to the payments part]
+
+    Verify:
+      - sme-payments-split exists with status='idle'
+      - The new component has split_from_component_id pointing to monolith
+      - The transferred edges/attributions now belong to sme-payments-split
+      - A welcome [split-welcome] task exists for sme-payments-split
+
+    sme-monolith calls execute_mutation → MD. Resolver calls complete_consolidation → D.
+
+    Both sme-monolith and resolver get terminal_pending_ack for THIS consolidation
+    too. Each acks via ack_terminal.
+
+    REPORT [DEMO7-PHASE-7] section header.
+    REPORT [DEMO7-OK] for each verification + the ack flow.
+
+    == PHASE 8 — Proxy inheritance (Phase 4) ==
+
+    Admin sends a chat message to sme-auth-2 (decommissioned).
+
+    Wait a few seconds. Then have sme-auth-1 query get_my_proxy_items() — verify
+    the chat from admin to sme-auth-2 surfaces under sme-auth-1's proxied items
+    (grouped by proxy_agent_id=sme-auth-2, depth=1).
+
+    sme-auth-1 responds via act_on_proxy_item:
+      act_on_proxy_item(survivor=sme-auth-1, item_type='chat', item_id=<chat_comm_id>,
+                        action='send',
+                        payload={proxy_agent_id='sme-auth-2', to_agent_id='admin',
+                                 message='Replying on behalf of sme-auth-2 (now decommissioned).'})
+
+    Verify:
+      - A new chat row exists from sme-auth-2 (the proxy) to admin
+      - A proxy_audit row exists for this act
+      - Admin sees the response in their chat history
+
+    REPORT [DEMO7-PHASE-8] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL] for each step.
+
+    == PHASE 9 — Insights (Phase 5.9) ==
+
+    Each of sme-auth-1, sme-monolith, sme-cron calls record_insight at least once
+    during the demo, capturing real observations:
+      record_insight(agent_id, kind, target, body, evidence?)
+    where kind ∈ {prompt_gap, tactic_win, tool_gap, doc_confusing, workflow_friction}.
+
+    For example:
+      sme-auth-1: record_insight(kind='tactic_win', target='absorb_agent',
+                                 body='Pre-merge handoff via clarification works
+                                 well — captured a deploy nuance that would have
+                                 been lost otherwise.')
+
+    REPORT [DEMO7-PHASE-9] section header.
+    REPORT [DEMO7-OK] with a count of insights recorded by SMEs.
+
+    == PHASE 10 — Persistence toggle + confidence-at-send round-trip ==
+
+    10a. PERSISTENCE TOGGLE (Phase 5.7):
+         Send a broadcast yourself with persistent=False to all SMEs.
+         Then call update_broadcast_persistence(comm_id, persistent=True).
+         Verify the row's is_persistent flipped via direct read or via /api/communications.
+
+    10b. CONFIDENCE-AT-SEND (Phase 5.6):
+         Already verified in Phase 5. Re-state the result here for completeness.
+
+    REPORT [DEMO7-PHASE-10] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL].
+
+    == PHASE 11 — MCP audit (Phase 5.10) ==
+
+    You have made many tool calls during this demo. The mcp_audit table should have
+    rows for every one. Spot-check by issuing a count query (you cannot directly
+    SELECT from the table via MCP — flag this if you don't have visibility, but the
+    admin UI exposes /api/mcp_audit?agent_id=...&limit=10 if you have HTTP access
+    via bash/curl).
+
+    Use bash + curl if available:
+      curl -s 'http://localhost:8200/api/mcp_audit?agent_id=sme-auth-1&limit=5'
+
+    Verify the returned entries include recent tool names like upsert_catalog,
+    absorb_agent, ack_terminal.
+
+    REPORT [DEMO7-PHASE-11] section header.
+    REPORT [DEMO7-OK] / [DEMO7-FAIL] / [DEMO7-NOTE] (if no HTTP access).
+
+    == FINAL SCORECARD ==
+
+    Once all 11 phases complete, emit a [DEMO7-RESULT] block with one line per
+    phase:
+      [DEMO7-RESULT] Phase 1 setup ............... PASS / FAIL — short summary
+      [DEMO7-RESULT] Phase 2 catalogs ............ PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 3 unmatched callers ... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 4 self-loop ........... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 5 merge nominate ...... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 6 handoff+absorb+ack .. PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 7 split+transfers ..... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 8 proxy inheritance ... PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 9 insights ............ PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 10 persistence toggle . PASS / FAIL — ...
+      [DEMO7-RESULT] Phase 11 mcp audit .......... PASS / FAIL — ...
+
+    Plus list every [DEMO7-BUG] line you emitted earlier (if any) at the bottom of
+    the scorecard so the user can quickly identify what to investigate.
+
+    == CLEANUP ==
+
+    After the scorecard, do NOT delete data automatically. Wait for the admin to
+    issue a cleanup command. Demo data is tagged via metadata where possible.
+
+    == TIMING ==
+
+    This is a long-running multi-agent dance. Trigger manager + agent manager will
+    wake the involved SMEs as needed. You may need to delegate work via tasks
+    (create_task with description = "Phase X step Y: <action to take>") and then
+    WAIT for the sub-task to complete (status WD or TC) before moving to the next
+    step. If something stalls >5 minutes on a single step, raise a [DEMO7-BUG]
+    with the stall description and continue if possible.
+
+    GO.
+    [DEMO7-END-OF-PROMPT]
+
+    ---

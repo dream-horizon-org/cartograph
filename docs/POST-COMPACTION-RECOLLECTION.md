@@ -1,12 +1,12 @@
-# Cartograph — Post-Compaction Recollection (2026-04-26)
+# Cartograph — Post-Compaction Recollection (2026-04-26, updated for 7.4.2)
 
 > **Read this FIRST after compaction.** Then `git log --oneline -50`,
 > then the 6 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
 > AGENT-PROMPTS / IMPLEMENTATION-PHASES / ONE-PAGER), then the 3
 > memory files. Once oriented, resume normal conversation.
 >
-> Written at 89% context. Goal: give a fresh-compacted session enough
-> state to resume coherently without replaying thousands of tool calls.
+> Goal: give a fresh-compacted session enough state to resume
+> coherently without replaying thousands of tool calls.
 
 ---
 
@@ -14,11 +14,14 @@
 
 - **Working dir:** `/Users/venkata.manohar/release-agent/docs/service-dependency/cartograph`
 - **Active branch:** `feat/trigger-manager-cartograh-mcp`
-- **HEAD:** `aadcadb` Phase 7.5 doc + memory sync
+- **HEAD:** `d8fe56f` Phase 7.4.2 (then a 7.4.3 doc-sync commit)
 - **Phase 6 (Globe) parked on separate branch:** `feat/globe-experimental` HEAD `1dae0c7` — includes `docs/GLOBE-MERGE-BRIEF.md` capturing all decisions for that branch. **Do NOT recreate Globe on main; merge that branch when ready.**
 
 Last commits on main (most recent first):
 ```
+<7.4.3 doc sync — pending; see §X below>
+d8fe56f Phase 7.4.2: flows reference catalogs first-class + admin UI catalog fixes
+ef3c4e7 Phase 7.4 follow-up: extend vector_search to include catalogs table
 aadcadb Phase 7.5: Final doc + memory sync across 6 docs
 595ef85 Phase 7.4: Catalogs as first-class table
 53a2894 Phase 7.3: Self-loop CHECK constraint relaxation
@@ -26,8 +29,6 @@ feecdc0 Phase 7.2: Pre-merge handoff convention via SME prompt
 b850a28 Phase 7.1: terminal-state ack model (replaces Phase 5.5 auto-ack)
 88319bc Phase 7 plan: terminal-acks + handoff + self-loops + catalogs first-class
 c67ecb3 Docs: pre-Phase-7 sync — add 5.12 to Phase 5 ship log + memory note
-bc483d7 Docs: sync HLD with Phase 5.12 (kind → type rename + ...)
-68027a6 UI: rename entity 'kind' → 'type' for consistency + ...
 ```
 
 ---
@@ -73,7 +74,9 @@ grep "tools registered" /tmp/cartograph_mcp.log | tail -1   # expect: 85 tools
 | 4.2 | ✅ | DEMO41 post-run fixes |
 | 5.1-5.12 | ✅ | Tweaks & improvements (12 sub-phases — routing, entities, catalog, insights, audit, persistence toggle, kind→type rename) |
 | **6** | **PARKED** | Globe sphere-constrained graph view — on `feat/globe-experimental` branch, NOT on main |
-| **7.1-7.5** | **✅ JUST SHIPPED** | Terminal acks + pre-merge handoff + self-loops + catalogs first-class + doc sync |
+| **7.1-7.5** | **✅ SHIPPED** | Terminal acks + pre-merge handoff + self-loops + catalogs first-class + doc sync |
+| **7.4.2** | **✅ SHIPPED 2026-04-26** | flows reference catalogs first-class (FK to catalogs) + admin UI `/api/components.catalog_count` + `/api/component/{id}/drilldown.catalog` fixes + `absorb_agent` catalog cascade + `spawn_child_agent` `transfer_catalog_ids` + FE field rename + mock_seed rewrite |
+| **7.4.3** | **✅ SHIPPED 2026-04-26** | Doc + memory sync across 6 docs |
 
 ---
 
@@ -241,11 +244,12 @@ From the user across many sessions:
 1. **1 SME = 1 active component.** SMEs write exactly one `upsert_component` per materialisation; splits go through Consolidation, not direct creation.
 2. **Edges (Phase 3.9):** asymmetric. Bound = both set (caller owns). Dangling = to NULL (caller owns). **Self-loops (from = to) accepted as of Phase 7.3.**
 3. **Catalogs (Phase 7.4):** OWN TABLE now, not edges. Owner-only declarations. Noun-form `kind`.
-4. **Flows reference catalog rows as `incoming_edge_id` canonically** — bound edges bridge via the kind ↔ edge_type mapping (across two tables now).
+4. **Flows reference catalog rows via `incoming_catalog_id` (Phase 7.4.2 — first-class FK to `catalogs`).** Outgoing is still an edge id. Bound caller edges bridge to the catalog via `(target, edge_type, identifier)` — for rendering / hygiene only, NOT the flow anchor. **No catalog → no flow.**
 5. **Junctions are routing scaffolding, NEVER real components in any logic/algo.**
 6. **Terminal ack:** every participant of a closed entity must explicitly `ack_terminal` — else trigger scanner re-wakes them. Replaces Phase 5.5 silent auto-ack.
 7. **Pre-merge handoff:** mutation POC MUST raise clarification to target before `absorb_agent` (convention, enforced via prompt).
 8. **No session reset needed for prompt changes** — `agent_manager.py:190` passes `--system-prompt` fresh on every `--resume`.
+9. **Mutation cascades (Phase 7.4.2):** `absorb_agent` runs an unconditional **catalog cascade** BEFORE the flow cascade (so flow.incoming_catalog_id refs land on survivor's catalogs). `spawn_child_agent` accepts `transfer_catalog_ids` for split.
 
 ---
 

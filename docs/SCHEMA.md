@@ -192,36 +192,54 @@ CREATE INDEX idx_edge_embedding ON edges USING hnsw (embedding vector_cosine_ops
 
 ### `flows`
 
-Phase 3.9. Set-based link between an incoming edge and an outgoing
-edge inside one component. Owned by the component's SME. Many-to-many
-(one incoming can fan out to multiple outgoings; multiple incomings
-can share an outgoing).
+Phase 3.9 + 7.4.2. Set-based link between an incoming **catalog** (a
+surface the component exposes) and an outgoing **edge** inside one
+component. Owned by the component's SME. Many-to-many (one catalog
+can fan out to multiple outgoings; multiple catalogs can share an
+outgoing).
+
+Phase 7.4.2 made the `incoming` reference first-class against
+`catalogs` (replacing the pre-7.4 indirection where the incoming was
+an `edges` row with `from_component_id IS NULL`). The catalog is
+canonically the flow's incoming anchor: bound caller edges map to it
+via the `(target, edge_type, identifier)` triple but are NOT the
+flow anchor themselves.
 
 ```sql
 CREATE TABLE flows (
-    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    component_id      UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
-    incoming_edge_id  UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
-    outgoing_edge_id  UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
-    confidence        FLOAT NOT NULL DEFAULT 1.0,
-    metadata          JSONB NOT NULL DEFAULT '{}',  -- multi-source evidence: code-source,
-                                                     -- telemetry trace, etc.
-    discovered_by     TEXT NOT NULL,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    UNIQUE (component_id, incoming_edge_id, outgoing_edge_id)
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    component_id         UUID NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+    incoming_catalog_id  UUID NOT NULL REFERENCES catalogs(id) ON DELETE CASCADE,
+                                                       -- Phase 7.4.2: replaces
+                                                       -- incoming_edge_id; flow incoming
+                                                       -- is canonically a catalog row
+    outgoing_edge_id     UUID NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+    confidence           FLOAT NOT NULL DEFAULT 1.0,
+    metadata             JSONB NOT NULL DEFAULT '{}',  -- multi-source evidence: code-source,
+                                                       -- telemetry trace, etc.
+    discovered_by        TEXT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_flows_component ON flows(component_id);
-CREATE INDEX idx_flows_incoming  ON flows(incoming_edge_id);
-CREATE INDEX idx_flows_outgoing  ON flows(outgoing_edge_id);
+CREATE INDEX idx_flows_component         ON flows(component_id);
+CREATE INDEX idx_flows_incoming_catalog  ON flows(incoming_catalog_id);
+CREATE INDEX idx_flows_outgoing          ON flows(outgoing_edge_id);
+CREATE UNIQUE INDEX flows_unique_catalog_incoming
+    ON flows (component_id, incoming_catalog_id, outgoing_edge_id);
 ```
 
 Tool-level invariants enforced in Python (cleaner errors than DB
-triggers): `incoming_edge.to_component_id = component_id`,
-`outgoing_edge.from_component_id = component_id`, caller owns
-`component_id` via RCA.
+triggers): `catalog.component_id = component_id` (the catalog is
+owned by the same component as the flow), `outgoing_edge.from_component_id
+= component_id`, caller owns `component_id` via RCA.
+
+**Mutation cascades (Phase 7.4.2):** `absorb_agent` cascades catalogs
+target→survivor BEFORE flows so flow.incoming_catalog_id refs land
+on survivor's catalogs. Catalog collisions (same kind+identifier on
+both sides) drop target's row, cascading any flows that referenced
+it. `spawn_child_agent` accepts `transfer_catalog_ids` to atomically
+carve catalogs into the child during a split.
 
 ### `unresolved`
 

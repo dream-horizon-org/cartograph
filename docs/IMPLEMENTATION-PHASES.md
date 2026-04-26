@@ -2796,6 +2796,136 @@ Net: 79 → 84 tools.
 
 ---
 
+## Phase 7.4.2: flows reference catalogs first-class + admin UI catalog endpoint fixes ✅
+
+**Shipped 2026-04-26.** Single commit `d8fe56f`.
+
+### Motivation
+
+Phase 7.4's catalog migration ran `DELETE FROM edges WHERE
+from_component_id IS NULL`. `flows.incoming_edge_id` had a hard FK to
+`edges` with `ON DELETE CASCADE` — so every flow whose incoming was a
+catalog row (the canonical pattern, per Phase 3.9 `mock_seed.py:354-361`)
+got cascade-deleted. Result: 0 flows post-migration.
+
+Two admin-UI endpoints also missed the migration: `/api/components`'s
+`catalog_count` column and `/api/component/{id}/drilldown`'s `catalog`
+bucket both still queried `edges WHERE from_component_id IS NULL`.
+Both returned 0 / empty for every component.
+
+### Schema change (idempotent migration)
+
+```sql
+ALTER TABLE flows DROP COLUMN incoming_edge_id;
+ALTER TABLE flows ADD COLUMN incoming_catalog_id UUID NOT NULL
+  REFERENCES catalogs(id) ON DELETE CASCADE;
+DROP CONSTRAINT flows_component_id_incoming_edge_id_outgoing_edge_id_key;
+CREATE UNIQUE INDEX flows_unique_catalog_incoming
+  ON flows (component_id, incoming_catalog_id, outgoing_edge_id);
+DROP INDEX idx_flows_incoming;
+CREATE INDEX idx_flows_incoming_catalog ON flows(incoming_catalog_id);
+```
+
+The migration is in `_migrate_edges_asymmetric` block (post-7.4
+catalogs creation) and idempotent across re-runs.
+
+### MCP tool changes
+
+- `upsert_flow(agent_id, component_id, incoming_catalog_id,
+  outgoing_edge_id, ...)` — param renamed; validates
+  `catalog.component_id == component_id`.
+- `get_flow(component_id, incoming_catalog_id)` — query updated.
+- `get_flow_inverse(component_id, outgoing_edge_id)` — **contract
+  change**: now returns rows from `catalogs` table (was: `edges`).
+- `get_stale_flows` — incoming-side staleness check dropped (catalogs
+  are owned by the same component, can't have a "dead counterparty");
+  only outgoing-side decommissioned-target check remains.
+
+### Mutation cascade additions
+
+- `absorb_agent` — added unconditional **catalog cascade** runs BEFORE
+  flow cascade. Re-points target's catalogs to survivor; drops on
+  `(kind, identifier)` collision (cascading any flows that referenced
+  the dropped catalog). New cascade counter `cascade.catalogs`.
+- `spawn_child_agent(... transfer_catalog_ids?)` — new optional
+  param to atomically carve catalogs into the child during a split.
+  Returns `transferred_catalogs`.
+
+### Admin UI changes
+
+- `/api/components.catalog_count` — sourced from `catalogs` table.
+- `/api/component/{id}/drilldown.edges.catalog` — sourced from
+  `catalogs`; reshaped to legacy edge-row shape so FE consumers don't
+  need a payload-shape change. Carries `catalog_kind` for richer
+  rendering.
+- `/api/graph` flows payload — `incoming_edge_id` →
+  `incoming_catalog_id`.
+
+### Frontend (`app.js`)
+
+- Field rename throughout (LOS BFS, hover lookups, junction grouping,
+  drill-down flow render).
+- Catalog drill-down now renders kind + identifier + confidence (no
+  spurious `→ to_component_id` arrow — catalogs are self-referential
+  surface declarations).
+- Cache-bust v=57 → v=58.
+
+### Mock seed (`mock_seed.py`)
+
+- `seed_edges` writes catalog rows into `catalogs` table.
+- `seed_flows` uses catalog UUIDs as `incoming_catalog_id`.
+- `cleanup` purges catalogs first so cascade clears flows cleanly.
+
+### SME prompt (`sme.py` STEP 4)
+
+Updated to teach the new model: flow incoming is ALWAYS a catalog id
+(not an edge id). Bound caller edges bridge to the catalog via
+`(target, edge_type, identifier)` for rendering / hygiene, but they
+are NOT the flow anchor. No catalog → no flow.
+
+### Tests
+
+- `test_flows.py` rewritten end-to-end (11 tests). Covers happy paths,
+  ownership, validation, idempotent merge, catalog DELETE cascade,
+  outgoing edge DELETE cascade, fan-out, unknown catalog refusal,
+  foreign-component catalog refusal.
+- `test_mutation.py` — 5 flow-insert sites updated; cascade
+  assertions adjusted; stale-flow test re-keyed on outgoing-side.
+- `test_catalog_endpoint.py` — drill-down test seeds catalog into
+  catalogs table; new regression test for `catalog_count`.
+
+### Verified post-deploy
+
+- 495 / 505 tests green (10 pre-existing failures unrelated to this
+  change).
+- Mocks re-seeded: 25 components, 26 catalogs, 66 edges, 22 flows.
+- /api/graph flows[0] carries `incoming_catalog_id`.
+- /api/components feeds-api `edge_count.catalog == 2` (was 0).
+- Drill-down `edges.catalog` populated.
+
+### Files touched
+
+- `src/shared/migrations.py`
+- `src/cartograph_mcp/server.py`, `tools/components.py`, `tools/mutation.py`
+- `src/admin_ui/server.py`, `mock_seed.py`, `static/app.js`, `static/index.html`
+- `src/agent_management/agent_types/sme.py`
+- `tests/mcp_tools/test_flows.py`, `test_mutation.py`
+- `tests/admin_ui/test_catalog_endpoint.py`
+
+**Effort:** S (~2 hours including tests + verify).
+
+---
+
+## Phase 7.4.3: doc + memory sync ✅
+
+**Shipped 2026-04-26.** Single commit. Updates HLD / SCHEMA /
+IMPLEMENTATION-PHASES / TRIGGER-MANAGEMENT / AGENT-PROMPTS /
+POST-COMPACTION-RECOLLECTION docs + memory `cartograph_state.md` to
+reflect Phase 7.4.2's flows-reference-catalogs model. ONE-PAGER.md
+unchanged.
+
+---
+
 ## Phase 8+: Future phases (planned, not started)
 
 **Phase 8 — Phase-flow completion** (orchestrator-driven sweeps):
