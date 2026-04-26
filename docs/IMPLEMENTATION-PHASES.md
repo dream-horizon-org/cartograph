@@ -1977,9 +1977,17 @@ Single commit `59a6a4f` with 2 new tests (include_empty surfacing depth-2; trans
 - `28f25de` — 5.8 admin chat wakes from sleep fix
 - `1e0ecbc` — 5.9 record_insight + agent_insights + UI
 - `1e27f54` — 5.10 mcp_audit decorator + table
-- (this commit) — 5.11 doc + memory sync
+- `7cae011` — 5.11 doc + memory sync
+- `68027a6 + bc483d7` — 5.12 entity `kind → type` rename for FE consistency, entity-ref pill on Communications rows (cross-tab drill-in), persistence toggle on Entities broadcast rows (mirrors Communications toggle)
 
 Final test count: ~510 (up from 383). MCP tool count: **79** (up from 77 — added `update_broadcast_persistence` + `record_insight`). Two new tables: `agent_insights`, `mcp_audit`.
+
+**5.12 specifics:**
+- `/api/entities` query param + JSON response field: `kind → type` (canonical now across both Communications and Entities)
+- `/api/entity/{kind}/{id}` URL path: renamed to `/api/entity/{type}/{id}`
+- Entities tab Type filter dropdown labeled "Type" (was "Kind")
+- Communications rows render `type/<short-id>` pills that SPA-navigate to `/entities/{type}/{id}` (cross-tab cross-reference)
+- Entities-tab broadcast rows render the same 📌 / ↪ persistence toggle as Communications
 
 One bundle of admin-UI navigation, communication-hygiene fixes, and a self-improvement feedback loop for the agent system. Sub-numbered for commit cadence; all roll up to Phase 5. Ships incrementally — each sub-phase is its own commit + push.
 
