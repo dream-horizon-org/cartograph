@@ -144,6 +144,92 @@ examples + de-dup note.
 
 ---
 
+### 2.9 Holistic-edge invariant — IDENTIFIER NORMALISATION rule + delete_edge tool (2026-04-27, commits `72b4a93` + `84b0941`)
+
+**Symptom:** sme-7f4a958a (feeds-aggregator-v2-aurora) ended up with
+two edges for the same Aurora master after absorbing a github SME:
+
+| edge id | discovered via | identifier |
+|---|---|---|
+| `0236cd0d` | telemetry plane | `feeds-aggregator-v2-aurora-master.dream11.local` |
+| `8f9c82ad` | github plane (transferred to me on absorb) | `feeds-aggregator-v2-aurora-master.dream11.local/FeedsAggregatorV2` |
+
+The SME flagged this as a violation of the "edges are holistic"
+invariant from my prompt + SCHEMA.md ("one row per call/query, multi-
+source metadata accumulates — never multiple rows"). They were
+correct; their analysis matched my prompt verbatim. They also flagged
+that there's no `delete_edge` tool, so the only post-discovery
+recovery was metadata-marking the duplicate as superseded.
+
+**Prompt-design root cause:** the holistic-edge invariant only holds
+if the IDENTIFIER STRING is byte-identical across planes for the same
+logical dependency. The DB unique index is `(from, to, edge_type,
+identifier)` — different strings ⇒ different rows ⇒ duplicate edges
+⇒ split evidence. My prompt said "metadata accumulates" but **never
+told SMEs to normalise the identifier across planes BEFORE writing**.
+Telemetry SMEs naturally surface bare hostname (Last9 spans show
+`db.host`); github SMEs naturally surface `host/dbname` (JDBC URL).
+Both correct in isolation; the gap was the missing normalisation
+contract.
+
+**Tool gap:** no `delete_edge(agent_id, edge_id)` MCP tool existed.
+The full edge-write surface was create_edge (legacy shim),
+upsert_edge_outbound, bind_edge, transfer_edges (mutation-scoped).
+None remove rows. decommission_component cascades them on full
+component teardown, but nothing for "this single duplicate is wrong."
+
+**Fix #1 (commit `72b4a93`) — `delete_edge` MCP tool:**
+- Owner-scoped: caller must own `from_component_id` (the row's
+  caller-side owner). Catalog rows (from IS NULL — pre-Phase-7.4
+  remnants) refuse with `reason='catalog_not_supported'`.
+- Idempotent: deleting non-existent edge_id returns
+  `{deleted: False, reason: 'not_found'}` rather than raising.
+- Cascade: `flows.outgoing_edge_id` has ON DELETE CASCADE — flows
+  anchored on the edge are removed atomically. Cascaded count
+  reported in the response for telemetry.
+- Tool count: 85 → 86.
+
+**Fix #2 (commit `84b0941`) — SME prompt: IDENTIFIER NORMALISATION
+rule (STEP 3) + post-merge EDGE DEDUP step:**
+- New IDENTIFIER NORMALISATION block in STEP 3 (CRITICAL — edges are
+  HOLISTIC). Concrete normalisation per identifier class:
+  - DB hosts: drop `/dbname` suffix; DB name → `metadata.db_name`.
+  - HTTP endpoints: lowercase host, drop trailing slashes + query
+    strings; templatise path params (`/users/{{id}}`).
+  - Kafka topics / SQS queues: bare name only.
+  - Heuristic: "would another SME observing this same dep from a
+    different plane write the SAME identifier string?" If no,
+    normalise more.
+  - Tiebreak rule: write the LEANER form (what telemetry naturally
+    surfaces); put richer details in metadata. Telemetry rarely
+    has richer details; code-readers almost always do.
+- New EDGE DEDUP — MANDATORY step in the post-merge / post-split
+  refresh block. Concrete pseudocode walking inherited edges,
+  finding (target, edge_type) pairs with different identifiers,
+  picking canonical, merging metadata via `upsert_edge_outbound`,
+  then `delete_edge` on the duplicate.
+- "Mutation isn't done at MD — it's done after refresh + edge-
+  dedup. Then ack_terminal once the consolidation hits D."
+
+**Hot-fix in same commit:** smoke-testing the prompt template caught
+a stray single-brace `'/v1/users/{id}'` in the URL example I added —
+Python's `str.format()` would have crashed with `KeyError: 'id'` on
+every SME spawn (same class as the earlier `{get,post}` bug). Doubled
+to `'/v1/users/{{id}}'`. Going forward: every prompt edit must run a
+`SYSTEM_PROMPT_TEMPLATE.format(plane='x', resource_id='y')` smoke
+test before commit.
+
+**Companion:** sme-7f4a958a's insight `db290ec3` is the canonical
+reference. Promote it to status='promoted' in the Insights tab.
+
+**Open follow-ups:**
+- A scheduled / on-demand graph hygiene scan that finds duplicate
+  edges across components (not just within the same SME's scope) —
+  would catch the same pattern when it comes from cross-SME
+  discovery rather than post-merge inheritance. Track separately.
+
+---
+
 ### 2.8 Mass infusion of §3 backlog into agent prompts (2026-04-27)
 
 **Symptom:** PROMPT-ENHANCEMENTS.md backlog had grown to 12+ §3
