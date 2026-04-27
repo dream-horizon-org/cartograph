@@ -142,6 +142,14 @@ Act — component graph (your own component only):
 - upsert_edge_catalog(agent_id, edge_data) — DEPRECATED shim that
   forwards to upsert_catalog (verb edge_type → noun kind). Use
   upsert_catalog directly.
+- delete_edge(agent_id, edge_id) — owner-scoped, idempotent. Removes
+  one bound or dangling edge row you own (caller must own
+  from_component_id). Cascades flows.outgoing_edge_id rows
+  (ON DELETE CASCADE). Use this for post-merge edge dedup (see the
+  IDENTIFIER NORMALISATION + post-merge refresh sections below) —
+  upsert the canonical (richer-identifier) row with the union of
+  metadata, then delete_edge the leaner-identifier duplicate.
+  Catalog rows (from IS NULL) refuse with 'catalog_not_supported'.
 
 Act — consolidation:
 - nominate_consolidation(agent_id, component_a_id, component_b_id?,
@@ -504,6 +512,32 @@ STEP 3 — Outbound references you find while reading your resource
        with to_component_id=NULL + insert_unresolved with NO
        candidate. Resolution phase (config SMEs) links it later.
        Noise floor is ~0.40-0.50; don't guess in 0.50-0.60.
+
+  IDENTIFIER NORMALISATION (CRITICAL — edges are HOLISTIC).
+  The "edges holistic" rule (one row per call/query, multi-source
+  metadata accumulates) only works if the IDENTIFIER you write is
+  the SAME byte-string across planes for the same logical
+  dependency. The unique index is (from, to, edge_type,
+  identifier) — different identifier strings ⇒ different rows ⇒
+  duplicate edges and split evidence. Normalise BEFORE writing:
+    - DB hosts: write 'feeds-aurora.dream11.local', NOT
+      'feeds-aurora.dream11.local/FeedsAggregatorV2' (drop the
+      DB-name suffix from JDBC URLs and connection strings).
+      The DB name belongs in metadata.db_name, not the identifier.
+    - HTTP endpoints: lowercase host, drop trailing slashes, drop
+      query strings. '/v1/users/123?cache=miss' → '/v1/users/{{id}}'
+      where you can templatise the path; otherwise just '/v1/users'.
+    - Kafka topics / SQS queues: bare topic / queue name only;
+      cluster / region info goes in metadata.
+    - Generally: ASK 'would another SME observing this same dep
+      from a different plane write the SAME identifier string?'
+      If no, normalise more.
+  When in doubt, write the LEANER form (what telemetry naturally
+  surfaces — bare hostname, bare endpoint path) and put richer
+  details (DB name, port, scheme) in metadata. Telemetry SMEs
+  almost never have the richer details; code-reading SMEs almost
+  always do. Putting richer details in metadata lets both sides
+  collide on the same identifier.
 
   DANGLING EDGE = TWO WRITES, ALWAYS BOTH.
   Every dangling outbound (bands 3 + 4) requires BOTH calls in
@@ -1109,9 +1143,46 @@ ANALYSIS DEPTH for each materialisation/merge/split decision:
     EXISTING rows from the absorbed side to you, but doesn't
     discover NEW evidence in code you've now inherited — that's
     YOUR job on the next wake.
+  * **EDGE DEDUP — MANDATORY** (you now own both planes' worth
+    of inherited edges; the holistic-edge invariant says one row
+    per logical dependency, not one per discovery plane). Walk
+    your inherited edges via get_component_edges(your_id) and
+    look for pairs that point at the SAME (to_component_id,
+    edge_type) but have slightly different identifiers — typical
+    pattern is one bare-hostname row (telemetry-discovered) +
+    one host/dbname or host/path row (github-discovered):
+      for edge in outgoing_bound:
+          peer = find_other_with_same(target=edge.to_component_id,
+                                       type=edge.edge_type,
+                                       different_identifier=True)
+          if peer:
+              # Pick the canonical row: prefer the leaner identifier
+              # (matches the IDENTIFIER NORMALISATION rule above —
+              # what telemetry naturally surfaces, so future writes
+              # collide). If the richer one carries useful detail
+              # (DB name, path template), move it to metadata.db_name
+              # / metadata.path_template on the canonical row.
+              canonical = pick_leaner_identifier(edge, peer)
+              other     = the_other_one
+              upsert_edge_outbound(your_id, {{
+                "from_component_id": canonical.from_component_id,
+                "to_component_id":   canonical.to_component_id,
+                "edge_type":         canonical.edge_type,
+                "identifier":        canonical.identifier,
+                "metadata":          {{**canonical.metadata, **other.metadata,
+                                       "db_name": extract_db_name(other.identifier),
+                                       "merged_from_edge_id": other.id,
+                                       "merged_from_plane": other_plane,
+                                       "merged_at": now()}},
+              }})
+              delete_edge(your_id, other.id)
+    Without this dedup the graph carries phantom dependencies and
+    blast-radius / impact analysis double-counts. delete_edge is
+    owner-scoped + idempotent; cascades flows automatically.
   * Update component_doc_md to reflect the new scope.
   Do NOT consider the mutation "done" at MD — it's done after
-  refresh. Then ack_terminal once the consolidation hits D.
+  refresh + edge-dedup. Then ack_terminal once the consolidation
+  hits D.
 
 == WORKSPACE: PRE-MERGE DETAIL CAPTURE ==
 Your workspace under `./` is PRIVATE — only YOU read it; no other
