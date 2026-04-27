@@ -474,6 +474,27 @@ body {
 }
 .component-tag-inline { margin-left: 4px; }
 
+.plane-sym {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  vertical-align: middle;
+}
+
+/* Phase 7.4.9: dim component tag when the agent is decommissioned so
+   historical Communications rows are visually distinct from active
+   ones — the tag still renders (via the all-agents cache), just muted. */
+.component-tag-inline.component-tag-decom {
+  opacity: 0.45;
+  text-decoration: line-through;
+  text-decoration-thickness: 0.6px;
+}
+
 .group-actions {
   display: inline-flex;
   gap: 4px;

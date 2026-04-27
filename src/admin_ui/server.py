@@ -4,14 +4,15 @@ Lightweight web UI for humans to chat with any agent. Reads/writes the
 communications table directly via shared/db.py.
 """
 
+import json
 import logging
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -52,10 +53,57 @@ class WakeBody(BaseModel):
     )
 
 
+_CLIENT_LOG_DIR = Path("/tmp/cartograph-logs")
+_CLIENT_LOG_PATH = _CLIENT_LOG_DIR / "browser.log"
+
+
+def _append_client_log(payload: dict[str, Any]) -> None:
+    """Append one JSON line to /tmp/cartograph-logs/browser.log.
+
+    Best-effort. Logger swallows write failures so client crash capture
+    never affects the response. Each line is `{server_ts} {client_ts}
+    {event} {detail_json}` for easy `grep` / `tail -f`.
+    """
+    try:
+        _CLIENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        line = (
+            f"{datetime.utcnow().isoformat()}Z "
+            f"{payload.get('ts', '')} "
+            f"{payload.get('event', 'unknown')} "
+            f"{json.dumps(payload, default=str)}"
+        )
+        with _CLIENT_LOG_PATH.open("a") as f:
+            f.write(line + "\n")
+    except Exception:
+        logger.exception("client log write failed")
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Cartograph Admin UI")
 
     # --- API ROUTES ---
+
+    @app.post("/api/clientlog")
+    async def client_log(req: Request):
+        """Capture browser-side error / crash signals — window.error,
+        unhandledrejection, webglcontextlost, beforeunload. Posted by
+        app.js hooks. Appends one JSON line per event to
+        /tmp/cartograph-logs/browser.log so the developer can
+        `grep webglcontextlost /tmp/cartograph-logs/browser.log`.
+
+        Why this exists: Chrome's GPU process can die mid-session
+        (Exit code 5 → "GPU process crashed" → after 11 crashes Chrome
+        blocklists WebGL entirely). Without this endpoint the developer
+        has no on-disk evidence of WHEN the crash happened or what the
+        graph state was at the time. Server can't see the browser; this
+        is the only path.
+        """
+        try:
+            body = await req.json()
+        except Exception:
+            body = {"raw": (await req.body()).decode("utf-8", "replace")}
+        _append_client_log(body)
+        return {"ok": True}
 
     @app.get("/api/agents")
     def list_agents(include_decommissioned: bool = Query(False)):
@@ -72,21 +120,41 @@ def create_app() -> FastAPI:
         # component and come back with NULLs. Aggregating via DISTINCT ON
         # keeps it to one row per agent even if an SME somehow has
         # multiple (resource, component) rows.
+        # resource_planes is the canonical "what plane(s) does this
+        # agent's resource cover" — used by the FE to render G/C/T/D
+        # plane symbols next to the component tag in the agent list.
+        # Two-level query: inner picks the (component, resource) pair
+        # via DISTINCT ON; outer aggregates resource planes per agent.
         rows = execute(
-            f"""SELECT DISTINCT ON (ar.agent_id)
-                   ar.agent_id, ar.agent_type, ar.status, ar.sleep_until,
-                   ar.created_at, ar.deactivation_reason,
-                   ar.deactivation_notes, ar.merged_into_agent_id,
-                   c.id            AS component_id,
-                   c.canonical_name AS component_canonical,
-                   c.display_name   AS component_display,
-                   c.status         AS component_status
-                FROM agent_runs ar
-                LEFT JOIN resource_component_agents rca ON rca.agent_id = ar.agent_id
-                LEFT JOIN components c ON c.id = rca.component_id
-                {where}
-                ORDER BY ar.agent_id,
-                  CASE c.status WHEN 'active' THEN 0 WHEN 'deprecated' THEN 1 ELSE 2 END"""
+            f"""WITH base AS (
+                  SELECT DISTINCT ON (ar.agent_id)
+                       ar.agent_id, ar.agent_type, ar.status, ar.sleep_until,
+                       ar.created_at, ar.deactivation_reason,
+                       ar.deactivation_notes, ar.merged_into_agent_id,
+                       c.id            AS component_id,
+                       c.canonical_name AS component_canonical,
+                       c.display_name   AS component_display,
+                       c.status         AS component_status
+                    FROM agent_runs ar
+                    LEFT JOIN resource_component_agents rca ON rca.agent_id = ar.agent_id
+                    LEFT JOIN components c ON c.id = rca.component_id
+                    {where}
+                    ORDER BY ar.agent_id,
+                      CASE c.status WHEN 'active' THEN 0 WHEN 'deprecated' THEN 1 ELSE 2 END
+                )
+                SELECT base.*,
+                       COALESCE(
+                         ARRAY_AGG(DISTINCT r.plane) FILTER (WHERE r.plane IS NOT NULL),
+                         ARRAY[]::text[]
+                       ) AS resource_planes
+                FROM base
+                LEFT JOIN resource_component_agents rca2 ON rca2.agent_id = base.agent_id
+                LEFT JOIN resources r ON r.id = rca2.resource_id
+                GROUP BY base.agent_id, base.agent_type, base.status, base.sleep_until,
+                         base.created_at, base.deactivation_reason,
+                         base.deactivation_notes, base.merged_into_agent_id,
+                         base.component_id, base.component_canonical,
+                         base.component_display, base.component_status"""
         )
         # Re-sort by type priority after DISTINCT ON (which forced agent_id order).
         priority = {"orchestrator": 0, "resolver": 1, "sme": 2, "iterator": 3}
@@ -261,6 +329,7 @@ def create_app() -> FastAPI:
         to_agent_type: Optional[str] = Query(None),
         agent: Optional[str] = Query(None),
         agent_type: Optional[str] = Query(None),
+        participant_component: Optional[str] = Query(None),
         type: Optional[str] = Query(None),
         source_id: Optional[str] = Query(None),
         before: Optional[str] = Query(None),
@@ -354,6 +423,31 @@ def create_app() -> FastAPI:
         if before:
             where.append("c.created_at < %s")
             params.append(before)
+        if participant_component:
+            # Phase 7.4.9: filter rows where EITHER side's agent owns a
+            # component whose canonical_name OR display_name matches
+            # ILIKE %query%. Sub-query joins agent_runs → RCA → components.
+            # Includes decommissioned agents + decommissioned components
+            # so the filter works for historical traffic too. The
+            # 'admin' literal is excluded naturally (no RCA row).
+            like = f"%{participant_component}%"
+            where.append(
+                "("
+                "  c.from_agent IN ("
+                "    SELECT rca.agent_id FROM resource_component_agents rca "
+                "    JOIN components co ON co.id = rca.component_id "
+                "    WHERE co.canonical_name ILIKE %s "
+                "       OR co.display_name ILIKE %s"
+                "  )"
+                "  OR c.to_agent IN ("
+                "    SELECT rca.agent_id FROM resource_component_agents rca "
+                "    JOIN components co ON co.id = rca.component_id "
+                "    WHERE co.canonical_name ILIKE %s "
+                "       OR co.display_name ILIKE %s"
+                "  )"
+                ")"
+            )
+            params.extend([like, like, like, like])
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
         rows = execute(
@@ -727,26 +821,28 @@ def create_app() -> FastAPI:
         if before:
             where.append("c.canonical_name > %s")
             params.append(before)
-        # Plane filter requires a join — express as EXISTS to avoid
-        # multiplying rows when a component has multiple planes.
+        # Plane filter sources from RCA→resources.plane (canonical:
+        # what plane the component LIVES on, not where evidence was
+        # discovered). attributions.plane is discovery-plane and would
+        # mis-classify (e.g. github SME finding a hostname tags
+        # plane=github even though the hostname "feels" deploy-y).
         if plane:
             where.append(
-                "EXISTS (SELECT 1 FROM attributions ap WHERE ap.component_id = c.id "
-                "AND ap.plane = %s)"
+                "EXISTS (SELECT 1 FROM resource_component_agents rca_p "
+                "JOIN resources r_p ON r_p.id = rca_p.resource_id "
+                "WHERE rca_p.component_id = c.id AND r_p.plane = %s)"
             )
             params.append(plane)
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
-        # Phase 7.4.2: catalog_count now sources from `catalogs` table
-        # (Phase 7.4 promoted catalogs to a first-class noun-form table;
-        # the old `edges WHERE from IS NULL` query returned 0 for every
-        # row post-migration). Bound + dangling continue to come from
-        # `edges` since they're caller-owned.
+        # planes column sources from RCA→resources.plane (see plane
+        # filter above for rationale). attribution_count keeps its own
+        # join since it's a count, not a plane-derived value.
         rows = execute(
             f"""SELECT c.id, c.canonical_name, c.display_name,
                        c.component_type, c.status,
                        COALESCE(
-                         ARRAY_AGG(DISTINCT a.plane) FILTER (WHERE a.plane IS NOT NULL),
+                         ARRAY_AGG(DISTINCT r.plane) FILTER (WHERE r.plane IS NOT NULL),
                          ARRAY[]::text[]
                        ) AS planes,
                        COUNT(DISTINCT a.id) AS attribution_count,
@@ -760,8 +856,8 @@ def create_app() -> FastAPI:
                            AND e_dang.from_component_id = c.id
                        ) AS dangling_count,
                        (
-                         SELECT rca.agent_id FROM resource_component_agents rca
-                         WHERE rca.component_id = c.id LIMIT 1
+                         SELECT rca2.agent_id FROM resource_component_agents rca2
+                         WHERE rca2.component_id = c.id LIMIT 1
                        ) AS owner_sme_id
                 FROM components c
                 LEFT JOIN attributions a ON a.component_id = c.id
@@ -769,6 +865,8 @@ def create_app() -> FastAPI:
                   ON (e_bound.from_component_id = c.id OR e_bound.to_component_id = c.id)
                 LEFT JOIN catalogs cat ON cat.component_id = c.id
                 LEFT JOIN edges e_dang ON e_dang.from_component_id = c.id
+                LEFT JOIN resource_component_agents rca ON rca.component_id = c.id
+                LEFT JOIN resources r ON r.id = rca.resource_id
                 {where_sql}
                 GROUP BY c.id
                 ORDER BY c.canonical_name ASC
@@ -792,14 +890,19 @@ def create_app() -> FastAPI:
         """Single round-trip for the Catalog drill-down panel: component
         row + attributions + edges (split into 4 buckets per Phase 3.9
         protocol) + flows + source resources."""
+        # planes sourced from RCA→resources.plane (canonical: what
+        # plane the component LIVES on). attributions.plane is
+        # discovery-plane and conflates source-of-evidence with
+        # category-of-component.
         component = execute_one(
             """SELECT c.*,
                       COALESCE(
-                        ARRAY_AGG(DISTINCT a.plane) FILTER (WHERE a.plane IS NOT NULL),
+                        ARRAY_AGG(DISTINCT r.plane) FILTER (WHERE r.plane IS NOT NULL),
                         ARRAY[]::text[]
                       ) AS planes
                FROM components c
-               LEFT JOIN attributions a ON a.component_id = c.id
+               LEFT JOIN resource_component_agents rca ON rca.component_id = c.id
+               LEFT JOIN resources r ON r.id = rca.resource_id
                WHERE c.id = %s::uuid
                GROUP BY c.id""",
             (component_id,),
@@ -895,16 +998,20 @@ def create_app() -> FastAPI:
         convention; NULL endpoints anchor to a synthetic "stub" node
         on the FE side (handled client-side).
         """
+        # planes sourced from RCA→resources.plane (canonical: what
+        # plane the component LIVES on). See /api/components for
+        # rationale.
         nodes = execute(
             """SELECT c.id, c.canonical_name, c.display_name,
                       c.component_type, c.status, c.component_doc_md,
                       c.source_slice,
                       COALESCE(
-                        ARRAY_AGG(DISTINCT a.plane) FILTER (WHERE a.plane IS NOT NULL),
+                        ARRAY_AGG(DISTINCT r.plane) FILTER (WHERE r.plane IS NOT NULL),
                         ARRAY[]::text[]
                       ) AS planes
                FROM components c
-               LEFT JOIN attributions a ON a.component_id = c.id
+               LEFT JOIN resource_component_agents rca ON rca.component_id = c.id
+               LEFT JOIN resources r ON r.id = rca.resource_id
                WHERE c.status != 'decommissioned'
                GROUP BY c.id
                ORDER BY c.canonical_name"""

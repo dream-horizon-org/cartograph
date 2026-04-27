@@ -661,7 +661,11 @@ ack_chats(agent_id, communication_ids[])
 ```
 send_broadcast(from_agent_id, to_agent_type, message, persistent=False)
   Inserts communication (type='broadcast', to_agent_type=<type>,
-  is_persistent=<flag>). Only orchestrator/admin can broadcast.
+  is_persistent=<flag>). Only orchestrator/admin can broadcast —
+  iterators + SMEs + resolver get `Only orchestrator or admin can send
+  broadcasts` if they try. Codified in agent prompts: iterators
+  propose via chat → orch publishes; orch never tasks a non-orch
+  agent with `send_broadcast`.
   persistent=False (default) → forward-only, only agents existing at
   send time see it. persistent=True → also applies to agents spawned
   later (standing policy).
@@ -905,11 +909,20 @@ reset_agent(agent_id, target_agent_id)
   Use after the bounded auto-recovery (3 attempts) has given up.
 
 sleep_self(agent_id, duration_seconds, reason)
-  Any active agent. Self-sleep up to 7 days (duration_seconds ≤ 604800).
-  Sets agent_runs.sleep_until = now() + duration_seconds. Trigger scanner
+  Any active agent. Self-sleep up to 7 days (duration_seconds ≤ 604800)
+  is the SCHEMA cap; the policy cap is much tighter. Sets
+  agent_runs.sleep_until = now() + duration_seconds. Trigger scanner
   skips sleeping agents in its idle-lock filter (see §2.1 step 2).
   Admin chat to a sleeping agent auto-wakes it. Broadcasts, tasks, and
   orchestrator-to-agent chats do NOT interrupt sleep.
+
+  POLICY (per agent prompts, 2026-04-27): sleep_self is a LAST RESORT,
+  not a default response to "I finished my task." Yielding does NOT
+  burn cost — the trigger scanner only re-wakes on real work. Use
+  sleep ONLY when blocked on admin / external dependency AND already
+  prompted twice. Even then: 300–600 seconds (5–10 min) MAX. Never
+  86400 (24h); never >3600 (1h). Long sleeps block the pipeline.
+  Codified in SME / iterator / orchestrator prompts.
 
 bulk_sleep_agents(agent_id, until, reason, agent_ids?, agent_type?)
   Orchestrator/admin only. Puts a cohort to sleep until an ISO-8601

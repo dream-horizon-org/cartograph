@@ -79,6 +79,24 @@ Every agent is a **persistent, stateful process** with its own tools and workspa
 
 **Shared runtime:** All agents share the same machine and OS environment. A tool installed by one agent (via bash) is available to all agents on their next bash call. This is why only iterators are permitted to install — prevents race conditions from parallel installs.
 
+### 2.1.1 Per-type Model + Reasoning Effort
+
+`AgentTypeConfig` (`src/agent_management/agent_types/base.py`) carries
+`model: str` and `effort: str | None` per agent type so high-volume
+agents use cheaper models and singleton coordinators get heavier
+reasoning. Defaults:
+
+| Type | Model | Effort | Rationale |
+|---|---|---|---|
+| orchestrator | `claude-opus-4-6` | `medium` | Singleton coordination + user chat |
+| resolver | `claude-opus-4-6` | `medium` | Singleton merge/split gatekeeper |
+| iterator | `claude-sonnet-4-6` | (default) | High-volume enumeration |
+| sme | `claude-sonnet-4-6` | (default) | Per-component, fan-out scale |
+
+`agent_manager.py` cmd list appends `--model <id>` unconditionally and
+`--effort <level>` when set. System prompt is rebuilt from disk on
+every spawn (no agent_manager restart needed when prompts change).
+
 ### 2.2 Agent Types
 
 ```
@@ -1292,12 +1310,18 @@ Chat view (the original 1:1 admin↔agent view):
 GET /api/agents?include_decommissioned=(true|false)
   Returns: [{agent_id, agent_type, status, sleep_until, created_at,
             deactivation_reason, deactivation_notes, merged_into_agent_id,
-            component_id, component_canonical, component_display, component_status}]
+            component_id, component_canonical, component_display, component_status,
+            resource_planes[]}]
   Default excludes decommissioned. Pass include_decommissioned=true to
   audit merged/absorbed agents (Phase 4). Each SME row also surfaces its
   managed component (via LEFT JOIN on resource_component_agents + components)
   so the UI can render a "📦 Display Name" pill inline — non-SMEs return
   NULLs in the component_* fields.
+  Phase 7.4.7: `resource_planes[]` aggregates the agent's resource plane
+  (RCA→resources.plane). The agent-list UI renders one plane symbol per
+  entry next to the component tag (G/C/T/D/F = github/cloud/telemetry/
+  deploy/config) so admin can tell at a glance what plane(s) an agent
+  covers without opening the drill-down.
 
 GET /api/agent/:agent_id/chain
   Returns: {chain: [...]}
@@ -1362,10 +1386,31 @@ POST /api/broadcast
                          to_agent_type=<type>, type='broadcast').
   Admin short-circuits the need to ask orchestrator.
 
-GET /api/graph                        → {nodes, edges}   (Phase 3.5)
+GET /api/graph                        → {nodes, edges, flows}   (Phase 3.5; Phase 7.4.7 plane source)
   Nodes: active components with aggregated plane set + component_doc_md.
-  Edges: edges table (join filtered to active components on both sides).
+  Edges: edges table UNION catalogs (Phase 7.4) — discriminated by `kind`
+    (bound / catalog / dangling).
+  Flows: flows table for the 3.10 line-of-sight BFS.
+  Phase 7.4.7: node `planes[]` is now sourced from
+    `resource_component_agents → resources.plane` (canonical: what plane
+    the component LIVES on) instead of `attributions.plane` (which is the
+    DISCOVERY plane — where evidence was found). The two diverge because
+    a github SME finding a hostname tags `attributions.plane='github'`
+    even though the hostname "feels" deploy-y. Same source change applied
+    to `/api/components` (list + plane filter) and `/api/component/{id}/drilldown`.
   One query per tab entry; no pagination (O(thousands) scale).
+
+POST /api/clientlog                   → {ok: true}      (Phase 7.4.8)
+  Capture browser-side error + crash signals — `window.error`,
+  `unhandledrejection`, `webglcontextlost`, `webglcontextrestored`,
+  `beforeunload`. Posted by app.js hooks. Appends one JSON line per
+  event to `/tmp/cartograph-logs/browser.log` so the developer can
+  `grep webglcontextlost /tmp/cartograph-logs/browser.log` after a
+  graph-tab GPU crash. Required because Chrome's GPU process can die
+  mid-session (Exit code 5 → "GPU process crashed" → after 11 crashes
+  Chrome blocklists WebGL entirely until a full app restart). The
+  server can't see the browser; this is the only path to capture WHEN
+  the crash happened + the graph state at the time.
 ```
 
 Entities + Catalog + Insights endpoints (Phase 5):

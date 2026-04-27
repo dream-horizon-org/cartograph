@@ -94,12 +94,30 @@ const $chatInput = document.getElementById('chat-input');
 const $sendBtn = $chatForm.querySelector('button');
 const $refreshBtn = document.getElementById('refresh-btn');
 
+// Phase 7.4.9: parallel cache of ALL agents (active + decommissioned),
+// keyed by agent_id. Used by Communications + Entities renderers so
+// decommissioned agents still get their 📦 component pill + plane
+// symbols rendered next to their agent_id in historical rows. The
+// chat sidebar continues to render from `state.agents` (which respects
+// the showDecommissioned toggle), so this doesn't change the sidebar.
+const _allAgentsById = new Map();
+
 async function fetchAgents() {
   try {
     const qs = state.showDecommissioned ? '?include_decommissioned=true' : '';
-    const res = await fetch(`/api/agents${qs}`);
-    const data = await res.json();
-    state.agents = data.agents || [];
+    // Two requests in parallel: the user-facing list (respects toggle)
+    // and the always-include-decom dataset that powers row-level lookups.
+    const [resA, resB] = await Promise.all([
+      fetch(`/api/agents${qs}`),
+      fetch('/api/agents?include_decommissioned=true'),
+    ]);
+    const dataA = await resA.json();
+    const dataB = await resB.json();
+    state.agents = dataA.agents || [];
+    _allAgentsById.clear();
+    for (const a of (dataB.agents || [])) {
+      _allAgentsById.set(a.agent_id, a);
+    }
     renderAgents();
     populateAgentDatalists();
   } catch (e) {
@@ -117,7 +135,12 @@ function populateAgentDatalists() {
   const $to = document.getElementById('to-options');
   if (!$from || !$to || !$agent) return;
 
-  const agentIds = state.agents.map(a => a.agent_id);
+  // Phase 7.4.9: datalist suggestions pull from the ALL-agents cache
+  // (active + decommissioned) so admins can filter Communications by a
+  // historically-merged-away agent. The chat sidebar still renders from
+  // state.agents (which respects the showDecommissioned toggle).
+  const agentIds = Array.from(_allAgentsById.keys());
+  agentIds.sort();
   const agentTypes = ['orchestrator', 'iterator', 'sme', 'resolver'];
   const fill = (el, values) => {
     el.innerHTML = '';
@@ -265,9 +288,22 @@ function _renderAgentRow(agent, $ul) {
   // Phase 4 pre-demo polish: show the SME's managed component inline so
   // admin can tell "agent sme-abc-123 → Payments Service" at a glance
   // without clicking into the graph tab.
+  // Plane symbols sourced from agent.resource_planes (RCA→resources.plane,
+  // canonical "what plane(s) does this agent's resource cover"). Letters
+  // chosen per user spec: G/C/T/D for github/cloud/telemetry/deploy.
+  // Config uses F (con-F-ig) to avoid collision with cloud's C.
+  // Colors mirror the graph PLANE_COLORS palette.
+  const PLANE_LETTER = {github: 'G', cloud: 'C', telemetry: 'T', deploy: 'D', config: 'F'};
+  const PLANE_HUE    = {github: '#0d9488', cloud: '#db2777', telemetry: '#9333ea', deploy: '#2563eb', config: '#ea580c'};
+  const planeSyms = (agent.resource_planes || []).map(p => {
+    const letter = PLANE_LETTER[p];
+    const color  = PLANE_HUE[p];
+    if (!letter) return '';
+    return `<span class="plane-sym" title="${escapeHtml(p)}" style="background:${color}33;color:${color};border:1px solid ${color}66">${letter}</span>`;
+  }).join('');
   const compTag = agent.component_canonical
-    ? `<span class="component-tag" title="Manages ${escapeHtml(agent.component_canonical)}">📦 ${escapeHtml(agent.component_display || agent.component_canonical)}</span>`
-    : '';
+    ? `<span class="component-tag" title="Manages ${escapeHtml(agent.component_canonical)}">📦 ${escapeHtml(agent.component_display || agent.component_canonical)}</span>${planeSyms}`
+    : planeSyms;
   li.innerHTML = `
     <div class="agent-row-head">
       <div class="agent-id">${escapeHtml(agent.agent_id)}</div>
@@ -685,6 +721,7 @@ const commsState = {
     agent: '', agent_type: '',
     from_agent: '', to_agent: '',
     from_agent_type: '', to_agent_type: '',
+    participant_component: '',  // Phase 7.4.9
     type: '',
   },
   selectedCommId: null,
@@ -703,6 +740,22 @@ function switchTab(name) {
   document.getElementById('catalog-view').classList.toggle('active', name === 'catalog');
   document.getElementById('insights-view').classList.toggle('active', name === 'insights');
   document.getElementById('graph-view').classList.toggle('active', name === 'graph');
+  // Phase 7.4.10: pause the 3d-force-graph render loop when the user
+  // leaves the Graph tab; resume on entry. ROOT CAUSE of recurring
+  // Chrome GPU process crashes (Exit code 5) was that 3d-force-graph
+  // keeps requestAnimationFrame-driven rendering alive even when the
+  // canvas is hidden via display:none — every frame allocates per-edge
+  // line materials, arrow heads, particles, etc., and after 30–60 min
+  // of offscreen rendering the GPU process OOMs. Browser.log captured
+  // 9 webglcontextlost events on URLs OTHER than /graph (chat tabs,
+  // entities, catalog). Pause/resume eliminates the offscreen burn.
+  if (graphInstance) {
+    if (name === 'graph') {
+      try { graphInstance.resumeAnimation && graphInstance.resumeAnimation(); } catch (e) {}
+    } else {
+      try { graphInstance.pauseAnimation && graphInstance.pauseAnimation(); } catch (e) {}
+    }
+  }
   if (name === 'comms') fetchCommunications();
   if (name === 'entities') fetchEntities();
   if (name === 'catalog') fetchCatalog();
@@ -727,6 +780,7 @@ async function fetchCommunications() {
   if (f.to_agent) params.set('to_agent', f.to_agent);
   if (f.from_agent_type) params.set('from_agent_type', f.from_agent_type);
   if (f.to_agent_type) params.set('to_agent_type', f.to_agent_type);
+  if (f.participant_component) params.set('participant_component', f.participant_component);
   if (f.type) params.set('type', f.type);
   params.set('limit', '100');
   try {
@@ -753,19 +807,40 @@ async function fetchCommunications() {
   }
 }
 
-// Pre-demo polish: look up an agent's managed component for inline
-// tagging in the communications tab. Reads the same state.agents the
-// chat sidebar populates, so no extra fetches. Returns null for
-// non-SMEs + admin + unknown ids.
+// Look up an agent's managed component for inline tagging in
+// Communications. Phase 7.4.9: reads from the ALL-agents cache
+// (_allAgentsById) so decommissioned agents on historical rows still
+// surface their 📦 component pill — without this they'd render as a
+// bare agent_id with no context. Returns null for non-SMEs + admin +
+// unknown ids.
 function _componentLabelForAgent(agent_id) {
   if (!agent_id || agent_id === 'admin') return null;
-  const a = state.agents.find(x => x.agent_id === agent_id);
+  const a = _allAgentsById.get(agent_id);
   if (!a || !a.component_canonical) return null;
   return {
     canonical: a.component_canonical,
     display: a.component_display || a.component_canonical,
     id: a.component_id,
+    decommissioned: a.status === 'decommissioned',
   };
+}
+
+// Phase 7.4.9: return plane-symbol HTML pills for an agent (G/C/T/D/F).
+// Mirrors the chat-sidebar rendering in _renderAgentRow. Returns ''
+// (empty string) for unknown / no-resource agents so the caller can
+// concatenate without conditionals.
+const _PLANE_LETTER = {github: 'G', cloud: 'C', telemetry: 'T', deploy: 'D', config: 'F'};
+const _PLANE_HUE    = {github: '#0d9488', cloud: '#db2777', telemetry: '#9333ea', deploy: '#2563eb', config: '#ea580c'};
+function _planeSymbolsForAgent(agent_id) {
+  if (!agent_id || agent_id === 'admin') return '';
+  const a = _allAgentsById.get(agent_id);
+  if (!a || !a.resource_planes || !a.resource_planes.length) return '';
+  return a.resource_planes.map(p => {
+    const letter = _PLANE_LETTER[p];
+    const color  = _PLANE_HUE[p];
+    if (!letter) return '';
+    return `<span class="plane-sym" title="${escapeHtml(p)}" style="background:${color}33;color:${color};border:1px solid ${color}66">${letter}</span>`;
+  }).join('');
 }
 
 // Phase 4: key a communication row to proxy_audit. item_id is the
@@ -815,15 +890,22 @@ function renderCommunications() {
       ? ` <span class="pill proxy-via" title="Proxied by ${escapeHtml(audit.survivor_id)}">via ${escapeHtml(audit.survivor_id)}</span>`
       : '';
     // Pre-demo polish: show 📦 Component pill next to from/to when
-    // the participant is an SME with a managed component.
+    // the participant is an SME with a managed component. Phase 7.4.9:
+    // also render plane-symbol pills (G/C/T/D/F) next to the component
+    // tag — same palette as the chat sidebar — and dim the 📦 tag for
+    // decommissioned agents so historical rows are visually distinct.
     const fromComp = _componentLabelForAgent(m.from_agent);
     const toComp = _componentLabelForAgent(m.to_agent);
-    const fromCompTag = fromComp
-      ? ` <span class="component-tag-inline" title="${escapeHtml(fromComp.canonical)}">📦 ${escapeHtml(fromComp.display)}</span>`
-      : '';
-    const toCompTag = toComp
-      ? ` <span class="component-tag-inline" title="${escapeHtml(toComp.canonical)}">📦 ${escapeHtml(toComp.display)}</span>`
-      : '';
+    const _compTagHtml = (comp) => {
+      if (!comp) return '';
+      const decomCls = comp.decommissioned ? ' component-tag-decom' : '';
+      const decomTitle = comp.decommissioned ? ' (decommissioned)' : '';
+      return ` <span class="component-tag-inline${decomCls}" title="${escapeHtml(comp.canonical)}${decomTitle}">📦 ${escapeHtml(comp.display)}</span>`;
+    };
+    const fromCompTag = _compTagHtml(fromComp);
+    const toCompTag = _compTagHtml(toComp);
+    const fromPlanes = _planeSymbolsForAgent(m.from_agent);
+    const toPlanes = _planeSymbolsForAgent(m.to_agent);
     // Phase 5.4: 📌 pill on persistent broadcasts so admins can tell at
     // a glance which broadcasts are standing policy vs forward-only.
     // Phase 5.7: also a clickable toggle to flip is_persistent on the fly.
@@ -851,9 +933,9 @@ function renderCommunications() {
     li.innerHTML = `
       <div class="comm-head">
         <span class="type-pill type-${m.type}">${m.type}</span>
-        <span class="from">${escapeHtml(m.from_agent)}</span>${fromCompTag}
+        <span class="from">${escapeHtml(m.from_agent)}</span>${fromCompTag}${fromPlanes}
         <span class="arrow">→</span>
-        <span class="to">${escapeHtml(commTargetLabel(m))}</span>${toCompTag}
+        <span class="to">${escapeHtml(commTargetLabel(m))}</span>${toCompTag}${toPlanes}
         ${state}${viaBadge}${persistentPill}${entityRefHtml}
         <span class="ts">${new Date(m.created_at).toLocaleString()}</span>
       </div>
@@ -1051,13 +1133,16 @@ document.getElementById('filter-apply').addEventListener('click', () => {
     to_agent: document.getElementById('filter-to').value.trim(),
     from_agent_type: document.getElementById('filter-from-type').value,
     to_agent_type: document.getElementById('filter-to-type').value,
+    participant_component:
+      document.getElementById('filter-component').value.trim(),  // Phase 7.4.9
     type: document.getElementById('filter-type').value,
   };
   fetchCommunications();
 });
 
 document.getElementById('filter-reset').addEventListener('click', () => {
-  ['filter-agent', 'filter-from', 'filter-to'].forEach(id =>
+  // Phase 7.4.9: include 'filter-component' in the reset sweep
+  ['filter-agent', 'filter-from', 'filter-to', 'filter-component'].forEach(id =>
     document.getElementById(id).value = '');
   ['filter-agent-type', 'filter-from-type', 'filter-to-type', 'filter-type'].forEach(id =>
     document.getElementById(id).value = '');
@@ -1065,6 +1150,7 @@ document.getElementById('filter-reset').addEventListener('click', () => {
     agent: '', agent_type: '',
     from_agent: '', to_agent: '',
     from_agent_type: '', to_agent_type: '',
+    participant_component: '',
     type: '',
   };
   fetchCommunications();
@@ -1314,76 +1400,210 @@ function _sizeForNode(node) {
   return 2 + (node.planes?.length || 0) * 0.7;
 }
 
+// GPU-resource caches. Geometries + materials are reused across nodes
+// keyed on shape parameters / color so we don't allocate fresh GPU
+// buffers per node per refresh. Cap each cache at 256 entries — well
+// above realistic graph variety; eviction order doesn't matter since
+// disposal happens on cache wipe (graph teardown).
+const _geomCache = new Map();   // key → THREE.BufferGeometry
+const _matCache  = new Map();   // key → THREE.MeshLambertMaterial
+const GPU_CACHE_MAX = 256;
+
+function _geomKey(type, s) {
+  // Quantise s to 0.1 so floating-point jitter doesn't fragment the cache.
+  return `${type}:${Math.round(s * 10) / 10}`;
+}
+
+function _getGeometry(THREE, type, s) {
+  const key = _geomKey(type, s);
+  if (_geomCache.has(key)) return _geomCache.get(key);
+  let g;
+  switch (type) {
+    case 'database':         g = new THREE.CylinderGeometry(s * 1.05, s * 1.05, s * 2, 28); break;
+    case 'cache':            g = new THREE.TorusGeometry(s, s * 0.5, 16, 32); break;
+    case 'queue':            g = new THREE.ConeGeometry(s * 1.2, s * 2.4, 24); break;
+    case 'lambda':           g = new THREE.OctahedronGeometry(s * 1.55); break;
+    case 'cron':             g = new THREE.IcosahedronGeometry(s * 1.35); break;
+    case 'external-service': g = new THREE.TetrahedronGeometry(s * 1.75); break;
+    case 'library':          g = new THREE.BoxGeometry(s * 1.7, s * 1.7, s * 1.7); break;
+    case 'infrastructure':   g = new THREE.BoxGeometry(s * 2.5, s * 0.7, s * 2.5); break;
+    case 'junction':         g = new THREE.TetrahedronGeometry(s); break;
+    case 'stub':             g = new THREE.SphereGeometry(s * 0.55, 20, 20); break;
+    case 'application':
+    default:                 g = new THREE.SphereGeometry(s, 32, 32); break;
+  }
+  if (_geomCache.size < GPU_CACHE_MAX) _geomCache.set(key, g);
+  return g;
+}
+
+function _getMaterial(THREE, color, isMuted) {
+  const key = `${color || '#cccccc'}:${isMuted ? 'm' : 's'}`;
+  if (_matCache.has(key)) return _matCache.get(key);
+  const m = new THREE.MeshLambertMaterial({
+    color: color || '#cccccc',
+    transparent: true,
+    opacity: isMuted ? 0.55 : 0.95,
+  });
+  if (_matCache.size < GPU_CACHE_MAX) _matCache.set(key, m);
+  return m;
+}
+
+function _disposeGpuCaches() {
+  // Called on full graph teardown (page unload, context-lost). Releases
+  // GPU buffers held in the geometry/material caches. Safe to call on
+  // empty caches.
+  for (const g of _geomCache.values()) { try { g.dispose(); } catch (e) {} }
+  for (const m of _matCache.values())  { try { m.dispose(); } catch (e) {} }
+  _geomCache.clear();
+  _matCache.clear();
+}
+
 function makeNodeMesh(node) {
   const THREE = window.THREE;
   if (!THREE) return null;  // fallback → library default sphere
   const s = _sizeForNode(node);
-
-  // Geometries tuned so every type reads as the same approximate
-  // visual volume as a sphere of radius s. Pure math volume matching
-  // isn't perceptual, so these are empirically bumped.
-  let geom;
-  switch (node.type) {
-    case 'database':
-      // Short cylinder; radius ≈ s, height ≈ 2s.
-      geom = new THREE.CylinderGeometry(s * 1.05, s * 1.05, s * 2, 28);
-      break;
-    case 'cache':
-      // Torus: outer radius ≈ s, tube radius ≈ 0.5s — fatter so it
-      // visually matches the sphere's bulk.
-      geom = new THREE.TorusGeometry(s, s * 0.5, 16, 32);
-      break;
-    case 'queue':
-      // Cone: base ≈ 1.2s, height ≈ 2.2s.
-      geom = new THREE.ConeGeometry(s * 1.2, s * 2.4, 24);
-      break;
-    case 'lambda':
-      // Octahedron: bump to 1.5s so it's not dwarfed by spheres.
-      geom = new THREE.OctahedronGeometry(s * 1.55);
-      break;
-    case 'cron':
-      geom = new THREE.IcosahedronGeometry(s * 1.35);
-      break;
-    case 'external-service':
-      geom = new THREE.TetrahedronGeometry(s * 1.75);
-      break;
-    case 'library':
-      geom = new THREE.BoxGeometry(s * 1.7, s * 1.7, s * 1.7);
-      break;
-    case 'infrastructure':
-      // Flat wide slab: meant to feel like a floor/cluster.
-      geom = new THREE.BoxGeometry(s * 2.5, s * 0.7, s * 2.5);
-      break;
-    case 'junction':
-      // Intentionally tiny — routing dot, not a component.
-      geom = new THREE.TetrahedronGeometry(s);
-      break;
-    case 'stub':
-      // Unknown-side "?" placeholder for dangling edges (orphan catalog
-      // inbound, outgoing dangling). Small, muted — it's a marker, not
-      // a component. No text label on the mesh itself; the hover
-      // tooltip conveys "unknown caller/target."
-      geom = new THREE.SphereGeometry(s * 0.55, 20, 20);
-      break;
-    case 'application':
-    default:
-      geom = new THREE.SphereGeometry(s, 32, 32);
-      break;
-  }
-  // Matte Lambert (no glassy/metallic feel). We add bright scene
-  // lights separately so the nodes read as properly illuminated
-  // solids, not translucent bubbles.
+  // Both geometry + material come from caches keyed on shape
+  // parameters / color. The Mesh wrapper itself is cheap (no GPU
+  // allocation) — only the underlying geometry+material are GPU
+  // resources, and those are now shared across all nodes of the same
+  // shape+color. Net effect: GPU buffer count is bounded by distinct
+  // (type, size, color) tuples, regardless of node count or refresh
+  // count. Pre-fix: 1 fresh geometry + 1 fresh material PER node PER
+  // refresh → unbounded growth → Chrome GPU process OOM exit-code-5.
   const isMuted = node.isJunction || node.isStub;
-  const mat = new THREE.MeshLambertMaterial({
-    color: node.color || '#cccccc',
-    transparent: true,
-    opacity: isMuted ? 0.55 : 0.95,
-  });
+  const geom = _getGeometry(THREE, node.type, s);
+  const mat  = _getMaterial(THREE, node.color, isMuted);
   return new THREE.Mesh(geom, mat);
 }
 
 
+// ---------- Browser-side crash + error capture (POSTs to /api/clientlog) ----------
+//
+// Chrome's GPU process can die mid-session (exit code 5 → "GPU process
+// crashed" → after 11 crashes Chrome blocklists WebGL entirely until a
+// full app restart). When that happens the WebGL context is lost; the
+// canvas goes black and no client error is thrown — there is nothing to
+// surface to the developer without instrumentation. These hooks POST
+// every relevant client-side signal to /api/clientlog (appended to
+// /tmp/cartograph-logs/browser.log on the server) so we can grep crashes
+// after the fact.
+const _clientLogEndpoint = '/api/clientlog';
+let _clientLogInstalled = false;
+
+function _postClientLog(event, detail) {
+  try {
+    fetch(_clientLogEndpoint, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        ts: new Date().toISOString(),
+        event,
+        url: window.location.pathname,
+        ua: navigator.userAgent,
+        detail,
+      }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch (e) { /* never throw from a logger */ }
+}
+
+function _installClientLogHooks() {
+  if (_clientLogInstalled) return;
+  _clientLogInstalled = true;
+  window.addEventListener('error', (ev) => {
+    _postClientLog('window.error', {
+      message: ev.message, filename: ev.filename,
+      line: ev.lineno, col: ev.colno,
+      stack: ev.error && ev.error.stack ? ev.error.stack : null,
+    });
+  });
+  window.addEventListener('unhandledrejection', (ev) => {
+    _postClientLog('unhandledrejection', {
+      reason: String(ev.reason),
+      stack: ev.reason && ev.reason.stack ? ev.reason.stack : null,
+    });
+  });
+  window.addEventListener('beforeunload', () => {
+    _postClientLog('beforeunload', {graphLoadedOnce});
+  });
+}
+
+// Phase 7.4.10: idempotency flag so a duplicate webglcontextlost (Chrome
+// sometimes fires on both inner <canvas> and outer container) doesn't
+// re-dispose already-disposed caches. Reset on successful restore.
+let _ctxLostHandled = false;
+
+function _installWebGLContextHooks(canvasEl) {
+  // 3d-force-graph mounts a <canvas> inside our container. Find it.
+  const innerCanvas = canvasEl.querySelector('canvas') || canvasEl;
+  if (!innerCanvas || innerCanvas._cartoHooked) return;
+  innerCanvas._cartoHooked = true;
+  // Default behaviour on context-lost is for Chrome to NOT redispatch
+  // webglcontextrestored unless preventDefault is called. So we always
+  // call it. The library doesn't auto-restore — we manually re-init.
+  innerCanvas.addEventListener('webglcontextlost', (ev) => {
+    ev.preventDefault();
+    _postClientLog('webglcontextlost', {
+      stats: {
+        geomCacheSize: _geomCache.size,
+        matCacheSize: _matCache.size,
+        nodes: graphSnapshot.nodes ? graphSnapshot.nodes.length : 0,
+        edges: graphSnapshot.edges ? graphSnapshot.edges.length : 0,
+        duplicate: _ctxLostHandled,
+      },
+    });
+    if (_ctxLostHandled) return;  // double-fire guard
+    _ctxLostHandled = true;
+    console.warn('[viz] WebGL context lost — Chrome GPU process likely crashed');
+    // Free our caches so a future restore starts clean and doesn't
+    // reference the dead GPU resources.
+    _disposeGpuCaches();
+    // Tear down our local references so a fresh init can rebuild.
+    if (graphInstance) {
+      try { graphInstance._destructor && graphInstance._destructor(); } catch (e) {}
+    }
+    graphInstance = null;
+    graphLoadedOnce = false;
+    // Show user a clear hint in the canvas surface.
+    canvasEl.innerHTML = '<p class="empty" style="padding:20px;color:#fbbf24">'
+      + 'WebGL context lost (Chrome GPU process died). '
+      + 'Click Refresh on the Graph tab once Chrome restarts the GPU process; '
+      + 'if the canvas stays empty, hard-reload the page or restart Chrome. '
+      + 'Captured crash details to server log.</p>';
+  });
+  innerCanvas.addEventListener('webglcontextrestored', () => {
+    _postClientLog('webglcontextrestored', {});
+    console.info('[viz] WebGL context restored — re-initialising graph');
+    _ctxLostHandled = false;
+    initOrRefreshGraph();
+  });
+}
+
+// Phase 7.4.10: Page Visibility API — pause animation when the BROWSER
+// TAB itself is hidden (admin alt-tabs / minimises the window). Belt
+// and suspenders alongside the per-tab pause/resume in switchTab —
+// guards against the case where the user leaves the page open with
+// Graph as the active app-tab and walks away. RAF on a hidden browser
+// tab is throttled but not stopped; pause stops it cold.
+document.addEventListener('visibilitychange', () => {
+  if (!graphInstance) return;
+  try {
+    if (document.hidden) {
+      graphInstance.pauseAnimation && graphInstance.pauseAnimation();
+    } else {
+      // Only resume if Graph is the currently-active app tab — don't
+      // override a deliberate pause from switchTab.
+      const graphTabActive = document.getElementById('graph-view')
+        && document.getElementById('graph-view').classList.contains('active');
+      if (graphTabActive) {
+        graphInstance.resumeAnimation && graphInstance.resumeAnimation();
+      }
+    }
+  } catch (e) { /* no-op */ }
+});
+
 async function initOrRefreshGraph() {
+  _installClientLogHooks();
   if (typeof ForceGraph3D !== 'function') {
     document.getElementById('graph-canvas').innerHTML =
       '<p class="empty" style="padding:20px">3d-force-graph CDN failed to load. Check network.</p>';
@@ -1798,7 +2018,12 @@ async function initOrRefreshGraph() {
     } catch (e) { /* no-op */ }
 
     canvas.addEventListener('wheel', (ev) => {
-      if (!window.THREE || !graphInstance.camera) return;
+      // Phase 7.4.10: defend against `graphInstance = null` after a
+      // webglcontextlost teardown. Pre-fix this read `null.camera` and
+      // threw TypeError on every wheel event after a context loss
+      // (153 spam errors observed in browser.log). Order matters: short-
+      // circuit on `!graphInstance` BEFORE accessing .camera.
+      if (!window.THREE || !graphInstance || !graphInstance.camera) return;
       ev.preventDefault();
       const THREE = window.THREE;
       const camera = graphInstance.camera();
@@ -1844,6 +2069,10 @@ async function initOrRefreshGraph() {
     }, {passive: false});
   }
   graphInstance.graphData(gData);
+
+  // Hook the WebGL canvas for context-lost / restored signals.
+  // Must run AFTER ForceGraph3D mounts its inner <canvas>.
+  _installWebGLContextHooks(canvas);
 
   // Resize the canvas to its container on first render (fresh tab).
   if (!graphLoadedOnce) {

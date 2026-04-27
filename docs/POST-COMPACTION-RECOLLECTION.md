@@ -1,4 +1,4 @@
-# Cartograph — Post-Compaction Recollection (2026-04-26, updated for 7.4.2)
+# Cartograph — Post-Compaction Recollection (2026-04-27, updated for 7.4.7 + 7.4.8)
 
 > **Read this FIRST after compaction.** Then `git log --oneline -50`,
 > then the 6 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
@@ -33,25 +33,55 @@ c67ecb3 Docs: pre-Phase-7 sync — add 5.12 to Phase 5 ship log + memory note
 
 ---
 
-## 2. Running daemons (status as of last restart at 11:15)
+## 2. Running daemons (Phase 7.4.8 — running under active Claude Code session, logs in `/tmp/cartograph-logs/`)
 
-| Daemon | Port | Status |
+| Daemon | Port | Log file |
 |---|---|---|
-| Postgres (docker) | 5432 | running |
-| Ollama (mxbai-embed-large 1024d) | 11434 | running |
-| MCP server | 8100 | **85 tools registered** |
-| Admin UI (FastAPI) | 8200 | running |
-| Trigger manager | — | running |
+| Postgres (docker) | 5432 | (docker logs) |
+| Ollama (mxbai-embed-large 1024d) | 11434 | (system) |
+| MCP server | 8100 | `/tmp/cartograph-logs/mcp.log` |
+| Trigger manager | — | `/tmp/cartograph-logs/triggers.log` |
+| Agent manager (`python -m main`) | — | `/tmp/cartograph-logs/agents.log` |
+| Admin UI (FastAPI) | 8200 | `/tmp/cartograph-logs/admin_ui.log` |
+| **Browser-side capture** (Phase 7.4.8) | — | `/tmp/cartograph-logs/browser.log` |
 
-**Restart sequence** (from `cd src/`):
+The four cartograph processes run as background shells under the
+active Claude Code session, started with `python3.10 -u -m <module>`
+so output flushes in real-time. The `-u` is critical — without it
+buffered output makes log grep useless.
+
+**Restart sequence** (from `cd src/`, kills + relaunches all four):
 ```bash
-ps aux | grep -E "cartograph_mcp|admin_ui|trigger_management" | grep -v grep | awk '{print $2}' | xargs kill 2>/dev/null
+ps aux | grep -E "cartograph_mcp|admin_ui|trigger_management|python.*-m main" \
+  | grep -v grep | grep -v agent-battles | awk '{print $2}' | xargs kill 2>/dev/null
 sleep 2
-nohup python3.10 -m cartograph_mcp.server > /tmp/cartograph_mcp.log 2>&1 & disown
-nohup python3.10 -m admin_ui.server > /tmp/admin_ui.log 2>&1 & disown
-nohup python3.10 -m trigger_management.main > /tmp/trigger_mgr.log 2>&1 & disown
-sleep 5
-grep "tools registered" /tmp/cartograph_mcp.log | tail -1   # expect: 85 tools
+mkdir -p /tmp/cartograph-logs
+cd src
+/opt/homebrew/bin/python3.10 -u -m cartograph_mcp.server   > /tmp/cartograph-logs/mcp.log      2>&1 &
+/opt/homebrew/bin/python3.10 -u -m trigger_management.main > /tmp/cartograph-logs/triggers.log 2>&1 &
+/opt/homebrew/bin/python3.10 -u -m main                    > /tmp/cartograph-logs/agents.log  2>&1 &
+/opt/homebrew/bin/python3.10 -u -m admin_ui.server         > /tmp/cartograph-logs/admin_ui.log 2>&1 &
+sleep 4
+grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1   # expect: 85 tools
+```
+
+Verifying all four came up:
+```bash
+ps aux | grep -E "(admin_ui|cartograph_mcp|trigger_management|python.*-m main)" \
+  | grep -v grep | grep -v agent-battles | awk '{print $2, $11, $12, $13, $14}'
+curl -s -o /dev/null -w "admin_ui: %{http_code}\n" http://localhost:8200/api/agents
+```
+
+`/tmp/cartograph-logs/browser.log` collects browser-side crashes
+(WebGL context lost, JS errors, unhandled rejections, beforeunload)
+posted by `app.js` to the Phase 7.4.8 `/api/clientlog` endpoint.
+Greppable signals:
+```bash
+grep webglcontextlost  /tmp/cartograph-logs/browser.log
+grep window.error      /tmp/cartograph-logs/browser.log
+grep ERROR             /tmp/cartograph-logs/*.log
+grep "5[0-9][0-9]"     /tmp/cartograph-logs/admin_ui.log    # any 5xx
+tail -f                /tmp/cartograph-logs/admin_ui.log
 ```
 
 ---
@@ -80,6 +110,8 @@ grep "tools registered" /tmp/cartograph_mcp.log | tail -1   # expect: 85 tools
 | **7.4.4** | **✅ SHIPPED 2026-04-26** | DEMO7 fixes (mine): `spawn_child_agent` MCP wrapper now exposes `transfer_catalog_ids`; Phase 7.3 Python self-loop guards dropped from `create_edge` / `upsert_edge_outbound` / `bind_edge`; `vector_search` lean projection (no embedding/blobs in result rows). |
 | **7.4.5** | **✅ SHIPPED 2026-04-26** | DEMO7 fixes (pre-existing): `get_my_catalogs` (and 3 sibling tools) switched JOIN→EXISTS to dedupe post-merge survivor; `get_action_items_summary` reshape to uniform `dict[str, int]` (proxied list moved to detail); SME prompt hygiene-cycle stale `upsert_edge_catalog` references replaced. |
 | **7.4.6** | **✅ SHIPPED 2026-04-26** | Doc + memory sync for 7.4.4 + 7.4.5 |
+| **7.4.7** | **✅ SHIPPED 2026-04-27** | Per-type model + reasoning effort (`AgentTypeConfig.model` + `.effort`); admin UI graph node planes sourced from RCA→resources (was attributions.plane — wrong because attribution.plane is DISCOVERY plane); `/api/agents` returns `resource_planes[]`; agent-row plane symbols (G/C/T/D/F); §2.8 mass prompt infusion across all 5 .py prompts (ATTRIBUTION-vs-EDGE, attribution uniqueness, plane=DISCOVERY, grep catalogs, DANGLING-EDGE-pair rule, STEP 4 pseudocode, MATERIALISATION COMPLETION CHECKLIST, code-repo CLONE-MANDATORY, workspace-as-memory, EXTERNAL MCP ONBOARDING, BULK MCP TACTIC, SLEEP rewrite, ACCESS PRECHECK, SEND_BROADCAST ACL, CREDENTIALS via put_secret, CHAT-ADDRESSED-TO-YOU, ONGOING consolidation, WAKE BUDGET) |
+| **7.4.8** | **✅ SHIPPED 2026-04-27** | WebGL GPU memory leak fix (geometry/material caches in `app.js`, `webglcontextlost`/`restored` handlers); new `POST /api/clientlog` endpoint appending to `/tmp/cartograph-logs/browser.log` (captures `window.error`, `unhandledrejection`, `webglcontextlost`, `beforeunload`); all four cartograph daemons now run under the active Claude Code session with stdout piped to `/tmp/cartograph-logs/{mcp,triggers,agents,admin_ui}.log` via `python -u -m <module>`; cache-bust v=58→v=60 |
 
 ---
 
@@ -191,7 +223,7 @@ Plus auto-wrapped: every @mcp.tool() registration is wrapped by
 cartograph_mcp.audit.audited (Phase 5.10) — records to mcp_audit table.
 ```
 
-**Total: 85.** Verify with `grep "tools registered" /tmp/cartograph_mcp.log | tail -1`.
+**Total: 85.** Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1` (Phase 7.4.8 path).
 
 ---
 
@@ -256,6 +288,10 @@ From the user across many sessions:
 10. **Self-loops permitted (Phase 7.3 + 7.4.4):** `from_component_id = to_component_id` is fine on every write path. DB CHECK constraints + Python guards both gone.
 11. **`vector_search` returns lean rows (Phase 7.4.4):** no embedding vectors, no doc/slice/metadata blobs in results — search-then-fetch via `get_*(id)` for full detail.
 12. **`get_action_items_summary` is uniform `dict[str, int]` (Phase 7.4.5):** rich per-proxy breakdown lives on `get_action_items_detail.proxied`. Pre-7.4.5 the mixed-type response crashed MCP-client pydantic on every wake.
+13. **Component planes come from RCA→resources, not attributions (Phase 7.4.7):** what plane a component LIVES on is the plane(s) of its source resource(s). `attributions.plane` is the DISCOVERY plane (where the SME found the evidence) and conflates source-of-evidence with category-of-component. Three admin-UI SQL callsites flipped (`/api/components`, `/api/component/{id}/drilldown`, `/api/graph`); plane filter EXISTS sub-query also flipped.
+14. **Per-type model + effort (Phase 7.4.7):** orchestrator + resolver = `claude-opus-4-6 + medium`; iterator + sme = `claude-sonnet-4-6` (default effort). `agent_manager.py` cmd list appends `--model` + `--effort` from `AgentTypeConfig`. System prompt rebuilt fresh per spawn — no agent_manager restart needed when prompts change.
+15. **Sleep is LAST RESORT, not default (Phase 7.4.7):** yielding doesn't burn cost. Sleep ONLY when blocked on admin/external + already prompted twice; 300–600s MAX, never 24h, never >3600s. Codified in SME / iterator / orchestrator prompts.
+16. **WebGL leak fix (Phase 7.4.8):** Chrome GPU process was crashing every 5–10 min because `makeNodeMesh` in `app.js` allocated fresh THREE.Geometry + Material per node per `graphData()` invocation without disposing. Fix: shared `_geomCache` + `_matCache` Maps keyed on (type, size, color); `webglcontextlost` handler that POSTs to `/api/clientlog` and re-inits on `webglcontextrestored`. All browser-side errors now captured in `/tmp/cartograph-logs/browser.log`.
 
 ---
 
@@ -307,12 +343,13 @@ A comprehensive 11-phase test was designed at the END of the conversation just b
 
 ## 13. Re-hydration checklist (do in order post-compaction)
 
-1. **`git log --oneline -50 | head`** — confirm `aadcadb` is HEAD on `feat/trigger-manager-cartograh-mcp`
-2. **`grep "tools registered" /tmp/cartograph_mcp.log | tail -1`** — should show `85 tools`
-3. **Read this doc** (§4 + §5 + §8 + §9 are the most critical)
-4. **Read the 6 docs** (HLD / SCHEMA / TRIGGER-MANAGEMENT / AGENT-PROMPTS / IMPLEMENTATION-PHASES / ONE-PAGER) — user will paste these
-5. **Check the 3 memory files** at `~/.claude/projects/-Users-venkata-manohar-release-agent-docs-service-dependency/memory/` (auto-loaded)
-6. **Verify daemons running:** `ps aux | grep -E "cartograph_mcp|admin_ui|trigger_management" | grep -v grep`
+1. **`git log --oneline -50 | head`** — see most recent commits.
+2. **`grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`** — should show `85 tools`. Note path change: logs now live in `/tmp/cartograph-logs/` (Phase 7.4.8), not `/tmp/cartograph_mcp.log`.
+3. **Read this doc** (§4 + §5 + §8 + §9 are the most critical).
+4. **Read the 7 docs** (HLD / SCHEMA / TRIGGER-MANAGEMENT / AGENT-PROMPTS / IMPLEMENTATION-PHASES / ONE-PAGER / **PROMPT-ENHANCEMENTS**) — PROMPT-ENHANCEMENTS now carries the active prompt-quality backlog (§2 shipped, §3 open gaps, §4 operational nudges + broadcast log + chat log + insights triage).
+5. **Check the 3 memory files** at `~/.claude/projects/-Users-venkata-manohar-release-agent-docs-service-dependency/memory/` (auto-loaded).
+6. **Verify daemons running:** `ps aux | grep -E "(admin_ui|cartograph_mcp|trigger_management|python.*-m main)" | grep -v grep | grep -v agent-battles`. Should be 4 cartograph processes.
+7. **`tail -f /tmp/cartograph-logs/admin_ui.log`** for live admin-UI request stream; **`grep webglcontextlost /tmp/cartograph-logs/browser.log`** for any in-flight GPU crashes.
 
 If user asks "what's left" — the answer is in §11. If user asks "what's the current ship state" — §3.
 

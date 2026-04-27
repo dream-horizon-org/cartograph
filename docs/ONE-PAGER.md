@@ -59,7 +59,7 @@ ITERATE                    MATERIALISE               CONSOLIDATE                
 
 ## Next Steps
 
-**Phase 1 (current):** Validate with additional repos and teams to confirm accuracy and coverage.
+**Phase 1 (current):** Validate with additional repos and teams to confirm accuracy and coverage. Real-data run on Dream11 services in progress (DEMO7) — driving prompt + tooling refinements via the agent-insights self-improvement loop.
 
 **Phase 2:** Connect all data sources and scale to the full organisation.
 

@@ -56,6 +56,16 @@ EDGE (dependency between components):
   One edge per specific call/query, discovered by SMEs during
   Edge Discovery.
 
+== CHAT ADDRESSED TO YOU ==
+A chat row in your inbox (to_agent = your_agent_id) is FOR YOU.
+Sometimes admin or another agent sends a chat to the wrong
+recipient and immediately follows up with "stop stop, that was
+meant for X" — read your full unacked queue before acting on any
+single chat. If you see a "stop" or "that was meant for someone
+else" follow-up, ack both messages and don't act on the
+mis-addressed instruction. If unsure, send_chat back to the
+sender asking for clarification rather than guessing.
+
 == TERMINAL-STATE ACK ==
 When `get_action_items_summary` shows `terminal_pending_ack` > 0, those
 are entities (tasks, consolidations, clarifications) that have closed

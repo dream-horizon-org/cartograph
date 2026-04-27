@@ -835,6 +835,18 @@ Embeddings generated at write time via `cartograph-db` MCP. No batch step.
 | `catalogs`     | `"{kind}: {identifier}"`                               | Phase 7.4. Find similar exposed surfaces across components — "find an endpoint similar to /payments/charge" |
 
 
+**Bulk read gap (open chore — see PROMPT-ENHANCEMENTS §3.10):** today
+the only multi-row attribution path is `vector_search(table='attributions',
+limit≤50)` (semantic, returns up to 50 lean rows with `id +
+component_id + plane + resource_type + identifier + confidence +
+similarity`). There is **no** `get_attributions_bulk(component_ids[])`
+for cross-component triangulation by id-list, and **no**
+`upsert_attributions_bulk` for multi-row writes. SMEs hydrating ≥10
+attributions in one wake either fan out N single-call writes (context
+bloat) or use the Python-script tactic (§2.8 of PROMPT-ENHANCEMENTS)
+to talk JSON-RPC over HTTP to `localhost:8100/mcp` directly. Tracked
+as a tool-gap insight; signature design lives in §3.10.
+
 Lookup protocol for **outbound references** (refs an SME finds in its
 own resource pointing at OTHER components — e.g. a DB hostname in a
 config file, an API URL in outbound HTTP calls). SMEs do NOT run this

@@ -1,8 +1,12 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-23):** Phase 0 ✅ · Phase 1 ✅ (incl. runtime-robustness + Phase-2 kickoff) · Phase 2 ✅ (2.1 lanes, 2.2 component-graph tools, 2.3 notification hook, 2.4 admin UI panel + broadcast) · Phase 2.5 ✅ (sleep + forward-only broadcasts) · Phase 3 ✅ (consolidation + clarification tools, embeddings live, vector_search, component_doc_md, admin UI detail views) · Phase 3.5 ✅ (graph viz with 3d-force-graph) · Phase 3.7 ✅ (local embeddings via Ollama + Metal, 1024d) · Phase 3.8 ✅ (`components.source_slice` for monorepo splits + SME materialisation flow rewrite) · Phase 3.9 ✅ (asymmetric edge protocol — catalog + bindings + flows) · **Phase 3.10 ✅** (graph viz upgrades — edge discriminators + 3-zone hover + light-of-sight BFS + sidebar tabs).
-- **65 MCP tools** registered · **292 tests** passing.
-- Services running: Postgres (docker), trigger manager, MCP server (:8100), admin UI (:8200), agent manager with 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
+**Status (2026-04-27):** Phases 0 → 7.4.8 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`).
+
+Most recent (2026-04-26 → 2026-04-27): Phase 7.4 (catalogs first-class), 7.4.2 (flows reference catalogs), 7.4.3/4/5/6 (DEMO7-round-1 fixes + doc syncs), 7.4.7 (per-type model + admin UI plane source from RCA→resources + agent-row plane symbols + workspace-as-memory + code-repo clone-mandatory + §2.8 mass prompt infusion), 7.4.8 (WebGL GPU memory leak fix + `/api/clientlog` + server log piping).
+
+- **85 MCP tools** registered (verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log`).
+- Services running under the active Claude Code session: Postgres (docker), trigger_management.main (logs → `/tmp/cartograph-logs/triggers.log`), cartograph_mcp.server :8100 (`mcp.log`), admin_ui.server :8200 (`admin_ui.log`), agent_management `main` (`agents.log`), browser-side errors (`browser.log` via `/api/clientlog`). 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
+- See `docs/PROMPT-ENHANCEMENTS.md` for the active prompt-quality backlog (§2 shipped, §3 open gaps, §4 operational nudges + broadcast log + chat log).
 
 ---
 
@@ -3072,6 +3076,132 @@ Two tests asserted the now-removed Phase-7.3 guards:
 - `tests/mcp_tools/test_components.py` + `test_edges_phase39.py` (invert stale self-loop tests)
 
 **Verified:** 498 / 500 mcp_tools+admin_ui tests green (2 pre-existing failures unrelated).
+
+---
+
+## Phase 7.4.7: per-type model + admin UI plane source + agent-row plane symbols + workspace-as-memory ✅
+
+**Shipped 2026-04-27.** Multiple iterations on `feat/trigger-manager-cartograh-mcp`. Closes a cluster of DEMO7 follow-ups + a plane-semantics correction that surfaced from a real-data run.
+
+### Per-type Claude model + reasoning effort
+
+Pre-7.4.7, every spawned `claude -p` subprocess inherited the user's default model (Opus 4.7 1M context) regardless of agent type — heavy reasoning model used for high-volume iterator listing AND singleton resolver decisions alike. Wasteful at scale.
+
+- New fields on `AgentTypeConfig` (`src/agent_management/agent_types/base.py`): `model: str = "claude-sonnet-4-6"` and `effort: str | None = None`.
+- Per-type defaults in `{orchestrator,resolver}.py::build_config`: `model="claude-opus-4-6"`, `effort="medium"` (singleton coordination + user chat).
+- Per-type defaults in `{iterator,sme}.py::build_config`: `model="claude-sonnet-4-6"`, no effort flag (high-volume).
+- `agent_manager.py::185-193` cmd list now appends `--model <id>` unconditionally and `--effort <level>` when set.
+- System prompt rebuilt fresh per spawn from disk → no agent_manager restart needed when prompt files change.
+
+### Admin UI: graph node planes from RCA→resources, not attributions
+
+Pre-7.4.7, three SQL callsites in `src/admin_ui/server.py` (`/api/components`, `/api/component/{id}/drilldown`, `/api/graph`) computed `planes[]` from `ARRAY_AGG(DISTINCT attributions.plane)`. This conflated DISCOVERY plane (where evidence was found) with CATEGORICAL plane (what plane the component lives on). Per the 2026-04-27 admin broadcast, `attributions.plane` is the discovery plane — a github SME finding a hostname tags `plane='github'` even when the hostname feels deploy-y. The graph then mis-colored components.
+
+Fix: all three callsites now `LEFT JOIN resource_component_agents rca ON rca.component_id = c.id LEFT JOIN resources r ON r.id = rca.resource_id` and aggregate `r.plane`. The plane filter EXISTS sub-query also flipped. Front-end `PLANE_COLORS` rendering unchanged — only data source changed.
+
+### Admin UI: agent-row plane symbols (G/C/T/D/F)
+
+`/api/agents` SQL extended to a 2-level CTE returning `resource_planes text[]` per agent (RCA→resources.plane). `_renderAgentRow` in `app.js` reads `agent.resource_planes` and renders one tiny pill per plane next to the component tag:
+
+| Letter | Plane | Color |
+|---|---|---|
+| G | github | teal `#0d9488` |
+| C | cloud | pink `#db2777` |
+| T | telemetry | purple `#9333ea` |
+| D | deploy | blue `#2563eb` |
+| F | config | orange `#ea580c` (avoids C collision) |
+
+New `.plane-sym` CSS class — monospace 9px bold pill. Cache-bust v=58 → v=59.
+
+### SME prompt: workspace as private memory + pre-merge detail capture
+
+New `== WORKSPACE: PRE-MERGE DETAIL CAPTURE ==` block in `sme.py` immediately below YOUR WORKSPACE. Doctrine: database holds the WHAT, workspace holds the WHY. Three-step pre-absorb capture:
+
+1. Save handoff QC verbatim → `./handoffs/<absorbed_id>.md`.
+2. Snapshot absorbed component's DB state (get_component + get_attributions + get_component_edges) → JSON files in `./handoffs/`.
+3. Append narrative entry to `./MERGE_LOG.md` per merge: their name, reason, key evidence, new code paths inherited, follow-ups for next wake.
+
+For splits: optional `./split_briefing.md` in survivor's own workspace summarising what was carved out + why.
+
+### SME prompt: code-repo plane: git clone is mandatory
+
+New `== CODE-REPO PLANE: GIT CLONE IS MANDATORY ==` block in `sme.py`. Spells out:
+1. Mandatory first-action sequence on every fresh wake — check for existing clone, pull if present, clone fresh if not (token via `get_secret(plane='github', key='github_token')`).
+2. Failure path — `raise_blocker` immediately on clone failure; never fall back to API-only metadata (produces hollow components).
+3. ANALYSIS DEPTH per decision type: NORMAL MATERIALISATION (walk tree, grep per-stack, cite file_path:line), MERGE EVALUATION (re-read repo slice on every nomination), SPLIT NOMINATION (prove boundary in code BEFORE nominating), POST-MERGE/POST-SPLIT REFRESH (mutation cascade only moves existing rows; SME must discover NEW evidence in newly-owned/trimmed code on next wake).
+
+### SME prompt: §2.8 mass infusion (see PROMPT-ENHANCEMENTS.md §2.8)
+
+ATTRIBUTION vs EDGE rule, attribution global-uniqueness rule, plane=DISCOVERY rule, INBOUND/OUTBOUND grep catalog, DANGLING-EDGE-pair rule, STEP 4 explicit pseudocode, MATERIALISATION COMPLETION CHECKLIST, ONGOING-not-one-off consolidation rule, EXTERNAL MCP ONBOARDING, BULK MCP TACTIC, SLEEP rewrite (LAST RESORT, 300–600s MAX), WAKE BUDGET rule.
+
+### Iterator prompt
+
+ACCESS PRECHECK (first wake on a plane), SEND_BROADCAST ACL note (you cannot call it; propose via chat), BULK MCP TACTIC, SLEEP rewrite.
+
+### Orchestrator prompt
+
+SEND_BROADCAST self-policing (never delegate), CREDENTIALS-via-chat → put_secret pattern, SLEEP rewrite.
+
+### Resolver prompt
+
+vector_search-as-bulk-fetch evidence-triangulation note (companion to §3.10 — no `get_attributions_bulk` tool exists yet; use vector_search where it expresses the query).
+
+### Base mission
+
+CHAT-ADDRESSED-TO-YOU block — read full unacked queue before acting on any single chat (admin sometimes mis-addresses + follows up with "stop stop").
+
+### Files touched
+
+- `src/admin_ui/server.py` — 3 SQL callsites for planes + `/api/agents` 2-level CTE for resource_planes.
+- `src/admin_ui/static/app.js` — `_renderAgentRow` plane-symbol render + cache-bust constants.
+- `src/admin_ui/static/style.css` — new `.plane-sym` class.
+- `src/admin_ui/static/index.html` — cache-bust v=58 → v=59.
+- `src/agent_management/agent_types/base.py` — `model` + `effort` fields + CHAT-ADDRESSED-TO-YOU block.
+- `src/agent_management/agent_types/sme.py` — code-repo clone block, workspace-as-memory block, §2.8 infusion.
+- `src/agent_management/agent_types/iterator.py` — access precheck, send_broadcast ACL, bulk MCP tactic, sleep rewrite.
+- `src/agent_management/agent_types/orchestrator.py` — send_broadcast self-policing, credentials via chat, sleep rewrite.
+- `src/agent_management/agent_types/resolver.py` — vector_search bulk-fetch hint.
+- `src/agent_management/agent_manager.py` — `--model` + `--effort` CLI flags.
+- `docs/PROMPT-ENHANCEMENTS.md` — backlog tracking doc (§2 shipped, §3 open gaps, §4 operational nudges + broadcast log + chat log + insights).
+
+**Effort:** L (multi-day, multi-session work). All five `.py` prompt files compile clean; admin_ui server restarted to pick up SQL changes.
+
+---
+
+## Phase 7.4.8: WebGL GPU memory leak fix + browser-side crash logging ✅
+
+**Shipped 2026-04-27.** Closes the recurring "graph canvas keeps crashing after a few minutes; have to fully quit Chrome to reset WebGL" symptom. User reported `chrome://gpu` showing GPU process crash count = 11 (Chrome 147) and = 5 (Chrome Canary 149) — same `Exit code 5` signature on both, ruling out browser-version specifics.
+
+### Root cause (confirmed via app.js audit)
+
+`makeNodeMesh()` in `app.js` allocated fresh `THREE.Geometry` + `THREE.MeshLambertMaterial` PER NODE PER `graphData()` invocation. Each refresh / tab switch / hover-driven `refreshGraphVisuals()` discarded the prior nodes from 3d-force-graph but never disposed the underlying GPU buffers (`.dispose()` was never called). After ~30 refreshes with 50 nodes, ~1500 leaked GPU resources accumulated. Eventually Chrome's GPU process OOMs and gets killed → `Exit code 5` → restart → leak compounds → after 11 crashes Chrome blocklists WebGL until app restart. The "non-existent mailbox" errors in the log are the GPU process trying to reference SharedImages destroyed when the prior context died.
+
+### Fix #1: shared geometry + material caches
+
+`app.js` gains module-scope `_geomCache` + `_matCache` (Map, capped at 256 entries each, keyed on `(type, quantised-size)` and `(color, isMuted)` respectively). `makeNodeMesh` now consults the caches. Net effect: GPU buffer count is bounded by distinct `(type, size, color)` tuples (~10–30 in practice), regardless of node count or refresh count.
+
+### Fix #2: WebGL context-lost / restored handlers
+
+New `_installWebGLContextHooks(canvasEl)` adds listeners on the inner `<canvas>` element 3d-force-graph mounts:
+
+- `webglcontextlost` → `preventDefault()` (so Chrome attempts restore), POST `/api/clientlog` with snapshot + cache stats, dispose caches, tear down `graphInstance`, render an amber message in the canvas surface so the user can see what happened.
+- `webglcontextrestored` → POST clientlog + re-init the graph cleanly.
+
+### Fix #3: `/api/clientlog` endpoint + browser.log
+
+New POST endpoint in `src/admin_ui/server.py` appends one JSON line per client event to `/tmp/cartograph-logs/browser.log`. Captures: `window.error`, `unhandledrejection`, `webglcontextlost`, `webglcontextrestored`, `beforeunload`. Best-effort write — never throws back to the client. Each line: `{server_ts} {client_ts} {event} {detail_json}` for `grep webglcontextlost /tmp/cartograph-logs/browser.log`.
+
+### Server-side log piping (operational improvement)
+
+All four cartograph processes (cartograph_mcp, trigger_management, agent_management `main`, admin_ui) now run as background shells under the active Claude Code session with stdout/stderr piped to `/tmp/cartograph-logs/{mcp,triggers,agents,admin_ui}.log` via `python -u -m <module> > /tmp/cartograph-logs/<file>.log 2>&1`. The `-u` flag makes Python unbuffered → logs flush in real-time. Combined with `browser.log`, that's five greppable log files for in-flight debugging. Restart sequence documented in `POST-COMPACTION-RECOLLECTION.md §2`.
+
+### Files touched
+
+- `src/admin_ui/static/app.js` — geometry/material caches, dispose helper, WebGL context hooks, client-log POST helpers.
+- `src/admin_ui/server.py` — `/api/clientlog` endpoint + `_append_client_log` helper.
+- `src/admin_ui/static/index.html` — cache-bust v=59 → v=60.
+
+**Effort:** S (~1 hour). Verified with smoke-test POST landing in `browser.log`.
 
 ---
 

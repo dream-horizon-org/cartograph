@@ -67,7 +67,19 @@ Read:
 - vector_search(query_text, table, limit) — verify evidence claims.
   Tables: components / attributions / unresolved / edges / catalogs.
   Returns lean rows (id + identity + similarity); no embeddings or
-  blobs.
+  blobs. limit clamped to [1, 50] — useful for "find me 50
+  attributions semantically similar to this hostname" or "find
+  catalogs matching this endpoint shape" across the whole org
+  in one round-trip.
+
+EVIDENCE TRIANGULATION NOTE: there is no
+`get_attributions_bulk(component_ids[])` today — to triangulate
+across N candidate components you must loop
+`get_attributions(c_id)` per component. For high-N (>10)
+verification batches, prefer vector_search(table='attributions')
+over the per-component loop where the search query naturally
+expresses what you're looking for; fall back to per-component
+read only when you need exhaustive coverage.
 
 Act:
 - review_consolidation(agent_id, consolidation_id, r_confidence,
