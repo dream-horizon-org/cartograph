@@ -578,6 +578,90 @@ def bind_edge(agent_id: str, edge_id: str, to_component_id: str) -> dict:
     return row
 
 
+# ============ Phase 7.4.11: edge deletion ============
+
+
+def delete_edge(agent_id: str, edge_id: str) -> dict:
+    """Owner-scoped, idempotent edge delete.
+
+    Closes the gap where an SME ends up with two edges for the same
+    logical dependency (e.g. one telemetry-discovered + one github-
+    discovered with slightly different identifiers, post-merge) and
+    needs to consolidate them into one canonical row. Without this
+    tool the only options were leaving a stale duplicate or marking
+    it via metadata.superseded_by_edge_id.
+
+    Authorisation:
+      - Bound + dangling rows: caller must own from_component_id
+        (the row's caller-side owner).
+      - Catalog rows (from_component_id IS NULL): callee-owned; not
+        deletable via this tool — use upsert_catalog deletion path
+        when that ships, or decommission_component for a teardown.
+        Refuses with a clear message.
+
+    Cascade behaviour:
+      - flows.outgoing_edge_id has ON DELETE CASCADE — any flows
+        anchored on this edge are removed atomically.
+      - source_attr_id / target_attr_id on attributions are NOT
+        affected (those are evidence pointers, edge id reference
+        is set to NULL on delete via FK ON DELETE SET NULL).
+
+    Idempotent: deleting a non-existent edge id returns
+    {"deleted": False, "edge_id": <id>, "reason": "not_found"}.
+
+    Returns:
+      {"deleted": True,  "edge_id": <id>, "cascaded_flows": <int>}
+      {"deleted": False, "edge_id": <id>, "reason": "not_found" | "catalog_not_supported"}
+    """
+    _assert_sme(agent_id)
+    edge_id_s = str(edge_id or "").strip()
+    if not edge_id_s:
+        raise ValueError("edge_id is required")
+
+    edge = execute_one(
+        """SELECT id, from_component_id, to_component_id, edge_type, identifier
+             FROM edges WHERE id = %s::uuid""",
+        (edge_id_s,),
+    )
+    if edge is None:
+        return {"deleted": False, "edge_id": edge_id_s, "reason": "not_found"}
+
+    # Catalog rows live in the catalogs table now (Phase 7.4); any
+    # remaining edges row with from_component_id IS NULL is a pre-7.4
+    # remnant and should be cleaned up via migration, not via this tool.
+    if edge["from_component_id"] is None:
+        return {
+            "deleted": False,
+            "edge_id": edge_id_s,
+            "reason": "catalog_not_supported",
+        }
+
+    if not _sme_owns_component(agent_id, str(edge["from_component_id"])):
+        raise ValueError(
+            f"SME {agent_id} does not own from_component_id "
+            f"{edge['from_component_id']}. delete_edge is gated on the "
+            "caller-side owner."
+        )
+
+    # Count cascading flows for the response shape (purely informative;
+    # the FK cascade does the actual delete).
+    flow_count_row = execute_one(
+        "SELECT COUNT(*) AS n FROM flows WHERE outgoing_edge_id = %s::uuid",
+        (edge_id_s,),
+    )
+    cascaded_flows = int(flow_count_row["n"]) if flow_count_row else 0
+
+    execute_mutate(
+        "DELETE FROM edges WHERE id = %s::uuid",
+        (edge_id_s,),
+    )
+    return {
+        "deleted": True,
+        "edge_id": edge_id_s,
+        "cascaded_flows": cascaded_flows,
+    }
+
+
 # ============ Phase 3.9: flows ============
 
 

@@ -688,6 +688,42 @@ def bind_edge(
 
 
 @mcp.tool()
+def delete_edge(agent_id: str, edge_id: str) -> dict[str, Any]:
+    """[Phase 7.4.11] Owner-scoped, idempotent edge delete.
+
+    Closes the gap where an SME ends up with two edges for the same
+    logical dependency (e.g. one telemetry-discovered with bare hostname
+    + one github-discovered with `host/dbname` suffix, post-merge) and
+    needs to consolidate them into one canonical row. Without this tool
+    the only options were leaving a stale duplicate or marking it via
+    metadata.superseded_by_edge_id.
+
+    Authorisation: caller must own the row's from_component_id. Catalog
+    rows (from_component_id IS NULL — pre-Phase-7.4 remnants) refuse
+    with reason='catalog_not_supported'. Use upsert_catalog deletion or
+    decommission_component for those.
+
+    Cascade: flows.outgoing_edge_id has ON DELETE CASCADE — flows
+    anchored on the edge are removed atomically. attributions.source_attr_id
+    / target_attr_id stay (FK ON DELETE SET NULL).
+
+    Idempotent: deleting a non-existent edge_id returns
+    {"deleted": False, "reason": "not_found"}.
+
+    Returns:
+      {"deleted": True,  "edge_id": <id>, "cascaded_flows": <int>}
+      {"deleted": False, "edge_id": <id>, "reason": <"not_found"|"catalog_not_supported">}
+
+    Common use case (post-merge edge dedup):
+      A) upsert_edge_outbound on the canonical (richer-identifier) edge
+         with the union of metadata from both planes.
+      B) delete_edge on the leaner-identifier duplicate.
+      Repeat per duplicate pair.
+    """
+    return components_tool.delete_edge(agent_id, edge_id)
+
+
+@mcp.tool()
 def upsert_flow(
     agent_id: str,
     component_id: str,
