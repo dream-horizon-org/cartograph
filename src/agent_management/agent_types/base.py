@@ -99,6 +99,17 @@ class AgentTypeConfig:
     system_prompt: str
     priority: int
     can_install: bool
+    # Claude model id passed to `claude -p --model <id>`. Per-type so we
+    # can dial cheaper models for high-volume agents (iterator, SME) and
+    # heavier reasoning for singleton coordinators (orchestrator,
+    # resolver). If omitted at config build time, defaults inherited
+    # from agent_management/agent_types/<type>.py::build_config().
+    model: str = "claude-sonnet-4-6"
+    # Reasoning effort level passed to `claude -p --effort <level>`.
+    # Valid: low | medium | high | xhigh | max. None = CLI default
+    # (no flag). Use medium for singleton coordinators that need
+    # solid reasoning without extended-thinking cost.
+    effort: str | None = None
 
 
 def get_config(agent_type: str, **kwargs: str) -> AgentTypeConfig:

@@ -190,7 +190,10 @@ class AgentManager:
             "--system-prompt", config.system_prompt,
             "--setting-sources", "project",  # loads .mcp.json from cwd
             "--dangerously-skip-permissions",  # non-interactive mode
+            "--model", config.model,
         ]
+        if config.effort:
+            cmd.extend(["--effort", config.effort])
         if agent["session_id"]:
             cmd.extend(["--resume", agent["session_id"]])
 

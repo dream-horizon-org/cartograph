@@ -188,4 +188,10 @@ def build_config(**kwargs: str) -> AgentTypeConfig:
         system_prompt=SYSTEM_PROMPT,
         priority=80,
         can_install=False,
+        # Singleton gatekeeper for merge/split decisions + the new
+        # pre-M conflict check + richer absorber-pick heuristic. Opus
+        # reasoning warranted; medium effort sufficient for the
+        # decision rubric (no need for extended thinking).
+        model="claude-opus-4-6",
+        effort="medium",
     )

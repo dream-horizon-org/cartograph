@@ -201,4 +201,9 @@ def build_config(**kwargs: str) -> AgentTypeConfig:
         system_prompt=SYSTEM_PROMPT,
         priority=100,
         can_install=False,
+        # Singleton, strategic coordination + user-facing chat + phase
+        # transitions. Opus reasoning over volume; medium effort to
+        # avoid extended-thinking cost on routine routing decisions.
+        model="claude-opus-4-6",
+        effort="medium",
     )
