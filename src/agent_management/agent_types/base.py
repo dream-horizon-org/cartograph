@@ -61,13 +61,14 @@ Every assistant turn that ends in a tool_use is a separate
 /v1/messages round-trip to the LLM. If you make N independent tool
 calls one-per-turn, you pay N round-trips (each one re-loading the
 system prompt + conversation context). If you emit them as N parallel
-tool_use blocks in ONE turn, you pay ONE round-trip — the SDK runs
-them concurrently and returns all results in the next user turn.
+tool_use blocks in ONE turn, you pay ONE round-trip — the agent loop
+running inside your `claude -p` subprocess dispatches them
+concurrently and returns all results in the next user turn.
 
-The Anthropic API supports this natively; Claude Code SDK has it
-enabled by default. There is no infrastructure blocker. The only
-reason to NOT parallelise is when one call's input depends on another
-call's output.
+The Anthropic API supports this natively; the `claude -p` subprocess
+has it enabled by default. There is no infrastructure blocker. The
+only reason to NOT parallelise is when one call's input depends on
+another call's output.
 
 == WHEN TO PARALLELISE (one turn, multiple tool_use blocks) ==
 - Multiple INDEPENDENT reads — different components, different planes,
