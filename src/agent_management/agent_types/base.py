@@ -56,6 +56,58 @@ EDGE (dependency between components):
   One edge per specific call/query, discovered by SMEs during
   Edge Discovery.
 
+== BATCH + PARALLEL TOOL CALLS — PREFER THESE OVER ONE-AT-A-TIME ==
+Every assistant turn that ends in a tool_use is a separate
+/v1/messages round-trip to the LLM. If you make N independent tool
+calls one-per-turn, you pay N round-trips (each one re-loading the
+system prompt + conversation context). If you emit them as N parallel
+tool_use blocks in ONE turn, you pay ONE round-trip — the SDK runs
+them concurrently and returns all results in the next user turn.
+
+The Anthropic API supports this natively; Claude Code SDK has it
+enabled by default. There is no infrastructure blocker. The only
+reason to NOT parallelise is when one call's input depends on another
+call's output.
+
+== WHEN TO PARALLELISE (one turn, multiple tool_use blocks) ==
+- Multiple INDEPENDENT reads — different components, different planes,
+  different threads. e.g. before responding to a merge nomination:
+  emit `get_attributions(my_id)`, `get_attributions(their_id)`,
+  `get_component_edges(my_id)`, `get_component_edges(their_id)`,
+  `vector_search(table='catalogs', query=...)` — five reads, ONE
+  round-trip instead of five.
+- Hygiene sweeps: get_my_catalogs + get_unmatched_callers +
+  get_orphan_catalogs + get_stale_edges + get_stale_flows — fire all
+  five together at the start of a wake.
+- Action-items triage: get_action_items_summary + get_action_items_detail
+  + get_unacked_chats — the second and third don't depend on the first.
+- Independent acks + closures: ack_chats(...) + ack_terminal(...) +
+  send_chat(admin, "noted") on the same wake.
+
+== WHEN TO STAY SEQUENTIAL (one tool per turn) ==
+- Second call's args depend on first call's result. e.g.
+  `upsert_component` → returns id → use in next `upsert_attribution`.
+- Both calls write to the SAME component (potential race on metadata
+  merge — keep them serial).
+- Mutation transitions: `absorb_agent` → `execute_mutation` must be
+  ordered, not parallel.
+- Split nominations on YOUR component — one at a time per the
+  ONE-CHILD-PER-NOMINATION rule.
+
+== USE BULK VARIANTS WHEN AVAILABLE ==
+Prefer one bulk call over N single calls (one DB transaction, one
+LLM round-trip):
+- `upsert_resources_bulk` (iterator)         not N × upsert_resource
+- `bulk_spawn_smes` (orch only)               not N × create_agent
+- `decommission_agents_bulk`                  not N × decommission_agent
+- `decommission_components_bulk`              not N × decommission_component
+- `reject_resources_bulk`                     not N × reject_resource
+
+For >50 same-shape calls (no bulk variant available — bulk attribution
+writes don't exist yet), see the BULK MCP TACTIC section in your
+prompt: a ~30-LOC Python script over JSON-RPC HTTP to localhost:8100/mcp
+that loops in batches outside the LLM context entirely.
+
 == CHAT ADDRESSED TO YOU ==
 A chat row in your inbox (to_agent = your_agent_id) is FOR YOU.
 Sometimes admin or another agent sends a chat to the wrong

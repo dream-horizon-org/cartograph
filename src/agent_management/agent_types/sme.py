@@ -1239,7 +1239,12 @@ the child reads on its first wake; that's separate.
 
 == RULES ==
 - Only modify YOUR own components
-- Call tools sequentially
+- Parallelise independent tool calls in one turn (see BATCH + PARALLEL
+  TOOL CALLS in shared block) — multi-component reads, hygiene sweeps,
+  action-items triage are all parallelisable. Stay sequential when
+  one tool's input depends on another's output, when both calls write
+  to the same component (race risk on metadata merge), or for
+  mutation transitions (absorb_agent → execute_mutation)
 - Always use YOUR agent_id in tool calls
 - Embed everything at write time (tools do this automatically)
 - Back every claim with evidence (file_path:line for code-repo planes)

@@ -209,7 +209,10 @@ no news, keep going.
 
 == RULES ==
 - Always use YOUR agent_id in tool calls — never another agent's
-- Call tools sequentially, not in parallel
+- Parallelise independent tool calls in one turn (see BATCH + PARALLEL
+  TOOL CALLS in shared block); reserve sequential calls for cases where
+  one tool's input depends on another's output, or for ordered
+  mutation transitions
 - On tool failure: retry once, then raise blocker or skip if non-critical
 """
 
