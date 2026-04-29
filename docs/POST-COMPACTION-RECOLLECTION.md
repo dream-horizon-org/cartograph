@@ -65,7 +65,7 @@ sleep 3
 /opt/homebrew/bin/python3.10 -u -m main                    > /tmp/cartograph-logs/agents.log  2>&1 &
 /opt/homebrew/bin/python3.10 -u -m admin_ui.server         > /tmp/cartograph-logs/admin_ui.log 2>&1 &
 sleep 4
-grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1   # expect: 89 tools
+grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1   # expect: 107 tools
 ```
 
 Check live: `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8200/api/agents` → 200.
@@ -76,7 +76,7 @@ Check live: `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8200/api/
 
 The DB was **wiped + recreated** at 14:48 today in preparation for DEMO8 (the upcoming comprehensive test prompt). Current DB state:
 
-- 20 tables, 89 tools registered, only orch + resolver auto-spawned by main.py boot:
+- 20 tables, 107 tools registered, only orch + resolver auto-spawned by main.py boot:
   - `orch-2b7536c8` (orchestrator, idle)
   - `res-5b7f59d3` (resolver, idle)
 - Zero components, zero attributions, zero edges, zero catalogs, zero flows.
@@ -112,8 +112,7 @@ docker exec -i cartograph-postgres-1 psql -U cartograph -d cartograph < /tmp/car
 | 7.4.12-tools | ✅ 2026-04-29 | **3 bulk MCP write tools** atomic-with-pre-validation: `upsert_attributions_bulk`, `upsert_catalogs_bulk`, `upsert_edges_outbound_bulk`. Max 500 rows/call. Returns `{committed, applied, rows / errors}`. Tool count 86 → 89. |
 | 7.4.13 | ✅ 2026-04-29 | Pre-injected action items in invocation user message — `agent_manager._build_action_items_snapshot()` runs ONE SQL aggregating pending counts (consolidations/tasks/clarifications/chats/broadcasts/terminal_pending/proxied), embeds in user message NOT system_prompt (cache-safety critical). Skips first-turn `get_action_items_summary` round-trip. |
 | 7.4.14 | ✅ 2026-04-29 | Wake debouncing 5-min — new `agent_runs.first_pending_at TIMESTAMPTZ` column. Trigger scanner refuses lock until window elapsed unless override (admin chat OR `mutation_assigned_to` on state=M consolidation). Cleared on yield. |
-| **7.4.15** | **PROPOSED, NOT SHIPPED** | **Soft-delete model** (see §11) — agent-owned `delete_attribution / delete_catalog / delete_flow` + bulk variants + convert `delete_edge` from hard to soft. New `deleted_at / deleted_by / deletion_reason` columns + null-the-vector on delete. ~1500 LOC across 4 sub-batches. |
-| **Round 4 bulks** | **PROPOSED, NOT SHIPPED** | `upsert_flows_bulk`, `insert_unresolved_bulk`, `ack_broadcasts_bulk`, `ack_terminals_bulk`, plus `delete_edges_bulk` (Round 4 + 7.4.15 share the bulk delete companion). |
+| **8** | **✅ SHIPPED 2026-04-29** | **Token Optimisation + Gap Closings.** 18 new tools (89 → 107). Hard-delete chosen over soft-delete (see §11). 7 sub-batches across 7 commits. Closes the 4-row-type corrective surface, finishes Round-4 bulks, eliminates the notify.py PostToolUse race, makes insert_unresolved idempotent. |
 
 ---
 
@@ -147,8 +146,9 @@ docker exec -i cartograph-postgres-1 psql -U cartograph -d cartograph < /tmp/car
 ```
 action_items (2):     get_action_items_summary, get_action_items_detail
 chat (4):             send_chat, ack_chats, get_unacked_chats, get_chat_history
-broadcast (4):        send_broadcast, ack_broadcast, get_unacked_broadcasts,
-                      update_broadcast_persistence
+broadcast (5):        send_broadcast, ack_broadcast, get_unacked_broadcasts,
+                      update_broadcast_persistence,
+                      **ack_broadcasts_bulk** (8.4)
 secrets (4):          put_secret, get_secret, list_secrets_for_plane, delete_secret
 tasks (5):            create_task, respond_task, raise_blocker, get_my_tasks, get_task_thread
 resources (9):        upsert_resource, upsert_resources_bulk, get_resource,
@@ -157,17 +157,25 @@ resources (9):        upsert_resource, upsert_resources_bulk, get_resource,
 agent_lifecycle (11): create_agent, bulk_spawn_smes, list_agents, reset_agent,
                       decommission_agent(_bulk), decommission_component(_bulk),
                       sleep_self, bulk_sleep_agents, bulk_wake_agents
-components (19):      upsert_component, upsert_attribution,
-                      **upsert_attributions_bulk** (7.4.12),
+components (32):      upsert_component, upsert_attribution,
+                      upsert_attributions_bulk (7.4.12),
                       create_edge (3.9 shim),
-                      insert_unresolved, resolve_reference,
+                      insert_unresolved (idempotent ON CONFLICT post-8.4),
+                      resolve_reference,
                       upsert_edge_catalog (7.4 shim), upsert_edge_outbound,
-                      **upsert_edges_outbound_bulk** (7.4.12),
-                      bind_edge, upsert_flow,
-                      **delete_edge** (7.4.11) — owner-scoped, idempotent, cascades flows,
-                      get_component, get_attributions, get_edges,
-                      get_unresolved, get_component_edges,
-                      get_flow, get_flow_inverse
+                      upsert_edges_outbound_bulk (7.4.12), bind_edge,
+                      upsert_flow, **upsert_flows_bulk** (8.4),
+                      **insert_unresolved_bulk** (8.4),
+                      delete_edge (7.4.11), **delete_edges_bulk** (8.3),
+                      **delete_attribution** + **_bulk** (8.2/8.3),
+                      **delete_flow** + **_bulk** (8.2/8.3),
+                      **delete_unresolved** + **_bulk** (8.2/8.3),
+                      get_component, **get_components_bulk** (8.5),
+                      get_attributions, **get_attributions_bulk** (8.5),
+                      get_edges, get_component_edges,
+                      **get_component_edges_bulk** (8.5),
+                      get_unresolved, get_flow, get_flow_inverse,
+                      **get_flows_bulk** (8.5)
 notifications (1):    get_agent_notifications
 consolidation (5):    nominate, respond, review, get_my, get_thread
 clarification (4):    create, respond, get_my, get_thread
@@ -177,17 +185,18 @@ mutation (10):        execute_mutation, complete_consolidation, absorb_agent,
                       transfer_flows, get_my_components, get_stale_edges, get_stale_flows
 proxy (2):            get_my_proxy_items, act_on_proxy_item
 insights (1):         record_insight   (Phase 5.9)
-terminal_acks (1):    ack_terminal     (Phase 7.1)
-catalogs (6):         upsert_catalog,
-                      **upsert_catalogs_bulk** (7.4.12),
-                      get_my_catalogs, get_my_catalog_callers,
-                      get_unmatched_callers, get_orphan_catalogs
+terminal_acks (2):    ack_terminal (7.1), **ack_terminals_bulk** (8.4)
+catalogs (8):         upsert_catalog, upsert_catalogs_bulk (7.4.12),
+                      get_my_catalogs, **get_catalogs_bulk** (8.5),
+                      get_my_catalog_callers,
+                      get_unmatched_callers, get_orphan_catalogs,
+                      **delete_catalog** + **_bulk** (8.2/8.3)
 
 Plus auto-wrapped: every @mcp.tool() registration wrapped by
 cartograph_mcp.audit.audited (Phase 5.10) → mcp_audit table.
 ```
 
-**Total: 89.** Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`.
+**Total: 107.** Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`.
 
 ---
 
@@ -261,73 +270,49 @@ The hook (`src/agent_management/hooks/notify.py`) fires **after every tool call*
 
 ---
 
-## 11. Soft-delete plan (Phase 7.4.15) — DISCUSSED, AGREED, NOT YET SHIPPED
+## 11. Phase 8 (Token Optimisation + Gap Closings) — SHIPPED 2026-04-29
 
-**User pushed back on my "no single-row delete needed" reasoning. They're right. Ship it.**
+**Decision: hard delete, not soft delete.** After deeper analysis we flipped the soft-delete plan to a hard-delete model:
 
-**Schema (idempotent migrations, applies to attributions / catalogs / edges / flows):**
-```sql
-ALTER TABLE <table>
-  ADD COLUMN deleted_at TIMESTAMPTZ,
-  ADD COLUMN deleted_by TEXT,
-  ADD COLUMN deletion_reason TEXT;
-CREATE INDEX idx_<table>_active ON <table>(component_id) WHERE deleted_at IS NULL;
-```
+- **Existing FK cascades + SET NULL already encode the right semantics.** No new cascade logic to design.
+- **mcp_audit covers the audit trail need** (every tool call captured: agent_id, tool_name, args_hash, timestamp, duration). Don't need a second audit channel on the row.
+- **Reversibility was theoretical** — no observed undelete asks in real runs.
+- **Soft-delete tax was real** — 20+ read-site filter audits, every bulk pre-validation gets a "is target deleted?" branch, mutation cascades convert from DELETE to UPDATE, admin UI gets a "show deleted" toggle nobody asked for.
 
-**Tools (single + bulk pairs):**
-- `delete_attribution(agent_id, attribution_id, reason?)` — soft-delete + null embedding. Owner-scoped (caller must own component_id of the attribution). Idempotent.
-- `delete_attributions_bulk(agent_id, attribution_ids[])` — atomic-with-pre-validation.
-- `delete_catalog(agent_id, catalog_id, reason?)` — same pattern + cascade-soft-delete dependent flows (NOT hard cascade — set their deleted_at too).
-- `delete_catalogs_bulk(agent_id, catalog_ids[])` — same.
-- `delete_flow(agent_id, flow_id, reason?)` — same. No cascade (flows are leaves).
-- `delete_flows_bulk(agent_id, flow_ids[])` — same.
-- **`delete_edge` conversion** — Phase 7.4.11 ships HARD delete. Convert to soft + null embedding for consistency.
-- `delete_edges_bulk(agent_id, edge_ids[])` — atomic-with-pre-validation.
+**Shipped surface (89 → 107 tools, +18):**
 
-**Read-path filter additions (CRITICAL):** every read tool needs `WHERE deleted_at IS NULL` added. Default: hide deleted unless `include_deleted=False` is explicitly flipped.
-- Tools to update: `get_attribution(s)`, `get_component_edges`, `get_my_catalogs`, `get_flow(_inverse)`, `vector_search` (filter by `WHERE deleted_at IS NULL`), `get_unmatched_callers`, `get_orphan_catalogs`, all admin UI queries.
+- **8.1** notify.py flock fix — eliminates duplicate NOTIFY race on parallel tool calls.
+- **8.2** 4 corrective delete singletons: `delete_attribution`, `delete_catalog`, `delete_flow`, `delete_unresolved`. Owner-scoped, idempotent, optional reason param surfaces in mcp_audit.
+- **8.3** 5 corrective delete bulks: the 4 above + `delete_edges_bulk` (companion to existing `delete_edge`). Atomic-with-pre-validation, max 500.
+- **8.4** 4 write bulks: `upsert_flows_bulk`, `insert_unresolved_bulk`, `ack_broadcasts_bulk`, `ack_terminals_bulk`. Plus schema migration `ALTER TABLE unresolved ADD CONSTRAINT unresolved_unique_per_ref UNIQUE (found_in_component_id, reference_type, reference_value)` + behaviour change to `insert_unresolved` (now ON CONFLICT idempotent — repeats bump attempts).
+- **8.5** 5 multi-component bulk reads: `get_components_bulk`, `get_attributions_bulk`, `get_component_edges_bulk`, `get_catalogs_bulk`, `get_flows_bulk`. Closes the resolver-triangulation gap.
+- **8.6** SME prompt: new `== CORRECTIVE ACTIONS ==` block; BULK CALLS DECISION LADDER refresh listing all 18 new tools. Resolver prompt: triangulation note rewritten — bulk reads recommended over per-candidate loops.
+- **8.7** Doc sync + DEMO8 prompt.
 
-**Mutation paths to update:**
-- `absorb_agent` catalog cascade — currently DELETEs target's colliding catalog rows. Switch to soft-delete with `deletion_reason='merged_into:<surviving_catalog_id>'`. Same for transfer_edges collision-collapse.
+**Cascade summary (existing FKs handle all four):**
+- `delete_attribution` → edges' `source_attr_id` / `target_attr_id` → SET NULL (FK already there)
+- `delete_catalog` → flows.incoming_catalog_id → CASCADE
+- `delete_edge` → flows.outgoing_edge_id → CASCADE
+- `delete_flow` → leaf, no cascade
+- `delete_unresolved` → leaf, no cascade
 
-**Estimated effort:** ~1500 LOC across 4 sub-batches (schema migration + read-path filter audit / singles + delete_edge conversion / bulks / admin UI surfacing). 1 day.
+**Schema delta:** ONE idempotent migration (UNIQUE on unresolved). No deleted_at columns. No read-site audit.
 
-**Suggested sub-batches:**
-1. Schema migration + read-path filter audit (silent groundwork, no new tools).
-2. Singles + delete_edge conversion.
-3. Bulks.
-4. Admin UI surfacing (deleted-row pill, "show deleted" toggle in drilldown).
-
-**User said this is the right design** — your "soft delete with dedicated column + null the vector" is better than my "metadata tombstone" suggestion. Reasons it wins: reversibility, audit trail preserved, vector_search clean (NULL embeddings are already filtered), graph hygiene cheap (`WHERE NOT deleted` clause everywhere), foreign-key chains untouched, forensic queries one SQL away.
+**Per-sub-batch commits:** see `git log --oneline | grep "Phase 8"` (7 commits).
 
 ---
 
-## 12. Round 4 bulk completion (NOT YET SHIPPED — pairs with 7.4.15)
-
-In addition to soft-delete, these bulk variants were planned but not shipped:
+## 12. Round 4 bulk completion — folded into Phase 8 above
 
 | Tool | Why ship | Effort |
 |---|---|---|
-| `upsert_flows_bulk` | Step 4 catalog→outgoing join produces N flows; symmetric with the 3 already shipped | ~75 LOC |
-| `insert_unresolved_bulk` | Pairs with bulk dangling-edge writes (DANGLING-EDGE-pair rule) | ~50 LOC |
-| `ack_broadcasts_bulk` | Mechanical batch | ~30 LOC |
-| `ack_terminals_bulk` | Mechanical batch | ~30 LOC |
-| Read bulks (`get_attributions_bulk`, `get_components_bulk`, `get_component_edges_bulk`) | §3.10 gap — resolver triangulation needs multi-component reads | ~30 LOC each |
-| `bind_edges_bulk` | Resolution phase, low-frequency today | ~50 LOC |
-
-Total: ~350 LOC + tests. Combined with 7.4.15 deletes: ~2000 LOC of one cohesive sub-phase, tool count 89 → ~100.
+| All folded into Phase 8 above. | Shipped 2026-04-29. | See §11. |
 
 ---
 
-## 13. DEMO8 test prompt (REQUESTED, NOT YET COMPOSED)
+## 13. DEMO8 test prompt — SHIPPED at `docs/oorch-test-prompt-demo8`
 
-User asked for a comprehensive test prompt covering:
-- Everything from DEMO7 (catalogs first-class, flows reference catalogs, self-loops, pre-merge handoff, terminal acks, proxy inheritance, mutation lifecycle, consolidation negotiation, absorber-pick, evidence ladder, in-flight learning, one-merge-ripens-at-a-time, pre-M conflict check)
-- Plus everything new since DEMO7 (delete_edge + identifier normalisation, the 3 bulk MCP write tools, parallel tool calls / BATCH block, concise output, BULK CALLS DECISION LADDER, pre-inject action items, wake debouncing, post-merge EDGE DEDUP)
-
-Test should exercise a couple of dummy SMEs in an orchestrator dance. Final scorecard tagged `[DEMO8-RESULT]` for admin to paste back.
-
-**Decision pending:** ship Round 4 + Phase 7.4.15 bulks first (so DEMO8 exercises the full delete + bulk surface), OR compose DEMO8 against the current 89-tool surface and ship the bulk completion as a follow-up?
+Comprehensive superset of DEMO7 + everything since (Phase 7.4.7 → 8). Tag conventions: `[DEMO8-PHASE-N]`, `[DEMO8-OK]`, `[DEMO8-FAIL]`, `[DEMO8-BUG]`, `[DEMO8-NOTE]`, `[DEMO8-RESULT]`.
 
 ---
 
@@ -365,7 +350,7 @@ Test should exercise a couple of dummy SMEs in an orchestrator dance. Final scor
 ## 16. Re-hydration checklist (do in order post-compaction)
 
 1. **`git log --oneline -25`** — confirm `27429fe` is HEAD on `feat/trigger-manager-cartograh-mcp`.
-2. **`grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`** — should show `89 tools`. If not, MCP server isn't running; restart per §2.
+2. **`grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`** — should show `107 tools`. If not, MCP server isn't running; restart per §2.
 3. **Read this doc fully.**
 4. **Read the 7 docs** (HLD / SCHEMA / TRIGGER-MANAGEMENT / AGENT-PROMPTS / IMPLEMENTATION-PHASES / ONE-PAGER / **PROMPT-ENHANCEMENTS**) — user will paste these.
 5. **Check the 3 memory files** at `~/.claude/projects/-Users-venkata-manohar-release-agent-docs-service-dependency/memory/` (auto-loaded).

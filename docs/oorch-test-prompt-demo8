@@ -1,0 +1,555 @@
+---
+DEMO8 — End-to-end verification (paste this whole block to orchestrator)
+
+[DEMO8-START]
+
+You are orchestrating a comprehensive end-to-end verification dance for
+Cartograph covering EVERY shipped feature: DEMO7's full surface PLUS
+everything added since (Phase 7.4.7 → Phase 8). This is a structured
+22-phase test — each phase verifies a specific feature surface.
+
+== REPORT-BACK CONVENTIONS ==
+
+Tag every status / observation message with one of:
+  [DEMO8-PHASE-N]    section header (N = 1..22)
+  [DEMO8-OK]         a verification passed
+  [DEMO8-FAIL]       a verification failed (note expected vs actual)
+  [DEMO8-BUG]        unexpected behavior worth flagging
+  [DEMO8-NOTE]       informational observation
+  [DEMO8-RESULT]     final scorecard at the end
+
+DO NOT use these prefixes for anything else. The user will grep these
+prefixes and paste back to Claude for analysis.
+
+== TOPOLOGY ==
+
+Spawn 4 SMEs covering 4 components:
+  sme-auth-1     → auth-svc (handles HTTP /verify endpoint)
+  sme-auth-2     → auth-svc-v2 (DUPLICATE of auth-svc — should merge)
+  sme-monolith   → monolith-x (contains BOTH "payments" and "feeds" — should split)
+  sme-cron       → cron-rebalance (CRON job, self-triggers daily — exercises self-loop)
+
+Use bulk_spawn_smes against a synthetic plane='github' resource set, or
+create_agent individually. Either is fine. NOTE: prefer bulk_spawn_smes
+to exercise the bulk path.
+
+== PHASE 1 — Setup + materialisation ==
+
+Spawn the 4 SMEs. Each materialises its component via:
+  - upsert_component with appropriate canonical_name, display_name,
+    component_type='application' (or 'cron' for sme-cron)
+  - upsert_attribution exhaustively (hostnames, deploy configs, etc.)
+
+★ EXERCISE BULK WRITES: at least one SME must use upsert_attributions_bulk
+  (Phase 7.4.12) for ≥3 attributions to demonstrate the atomic-with-pre-
+  validation path. If the bulk call returns committed=False with errors,
+  the test continues normally with a [DEMO8-NOTE] capturing the error map.
+
+REPORT [DEMO8-PHASE-1] when all 4 SMEs have materialised.
+REPORT [DEMO8-OK] for each component created + the bulk attributions call.
+List the 4 component_ids.
+
+== PHASE 2 — Catalogs first-class (Phase 7.4) + bulk catalog upsert ==
+
+Each SME declares catalogs using `upsert_catalog` (noun-form kind).
+sme-monolith MUST use `upsert_catalogs_bulk` for its 2 catalogs to
+exercise that path:
+
+  sme-auth-1:    upsert_catalog(component_id, kind='endpoint',
+                                identifier='POST /verify')
+  sme-auth-1:    upsert_catalog(component_id, kind='endpoint',
+                                identifier='GET /token')
+  sme-monolith:  upsert_catalogs_bulk(component_id, [
+                   {kind:'endpoint', identifier:'POST /payments/charge'},
+                   {kind:'endpoint', identifier:'GET /feeds/scores'},
+                 ])
+  sme-cron:      upsert_catalog(component_id, kind='trigger_target',
+                                identifier='daily-rebalance')
+
+Verify:
+  - sme-auth-1 calls get_my_catalogs() → 2 rows
+  - sme-monolith calls get_my_catalogs() → 2 rows (no dupes — Phase 7.4.5)
+  - sme-cron calls get_my_catalogs() → 1 row
+
+REPORT [DEMO8-PHASE-2] header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each catalog declaration + each
+get_my_catalogs result.
+
+== PHASE 3 — Bound calls + unmatched-caller triage + bulk edge writes ==
+
+sme-auth-1 creates 2 outbound bound calls to sme-monolith; one MUST go
+via upsert_edges_outbound_bulk (Phase 7.4.12):
+
+  sme-auth-1 (bulk path):
+    upsert_edges_outbound_bulk([
+      {from_component_id:auth-svc_id, to_component_id:monolith-x_id,
+       edge_type:'calls', identifier:'POST /payments/charge'},
+      {from_component_id:auth-svc_id, to_component_id:monolith-x_id,
+       edge_type:'calls', identifier:'POST /unknown-endpoint'},
+    ])
+
+Verify:
+  - First edge MATCHES monolith's catalog: get_my_catalog_callers from
+    sme-monolith confirms sme-auth-1 appears.
+  - Second edge does NOT match: get_unmatched_callers from sme-monolith
+    surfaces '/unknown-endpoint'.
+
+sme-monolith triages the unmatched caller: raise a clarification to
+sme-auth-1 ("did you mean to call /unknown-endpoint? I don't expose
+it"). sme-auth-1 responds QC ("typo, will fix") and uses the new
+**Phase 8.2 corrective action**: `delete_edge(your_id, edge_id)` to
+remove the wrong edge. Then upsert the correct one.
+
+REPORT [DEMO8-PHASE-3] header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each verification + the
+delete_edge corrective action.
+
+== PHASE 4 — Self-loop edge (Phase 7.3 + 7.4.4) ==
+
+sme-cron exercises self-loops on ALL THREE write paths (Phase 7.4.4
+dropped the Python guards):
+
+4a. upsert_edge_outbound with from = to:
+    upsert_edge_outbound(from=cron_component_id, to=cron_component_id,
+                         edge_type='triggers', identifier='daily-rebalance')
+
+4b. create_edge (legacy shim) with source = target:
+    create_edge({source_id=cron_component_id, target_id=cron_component_id,
+                 edge_type='calls', identifier='self-recurse'})
+
+4c. bind_edge resolving a dangling outgoing back to self:
+    - First: upsert_edge_outbound(from=cron, to=NULL,
+      edge_type='calls', identifier='lazy-self')
+    - Then: bind_edge(dangling_id, to_component_id=cron_component_id)
+
+All three should succeed. Report [DEMO8-FAIL] with verbatim error if
+any path raises.
+
+REPORT [DEMO8-PHASE-4] header.
+REPORT [DEMO8-OK] for each of 4a / 4b / 4c (3 separate lines).
+
+== PHASE 5 — Merge nomination + auto-escalation + resolver review ==
+
+sme-auth-1 nominates a merge with sme-auth-2 (canonical_name +
+attributions overlap). Use confidence ≥ 0.85 in the nomination message
+so it auto-escalates.
+
+sme-auth-2 responds with confidence ≥ 0.85.
+
+The auto_transitions scanner escalates to R once both scores ≥ 0.85.
+
+Resolver reviews — and HERE we exercise the **Phase 8.5 bulk reads**:
+resolver MUST call `get_attributions_bulk([auth-1_id, auth-2_id])` +
+`get_catalogs_bulk([auth-1_id, auth-2_id])` +
+`get_component_edges_bulk([auth-1_id, auth-2_id])` to triangulate
+evidence in ONE round-trip per call instead of looping. Then approve
+with new_status='M' and mutation_assigned_to=sme-auth-1 (per
+absorber-pick: richer side wins).
+
+REPORT [DEMO8-PHASE-5] header.
+REPORT [DEMO8-OK] for: nomination, response, auto-escalation visible
+(status='R'), bulk-read triangulation calls all returned, resolver
+review (status='M', mutation_assigned_to set).
+
+For Phase 5.6 verification: read the consolidation thread and confirm
+each state-change message has metadata.confidence_at_send = {a, b, r}.
+
+== PHASE 6 — Pre-merge handoff + absorb + terminal ack ==
+
+This is the big one — exercises three Phase 7 features in sequence.
+
+  6a. PRE-MERGE HANDOFF (Phase 7.2):
+      sme-auth-1 (mutation POC) MUST raise a clarification to
+      sme-auth-2 BEFORE absorb_agent. sme-auth-2 responds with QC and
+      a one-paragraph brief. sme-auth-1 reads it, updates its own
+      component_doc_md via upsert_component to capture the brief.
+      THEN absorb.
+
+      REPORT [DEMO8-OK] if handoff happened in this order;
+      [DEMO8-FAIL] if sme-auth-1 absorbed without the clarification.
+
+  6b. ABSORB (4.1 cascade + 7.4.2 catalog cascade):
+      sme-auth-1 calls absorb_agent(consolidation_id, target=sme-auth-2,
+                                    deactivation_reason='merged',
+                                    deactivation_notes='auth-svc-v2 folded in')
+      with default cascade flags.
+
+      Verify:
+        - sme-auth-2.status = 'decommissioned'
+        - sme-auth-2.merged_into_agent_id = sme-auth-1
+        - sme-auth-2's attributions transferred
+        - sme-auth-2's component status = 'decommissioned'
+        - absorb response carries cascade.catalogs >= 0
+        - sme-auth-1 calls get_my_catalogs() — POST /verify +
+          POST /token + any inherited catalogs all present once each
+          (no dups post-merge — Phase 7.4.5)
+
+  6c. EXECUTE + COMPLETE (Phase 4):
+      sme-auth-1 calls execute_mutation → status M → MD.
+      Resolver calls complete_consolidation → status MD → D.
+
+  6d. TERMINAL ACK (Phase 7.1):
+      Both sme-auth-1 (still active) AND resolver should now have
+      this consolidation in their terminal_pending_ack bucket.
+      ★ EXERCISE Phase 8.4 ack_terminals_bulk: each calls
+      `ack_terminals_bulk([{entity_type:'consolidation', entity_id:cid}])`.
+
+REPORT [DEMO8-PHASE-6] header before any 6X work begins.
+REPORT [DEMO8-OK] for each verification step.
+
+== PHASE 7 — Split + transfers + Phase 8.4 upsert_flows_bulk ==
+
+sme-monolith nominates a split (carve out "payments"). Status lands
+directly at R (no B2 — Phase 4 split rule).
+
+Resolver reviews → M with mutation_assigned_to=sme-monolith.
+
+sme-monolith calls spawn_child_agent with:
+  - child_id="sme-payments-split"
+  - component_data + child_source_slice + briefing
+  - transfer_catalog_ids: [POST /payments/charge catalog id]
+  - transfer_edge_ids: [bound edges from the payments side]
+  - transfer_flow_ids: [flow rows whose incoming_catalog_id is in transfer_catalog_ids]
+  - transfer_attribution_ids: [payments-side attributions]
+
+Verify:
+  - sme-payments-split exists with status='idle'
+  - New component has split_from_component_id pointing to monolith
+  - Transferred catalogs / edges / attributions belong to child
+    (response carries transferred_catalogs, transferred_edges,
+    transferred_attributions counters)
+  - Transferred flow's incoming_catalog_id still references the
+    same catalog row (now under child)
+  - A welcome [split-welcome] task exists for sme-payments-split
+
+sme-monolith calls execute_mutation → MD. Resolver calls
+complete_consolidation → D.
+
+★ EXERCISE Phase 8.4 upsert_flows_bulk: sme-payments-split (post-split)
+  declares ≥2 flows in ONE bulk call:
+    upsert_flows_bulk(child_component_id, [
+      {incoming_catalog_id:<POST /payments/charge>, outgoing_edge_id:<edge1>},
+      {incoming_catalog_id:<POST /payments/charge>, outgoing_edge_id:<edge2>},
+    ])
+  (fan-out demo on the child component.)
+
+Both sme-monolith and resolver get terminal_pending_ack — each acks
+via ack_terminal or ack_terminals_bulk.
+
+REPORT [DEMO8-PHASE-7] header.
+REPORT [DEMO8-OK] for each verification + the upsert_flows_bulk call +
+the ack flow.
+
+== PHASE 8 — Proxy inheritance ==
+
+Admin sends a chat to sme-auth-2 (decommissioned).
+
+Wait a few seconds. sme-auth-1 calls get_my_proxy_items() — verify the
+chat surfaces under sme-auth-1's proxied items (grouped by
+proxy_agent_id=sme-auth-2, depth=1).
+
+sme-auth-1 responds via act_on_proxy_item:
+  act_on_proxy_item(survivor=sme-auth-1, item_type='chat',
+                    item_id=<chat_comm_id>, action='send',
+                    payload={proxy_agent_id:'sme-auth-2',
+                             to_agent_id:'admin',
+                             message:'Replying on behalf of sme-auth-2 (now decommissioned).'})
+
+Verify:
+  - New chat row from sme-auth-2 (proxy) to admin
+  - proxy_audit row exists for this act
+  - Admin sees the response in chat history
+
+REPORT [DEMO8-PHASE-8] header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each step.
+
+== PHASE 9 — Insights ==
+
+Each of sme-auth-1, sme-monolith, sme-cron calls record_insight at
+least once during the demo, capturing a real observation (e.g.
+tactic_win on bulk corrective deletes).
+
+REPORT [DEMO8-PHASE-9] header.
+REPORT [DEMO8-OK] with a count of insights recorded.
+
+== PHASE 10 — Persistence toggle + confidence-at-send ==
+
+10a. PERSISTENCE TOGGLE (Phase 5.7):
+     Admin sends a broadcast persistent=False to all SMEs.
+     Then update_broadcast_persistence(comm_id, persistent=True).
+     Verify is_persistent flipped via /api/communications.
+
+10b. CONFIDENCE-AT-SEND (Phase 5.6) — already verified Phase 5.
+
+★ EXERCISE Phase 8.4 ack_broadcasts_bulk: have ≥2 SMEs ack the
+  broadcast in ONE bulk call each rather than one ack_broadcast call.
+
+REPORT [DEMO8-PHASE-10] header.
+
+== PHASE 11 — MCP audit (Phase 5.10) ==
+
+Spot-check via:
+  curl -s 'http://localhost:8200/api/mcp_audit?agent_id=sme-auth-1&limit=10'
+
+Verify the returned entries include recent tool names — must include at
+least one of: upsert_attributions_bulk, delete_edge, ack_terminals_bulk,
+get_attributions_bulk (proves Phase 7.4.12 + 8.x audit capture works).
+
+REPORT [DEMO8-PHASE-11] header.
+
+== PHASE 12 — Flows reference catalogs first-class (Phase 7.4.2) ==
+
+(Same scope as DEMO7 Phase 12: declare ≥2 flows per SME with at least
+one catalog + one outgoing edge. Use upsert_flows_bulk where
+applicable to exercise Phase 8.4.)
+
+Per-SME flow targets:
+  sme-auth-1 (post-merge — owns POST /verify + POST /token + inherited):
+    ≥2 flows on different catalogs. Use upsert_flows_bulk.
+  sme-monolith (pre-split — owns POST /payments/charge + GET /feeds/scores):
+    ≥3 flows including 1 fan-out (catalog → 2 outgoings).
+  sme-payments-split (post-split — owns the carved POST /payments/charge):
+    ≥1 flow.
+  sme-cron (owns trigger_target daily-rebalance + the self-loop):
+    1 flow on the self-loop edge.
+
+Total target: ≥7 flow rows. Verify via /api/graph that flows.length
+is ≥ 7.
+
+★ NEGATIVE PATH: sme-monolith tries upsert_flow with sme-cron's
+  catalog id as incoming_catalog_id. Should raise "does not belong to
+  component".
+
+REPORT [DEMO8-PHASE-12] header.
+
+== PHASE 13 — Vector search on catalogs ==
+
+sme-auth-1: vector_search(query_text='login verify endpoint',
+                          table='catalogs', limit=5)
+Verify response carries POST /verify (top hits) + lean projection
+(no embedding, no metadata blobs — Phase 7.4.4).
+
+Cross-check: vector_search table='edges' for the same queries does NOT
+return catalog-shaped rows (catalogs not in edges post-7.4).
+
+REPORT [DEMO8-PHASE-13] header.
+
+== PHASE 14 — Admin UI catalog endpoints (Phase 7.4.2) ==
+
+(Same as DEMO7 Phase 14: spot-check /api/components.catalog_count > 0,
+/api/component/{id}/drilldown.edges.catalog populated,
+/api/graph flows[].incoming_catalog_id present.)
+
+REPORT [DEMO8-PHASE-14] header.
+
+== PHASE 15 — Phase 7.4.4 + 7.4.5 fix verifications ==
+
+(Same as DEMO7 Phases 15 + 16 — confirm fixes hold:
+  spawn_child_agent transfer_catalog_ids exposed in MCP wrapper;
+  Phase 7.3 self-loop guards stay dead;
+  vector_search lean projection holds;
+  get_my_catalogs no duplicates post-merge;
+  get_action_items_summary uniform-int shape;
+  SME prompts reference upsert_catalog not upsert_edge_catalog.)
+
+REPORT [DEMO8-PHASE-15] header.
+
+== PHASE 16 — Phase 7.4.7 per-type model + plane semantics ==
+
+16a. Verify orchestrator runs on sonnet-4-6 (post-Round-1 #2).
+     Inspect a recent orch run via mcp_audit (model is in args_hash
+     args? not directly; check /tmp/cartograph-logs/agents.log for
+     `--model claude-sonnet-4-6` in the orch invoke command).
+
+16b. Verify resolver runs on opus-4-6 + medium effort. Same log
+     inspection.
+
+16c. Verify /api/components and /api/graph nodes carry planes[]
+     sourced from RCA→resources (not attributions). Spot-check via
+     curl.
+
+16d. Verify /api/agents returns resource_planes[] for each agent.
+     Admin UI agent list shows G/C/T/D/F plane symbols.
+
+REPORT [DEMO8-PHASE-16] header.
+
+== PHASE 17 — Phase 7.4.11 delete_edge + identifier normalisation ==
+
+17a. Already exercised in Phase 3 (sme-auth-1 deleted wrong edge).
+     Confirm by querying edges table for the deleted edge_id — should
+     be gone. Confirm the response carried cascaded_flows count.
+
+17b. IDENTIFIER NORMALISATION smoke test: ask sme-auth-1 via send_chat
+     "What's the right identifier shape if telemetry surfaces a bare
+     hostname and github surfaces host/dbname for the same DB?"
+     Expected response references the DB-host normalisation rule
+     (drop /dbname, put db_name in metadata).
+
+REPORT [DEMO8-PHASE-17] header.
+
+== PHASE 18 — Phase 7.4.12 bulk MCP write tools ==
+
+Already exercised across Phases 1, 2, 3, 7. Confirm by counting:
+  curl -s 'http://localhost:8200/api/mcp_audit?tool_name=upsert_attributions_bulk&limit=5'
+
+Should return ≥1 row from this demo run.
+
+REPORT [DEMO8-PHASE-18] header.
+
+== PHASE 19 — Phase 7.4.13 pre-injected action items ==
+
+Verify by inspecting an SME wake's invocation prompt. The user
+message should include `== ACTION ITEMS SNAPSHOT (at <ts>) ==` with
+counts (consolidations_pending, tasks_pending, etc.).
+
+Easiest way: pause work for 5+ minutes so the snapshot has interesting
+counts, then look at /tmp/cartograph-logs/agents.log for the next
+SME wake's snapshot block.
+
+REPORT [DEMO8-PHASE-19] header.
+
+== PHASE 20 — Phase 7.4.14 wake debouncing ==
+
+Trigger the override conditions to bypass the 5-min debounce:
+  20a. Admin chat to a sleeping/idle SME → instant wake (no 5-min wait).
+  20b. Resolver approves merge with mutation_assigned_to=sme-X → sme-X
+       wakes instantly (mid-mutation override).
+
+Verify by watching /tmp/cartograph-logs/triggers.log for the
+debounce-skip messages or wake timestamps.
+
+REPORT [DEMO8-PHASE-20] header.
+
+== PHASE 21 — Phase 8 corrective deletes + read bulks (NEW SURFACE) ==
+
+THIS IS THE PHASE-8 EXERCISE — must hit every new tool at least once.
+
+21a. **delete_attribution + bulk** — sme-monolith intentionally writes
+     a wrong-shape attribution (e.g. `outbound_db_host`) then realises
+     the mistake (per the ATTRIBUTION-vs-EDGE rule). Calls:
+       delete_attribution(its_id, wrong_attr_id, reason='wrong shape')
+     Then writes the correct edge. Verify the attribution is gone +
+     mcp_audit row records reason in args_hash.
+
+21b. **delete_attributions_bulk** — sme-cron writes 3 stale
+     attributions, then deletes all 3 in one bulk call. Verify all
+     3 gone, response carries committed=True, applied=3.
+
+21c. **delete_catalog + bulk** — sme-payments-split declares 2 stale
+     catalogs (e.g. POST /old-charge, POST /old-refund), wires a
+     flow on one of them, then deletes both via delete_catalogs_bulk.
+     Verify cascaded_flows count matches (flow disappears with its
+     catalog).
+
+21d. **delete_flow + bulk** — sme-monolith creates a wrong flow join
+     then deletes it via delete_flow. No cascade — confirm the
+     catalog + edge still exist.
+
+21e. **delete_unresolved + bulk** — sme-auth-1 writes 2 unresolved
+     refs that turn out to be typos, deletes via
+     delete_unresolved_bulk.
+
+21f. **insert_unresolved idempotency** — sme-auth-1 writes the same
+     unresolved ref twice. Second call updates in place + bumps
+     attempts (verify via get_unresolved). No duplicate row.
+
+21g. **insert_unresolved_bulk** — sme-cron writes 3 unresolved refs
+     in one call.
+
+21h. **upsert_flows_bulk** — already exercised in Phase 7.
+
+21i. **ack_broadcasts_bulk** — already exercised in Phase 10.
+
+21j. **ack_terminals_bulk** — already exercised in Phase 6.
+
+21k. **delete_edges_bulk** — sme-monolith creates 3 self-loop edges,
+     deletes all 3 in one bulk call. Verify cascaded_flows reported
+     per row.
+
+21l. **5 read bulks** — resolver already used get_attributions_bulk +
+     get_catalogs_bulk + get_component_edges_bulk in Phase 5.
+     Additionally exercise:
+       get_components_bulk([auth-1, monolith, cron])
+       get_flows_bulk([auth-1, monolith, payments-split])
+     Verify all return dict[component_id_str, ...] shape.
+
+21m. **OWNER GATE TEST** — sme-auth-1 tries to delete one of
+     sme-cron's attributions (cross-owner). Should raise
+     "does not own".
+
+21n. **NEGATIVE BULK** — sme-auth-1 calls delete_attributions_bulk
+     with one of its own ids + one of sme-cron's. Should reject the
+     WHOLE batch with per-row errors (atomic-with-pre-validation).
+     Verify sme-auth-1's row STILL EXISTS post-call (atomic — nothing
+     was deleted).
+
+REPORT [DEMO8-PHASE-21] header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 21a–21n.
+
+== PHASE 22 — notify.py flock + parallel tool calls ==
+
+22a. **PARALLEL TOOL CALLS (Phase 7.4.12-prompts):** sme-auth-1 should
+     emit ≥1 assistant turn with ≥3 parallel tool_use blocks during
+     this demo (e.g. hygiene sweep at wake start).
+
+     Verify by grepping the agent's JSONL session file for an assistant
+     message with ≥3 tool_use blocks. Path: ~/.claude/projects/<path-of-cwd>/<session>.jsonl
+
+22b. **flock fix (Phase 8.1):** when the parallel batch fires, only
+     ONE [NOTIFY] string should appear in the bundled user turn (not
+     N copies). Inspect the JSONL — search for the next user message
+     after the parallel tool_use turn, count [NOTIFY] strings in
+     additionalContext. Expected: 0 or 1, not N.
+
+REPORT [DEMO8-PHASE-22] header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 22a / 22b.
+
+== FINAL SCORECARD ==
+
+Once all 22 phases complete, emit a [DEMO8-RESULT] block:
+  [DEMO8-RESULT] Phase 1  setup ........................ PASS / FAIL — short summary
+  [DEMO8-RESULT] Phase 2  catalogs ..................... PASS / FAIL
+  [DEMO8-RESULT] Phase 3  unmatched callers + delete_edge PASS / FAIL
+  [DEMO8-RESULT] Phase 4  self-loops .................... PASS / FAIL (3 sub-results)
+  [DEMO8-RESULT] Phase 5  merge nominate + bulk reads .... PASS / FAIL
+  [DEMO8-RESULT] Phase 6  handoff+absorb+ack ............ PASS / FAIL
+  [DEMO8-RESULT] Phase 7  split+transfers+upsert_flows_bulk PASS / FAIL
+  [DEMO8-RESULT] Phase 8  proxy inheritance ............. PASS / FAIL
+  [DEMO8-RESULT] Phase 9  insights ...................... PASS / FAIL
+  [DEMO8-RESULT] Phase 10 persistence toggle + ack_broadcasts_bulk PASS / FAIL
+  [DEMO8-RESULT] Phase 11 mcp audit .................... PASS / FAIL
+  [DEMO8-RESULT] Phase 12 flows-on-catalogs ............ PASS / FAIL
+  [DEMO8-RESULT] Phase 13 catalog vector_search ........ PASS / FAIL
+  [DEMO8-RESULT] Phase 14 admin UI catalogs ............ PASS / FAIL
+  [DEMO8-RESULT] Phase 15 7.4.4/7.4.5 regression ....... PASS / FAIL
+  [DEMO8-RESULT] Phase 16 per-type model + plane source  PASS / FAIL
+  [DEMO8-RESULT] Phase 17 delete_edge + identifier norm  PASS / FAIL
+  [DEMO8-RESULT] Phase 18 Round-2 bulk writes ........... PASS / FAIL
+  [DEMO8-RESULT] Phase 19 pre-injected action items .... PASS / FAIL
+  [DEMO8-RESULT] Phase 20 wake debouncing override ..... PASS / FAIL
+  [DEMO8-RESULT] Phase 21 Phase 8 corrective deletes + read bulks (14 sub-results) PASS / FAIL
+  [DEMO8-RESULT] Phase 22 parallel tool calls + flock fix PASS / FAIL
+
+Plus list every [DEMO8-BUG] line you emitted earlier (if any) at the
+bottom of the scorecard so the user can quickly identify what to
+investigate.
+
+== CLEANUP ==
+
+After the scorecard, do NOT delete data automatically. Wait for the
+admin to issue a cleanup command. Demo data should be tagged via
+metadata.demo='demo8' where possible.
+
+== TIMING ==
+
+Long-running multi-agent dance. Trigger manager + agent manager will
+wake the involved SMEs. Delegate work via tasks (create_task with
+description = "Phase X step Y: <action>") and WAIT for the sub-task
+to complete (status WD or TC) before moving to the next step. If
+something stalls >5 minutes on a single step, raise [DEMO8-BUG] with
+the stall description and continue.
+
+GO.
+[DEMO8-END-OF-PROMPT]
+
+---

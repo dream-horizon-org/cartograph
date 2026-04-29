@@ -264,6 +264,13 @@ CREATE INDEX idx_unres_value ON unresolved(reference_value);
 CREATE INDEX idx_unres_open ON unresolved(resolved) WHERE resolved = FALSE;
 CREATE INDEX idx_unres_component ON unresolved(found_in_component_id);
 CREATE INDEX idx_unres_embedding ON unresolved USING hnsw (embedding vector_cosine_ops);
+
+-- Phase 8.4: idempotency for insert_unresolved. Repeated grep sweeps
+-- from the same SME no longer pile duplicate rows — the ON CONFLICT
+-- clause inside insert_unresolved bumps `attempts` + refreshes
+-- context/embedding instead.
+ALTER TABLE unresolved ADD CONSTRAINT unresolved_unique_per_ref
+    UNIQUE (found_in_component_id, reference_type, reference_value);
 ```
 
 ---

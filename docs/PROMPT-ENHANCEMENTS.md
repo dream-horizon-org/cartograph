@@ -986,7 +986,18 @@ sub-section to both iterator and SME prompts:
 
 ---
 
-### 3.10 No bulk attribution read/write tools (tool gap)
+### 3.10 No bulk attribution read/write tools (tool gap) — SHIPPED Phase 8
+
+**Status (2026-04-29):** closed by Phase 8.4 + 8.5. `upsert_attributions_bulk`
+shipped earlier (Phase 7.4.12); the read side `get_attributions_bulk` plus
+`get_components_bulk` / `get_component_edges_bulk` / `get_catalogs_bulk` /
+`get_flows_bulk` shipped in Phase 8.5 (commit `65154ad`). Resolver prompt
+updated to recommend the bulk reads over per-candidate loops for evidence
+triangulation. The narrative in this entry is preserved below for
+reference; `vector_search` fallback is no longer needed for exhaustive
+cross-candidate reads.
+
+
 
 **Symptom:** the cartograph-db MCP exposes `upsert_resources_bulk`,
 `reject_resources_bulk`, `bulk_spawn_smes`, `decommission_agents_bulk`,

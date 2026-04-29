@@ -1,6 +1,6 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-29):** Phases 0 → 7.4.14 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **Token optimisation Rounds 1, 2, 3 ALL SHIPPED 2026-04-29** — see Token Optimisation section near the bottom for per-round commit hashes + verification criteria. **Phase 8 (Token Optimisation + Gap Closings) PLANNED — see "Phase 8" section.** Closes the 4-row-type corrective delete surface, finishes Round-4 bulks, eliminates the `notify.py` PostToolUse race, makes `insert_unresolved` idempotent. Tool count 89 → 107 (+18). 7 sub-batches across ~1 day.
+**Status (2026-04-29):** Phases 0 → 8 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **Token optimisation Rounds 1, 2, 3 ALL SHIPPED 2026-04-29.** **Phase 8 (Token Optimisation + Gap Closings) ✅ SHIPPED 2026-04-29** — 7 sub-batches across 7 commits closing the 4-row-type corrective delete surface, finishing Round-4 bulks, eliminating the `notify.py` PostToolUse race, making `insert_unresolved` idempotent. Tool count 89 → 107 (+18).
 
 Most recent (2026-04-26 → 2026-04-29):
 - 7.4 (catalogs first-class), 7.4.2 (flows reference catalogs), 7.4.3/4/5/6 (DEMO7-round-1 fixes + doc syncs).
@@ -3836,7 +3836,19 @@ test SYSTEM_PROMPT_TEMPLATE.format() before every prompt commit
 
 ---
 
-## Phase 8: Token Optimisation + Gap Closings (PLANNED — to ship 2026-04-29 → 2026-04-30)
+## Phase 8: Token Optimisation + Gap Closings ✅
+
+**SHIPPED 2026-04-29.** 7 commits on `feat/trigger-manager-cartograh-mcp`:
+- `b77152b` — doc: Phase 8 plan
+- `ce64584` — 8.1 notify.py flock fix
+- `feb7c73` — 8.2 4 corrective delete singletons
+- `d27587a` — 8.3 5 corrective delete bulks
+- `9997a33` — 8.4 4 write bulks + unresolved idempotency + UNIQUE migration
+- `65154ad` — 8.5 5 multi-component bulk reads
+- `de20dbb` — 8.6 SME + Resolver prompt updates
+- (8.7 doc sync + DEMO8 prompt — this commit)
+
+Tool count: 89 → 107 (+18). 50 new tests across the 4 new test files all green.
 
 **Scope.** A cohesive sub-phase that closes the SME corrective-action surface (4 deletes — attribution, catalog, flow, unresolved), finishes the Round-4 bulk surface (writes + reads + deletes), eliminates the `notify.py` PostToolUse hook race condition, and adds idempotency to `insert_unresolved`. **No schema changes beyond ONE idempotent migration** (UNIQUE on unresolved). Cascade behaviour for all deletes piggy-backs on existing FKs — no new cascade logic to design.
 

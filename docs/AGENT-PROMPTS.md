@@ -69,6 +69,20 @@ Each row pre-validated server-side before any DB write. If any row fails pre-che
 
 **Wake debouncing (2026-04-29, commit `8d1a7d3`):** `trigger_management/trigger_loop.py` introduces a 5-minute debounce window before flipping `trigger_lock=TRUE`. Drip-fed events coalesce into one wake instead of N (each previously re-paid the 16k-token system-prompt read). Override conditions bypass the debounce: pending admin chat, or agent is `mutation_assigned_to` on a state=M consolidation. Schema: `agent_runs.first_pending_at TIMESTAMPTZ` stamped on first sighting, cleared on yield. See TRIGGER-MANAGEMENT.md §2.4 for the full sequence.
 
+**Phase 8 — Token Optimisation + Gap Closings (2026-04-29):** 18 new tools (89 → 107) closing the SME corrective-action surface + finishing the Round-4 bulks.
+
+- **`== CORRECTIVE ACTIONS — DELETE WHEN YOU GET IT WRONG ==` block** added to SME prompt above BULK CALLS DECISION LADDER. Five concrete recipes: wrong attribution → `delete_attribution(your_id, attr_id, reason='wrong shape')` then write correct edge; stale catalog → `delete_catalog`; wrong flow join → `delete_flow` + re-upsert; post-merge duplicate edge → `delete_edge` (Phase 7.4.11) or `delete_edges_bulk`; typo unresolved → `delete_unresolved`. All five are owner-scoped + idempotent + accept optional `reason` param surfaced in `mcp_audit.args_hash`.
+
+- **BULK CALLS DECISION LADDER refresh** — RUNG 1 reorganised into WRITES / ACKS / CORRECTIVE DELETES / READS / ORCH sections. Lists every Phase 8 bulk: `ack_broadcasts_bulk`, `ack_terminals_bulk`, `upsert_flows_bulk`, `insert_unresolved_bulk`, the 5 corrective delete bulks (`delete_attributions/_catalogs/_flows/_edges/_unresolved_bulk`), the 5 multi-component read bulks (`get_components/_attributions/_component_edges/_catalogs/_flows_bulk`).
+
+- **Resolver triangulation note rewritten** — pre-8.5: "loop `get_attributions(c)` per candidate." Post-8.5: ONE bulk call across N candidates. Recommends bulk reads over `vector_search` for exhaustive cross-candidate evidence checks (catalog/attribution/edge-target overlap = strongest merge signals).
+
+- **`insert_unresolved` is now ON CONFLICT idempotent** (UNIQUE on `(found_in_component_id, reference_type, reference_value)`). Repeated grep sweeps no longer duplicate rows — they update-in-place + bump `attempts`.
+
+- **`notify.py` flock fix (commit `ce64584`)** — eliminates duplicate NOTIFY race when N parallel tool_use blocks fire N concurrent PostToolUse hooks. `fcntl.flock(LOCK_EX | LOCK_NB)` around the rate-limit marker; siblings exit silent.
+
+Cascade behaviour for all four delete tools piggy-backs on existing FKs (no new logic). Hard delete chosen over soft delete: `mcp_audit` covers the audit trail need; reversibility was theoretical (no observed undelete asks); soft-delete tax (20+ read-site filter audits, mutation cascade rewrite, "show deleted" UI toggle) wasn't worth the theoretical reversibility win.
+
 **Batch + parallel tool calls (2026-04-27, commits `5b3144d` + `c7f5fd5`):** new `== BATCH + PARALLEL TOOL CALLS — PREFER THESE OVER ONE-AT-A-TIME ==` block in `MISSION_AND_VOCABULARY` shared with all 4 agent types. Defines:
 - WHEN TO PARALLELISE: independent reads, hygiene sweeps (5 tools in one turn), action-items triage, independent acks.
 - WHEN TO STAY SEQUENTIAL: dependent inputs (upsert returns id → use in next call), same-component writes (race risk), mutation transitions (`absorb_agent` → `execute_mutation`), split nominations one-at-a-time.
