@@ -542,6 +542,17 @@ def run_migrations() -> None:
                 "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS sleep_until TIMESTAMPTZ"
             )
 
+            # Phase 7.4.14 (token-opt Round 3 #6) — wake debouncing.
+            # When the trigger scanner first sees a pending item for an
+            # idle agent, it stamps first_pending_at = now(). The wake
+            # is held back until now() - first_pending_at >= 5 min,
+            # UNLESS the pending set includes admin chat or the agent
+            # is mutation_assigned_to on a state=M consolidation.
+            # Cleared when the agent yields with empty queue.
+            cur.execute(
+                "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS first_pending_at TIMESTAMPTZ"
+            )
+
             # Phase 3: SME-authored human-readable component doc rendered
             # in the graph-viz hover popup. Markdown; nullable.
             cur.execute(

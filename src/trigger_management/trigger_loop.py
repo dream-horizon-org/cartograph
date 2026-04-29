@@ -20,16 +20,24 @@ logger = logging.getLogger(__name__)
 
 PRIORITY_ORDER = {"orchestrator": 0, "resolver": 1, "sme": 2, "iterator": 3}
 
+# Phase 7.4.14 (token-opt Round 3 #6) — wake debouncing window.
+# Pending items must wait this long before triggering a wake, unless an
+# override applies (admin chat / mid-mutation). Coalesces drip-fed
+# events into one wake instead of N small ones, each re-paying the
+# 16k-token cached system-prompt read.
+WAKE_DEBOUNCE_SECONDS = 300  # 5 minutes
+
 
 def get_idle_agents() -> list[dict]:
     """Get idle agents eligible for wake-up.
 
     Skips agents that are currently sleeping (sleep_until > now()). Any
     auto-wake path (admin chat interrupt, explicit wake tool) nulls the
-    column so this filter doesn't hide them.
+    column so this filter doesn't hide them. Returns first_pending_at
+    so the debounce filter can compare against now().
     """
     return execute(
-        """SELECT agent_id, agent_type, invocation_count
+        """SELECT agent_id, agent_type, invocation_count, first_pending_at
            FROM agent_runs
            WHERE status = 'idle'
              AND trigger_lock = FALSE
@@ -52,6 +60,60 @@ def has_pending_items(agent_id: str, agent_type: str) -> bool:
     if proxies.scan(agent_id) > 0:
         return True
     return False
+
+
+def has_debounce_override(agent_id: str) -> bool:
+    """Phase 7.4.14: detect conditions that bypass the wake-debounce
+    window. Returns True if ANY of:
+      - Pending admin chat (always immediate — admin chat is the only
+        wake-from-sleep auto-wake signal; should be immediate too).
+      - Agent is mutation_assigned_to on a state=M consolidation
+        (mid-mutation must not be delayed; resolver is waiting for MD).
+    """
+    row = execute(
+        """SELECT 1 FROM communications
+            WHERE to_agent = %s AND from_agent = 'admin'
+              AND type = 'chat' AND acked_at IS NULL
+            LIMIT 1""",
+        (agent_id,),
+    )
+    if row:
+        return True
+    row = execute(
+        """SELECT 1 FROM consolidations
+            WHERE mutation_assigned_to = %s AND status = 'M'
+            LIMIT 1""",
+        (agent_id,),
+    )
+    return bool(row)
+
+
+def stamp_first_pending(agent_id: str) -> None:
+    """Phase 7.4.14: stamp first_pending_at = now() iff currently NULL.
+    Called when has_pending_items returns True for an agent that didn't
+    have first_pending_at set. Idempotent.
+    """
+    execute_returning(
+        """UPDATE agent_runs
+            SET first_pending_at = now()
+            WHERE agent_id = %s AND first_pending_at IS NULL
+            RETURNING agent_id""",
+        (agent_id,),
+    )
+
+
+def clear_first_pending(agent_id: str) -> None:
+    """Phase 7.4.14: clear first_pending_at when no items remain pending
+    (called from agent_manager.invoke_agent on yield with empty queue,
+    or here when the scanner sees has_pending_items=False but the
+    column is set)."""
+    execute_returning(
+        """UPDATE agent_runs
+            SET first_pending_at = NULL
+            WHERE agent_id = %s AND first_pending_at IS NOT NULL
+            RETURNING agent_id""",
+        (agent_id,),
+    )
 
 
 def prioritise(agents: list[dict]) -> list[dict]:
@@ -105,11 +167,36 @@ def run_once() -> int:
     if not idle_agents:
         return 0
 
-    # 3. Check which ones have pending items
+    # 3. Check which ones have pending items + apply debounce window.
+    # Phase 7.4.14: stamp first_pending_at on first sighting. Refuse to
+    # lock until WAKE_DEBOUNCE_SECONDS have elapsed unless an override
+    # applies (admin chat / mid-mutation). Drip-fed events coalesce
+    # into one wake instead of N small ones.
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    debounce_threshold = now - timedelta(seconds=WAKE_DEBOUNCE_SECONDS)
+
     agents_with_work = []
     for agent in idle_agents:
-        if has_pending_items(agent["agent_id"], agent["agent_type"]):
+        aid = agent["agent_id"]
+        if not has_pending_items(aid, agent["agent_type"]):
+            # No work — clear stale first_pending_at if set.
+            if agent.get("first_pending_at"):
+                clear_first_pending(aid)
+            continue
+        # Stamp first_pending_at on first sighting (idempotent).
+        first_pending = agent.get("first_pending_at")
+        if first_pending is None:
+            stamp_first_pending(aid)
+            first_pending = now  # treat as just-stamped for this cycle
+        # Override checks bypass the debounce.
+        if has_debounce_override(aid):
             agents_with_work.append(agent)
+            continue
+        # Debounce: wait until enough time has elapsed.
+        if first_pending <= debounce_threshold:
+            agents_with_work.append(agent)
+        # else: still in debounce window; will wake on a later cycle.
 
     if not agents_with_work:
         return 0

@@ -392,6 +392,10 @@ class AgentManager:
             db.update_agent_status(agent_id, "idle")
             db.update_agent_heartbeat(agent_id)
             db.clear_recovery_state(agent_id)
+            # Phase 7.4.14 (token-opt Round 3 #6): clear the wake-debounce
+            # window. Trigger scanner re-stamps first_pending_at when it
+            # next sees a pending item — fresh 5-min window per cycle.
+            db.clear_first_pending(agent_id)
             logger.info("Agent %s completed, set to idle", agent_id)
             return output
 

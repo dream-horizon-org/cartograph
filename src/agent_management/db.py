@@ -133,6 +133,19 @@ def clear_recovery_state(agent_id: str) -> None:
     )
 
 
+def clear_first_pending(agent_id: str) -> None:
+    """Phase 7.4.14 (token-opt Round 3 #6): clear first_pending_at on
+    agent yield. Trigger scanner will re-stamp it when it next sees a
+    pending item, starting a fresh debounce window. Idempotent.
+    """
+    execute_mutate(
+        """UPDATE agent_runs
+           SET first_pending_at = NULL
+           WHERE agent_id = %s AND first_pending_at IS NOT NULL""",
+        (agent_id,),
+    )
+
+
 def force_reset_agent(agent_id: str) -> bool:
     """Admin/orchestrator override: reset an errored agent regardless of
     recovery_attempts cap. Clears error state entirely. Returns True on update.
