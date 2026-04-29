@@ -33,17 +33,116 @@ YOUR agent_type is: {agent_type}
 Always pass this exact agent_id to every tool call. Never invent, abbreviate, or modify it.
 For example: get_action_items_summary(agent_id="{agent_id}")
 
-Action items may be arriving concurrently — always use your tools to get the latest state, don't rely on stale information.
+== ACTION ITEMS SNAPSHOT (at {snapshot_ts}) ==
+{action_items_snapshot}
+
+The snapshot above was computed by the agent_manager just before this wake.
+It is FRESHER than any cached state in your prior conversation.
+
+Action items may have arrived AFTER this snapshot — call get_action_items_summary
+or get_action_items_detail mid-wake if you suspect drift.
 
 Your workflow:
-1. Call get_action_items_summary(agent_id="{agent_id}") to see current counts
-2. Call get_action_items_detail(agent_id="{agent_id}") for full details on items you want to address
-3. Address each item using your act tools (always passing agent_id="{agent_id}")
-4. You MUST change state on every response — no empty replies
-5. Work on as many items as you can handle, then yield control
-6. You will be woken again if more items arrive
+1. Triage from the snapshot above. Address each pending item using your act tools (always passing agent_id="{agent_id}").
+2. Use get_action_items_detail(agent_id="{agent_id}") only if you need full row contents the snapshot didn't include (e.g. message bodies, blocker_detail).
+3. You MUST change state on every response — no empty replies.
+4. Work on as many items as you can handle, then yield control.
+5. You will be woken again if more items arrive.
 
 Refer to your system prompt for phase-specific instructions and tool usage."""
+
+
+def _build_action_items_snapshot(agent_id: str, agent_type: str) -> str:
+    """Pre-compute a concise action-items snapshot for the invocation prompt.
+
+    Phase 7.4.13 (token-opt Round 2 #5). Goes in the USER message, NOT the
+    system_prompt — system_prompt must remain byte-identical across wakes
+    for cache hits. The snapshot text varies per wake (different counts /
+    pending items), so it lives in the user-visible invocation prompt.
+
+    Returns a markdown block listing pending items per category. Skips
+    full row content — agent calls get_action_items_detail mid-wake if
+    it needs the message bodies.
+
+    Includes proxy_count summary (decommissioned-agent inherited work).
+    """
+    from shared.db import execute_one
+    # Aggregate pending counts directly via SQL — one round-trip vs N MCP
+    # calls. Mirrors get_action_items_summary's logic.
+    row = execute_one(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM consolidations
+             WHERE ((agent_a_id = %(aid)s AND status = 'B1')
+                 OR (agent_b_id = %(aid)s AND status = 'B2')
+                 OR (status IN ('R','MD') AND %(atype)s = 'resolver')
+                 OR (mutation_assigned_to = %(aid)s AND status = 'M'))
+          ) AS consolidations_pending,
+          (SELECT COUNT(*) FROM tasks
+             WHERE (worker_agent_id = %(aid)s AND status = 'BW')
+                OR (owner_agent_id  = %(aid)s AND status IN ('BO','WD'))
+          ) AS tasks_pending,
+          (SELECT COUNT(*) FROM clarifications
+             WHERE (asker_agent_id = %(aid)s AND status IN ('B1','QR','QC'))
+                OR (responder_agent_id = %(aid)s AND status = 'B2')
+          ) AS clarifications_pending,
+          (SELECT COUNT(*) FROM communications
+             WHERE to_agent = %(aid)s AND type = 'chat' AND acked_at IS NULL
+          ) AS unacked_chats,
+          (SELECT COUNT(*) FROM communications c
+             WHERE c.type = 'broadcast' AND c.to_agent_type = %(atype)s
+               AND c.id NOT IN (
+                 SELECT communication_id FROM broadcast_acks WHERE agent_id = %(aid)s
+               )
+               AND (c.is_persistent OR c.created_at > (
+                 SELECT created_at FROM agent_runs WHERE agent_id = %(aid)s
+               ))
+          ) AS unacked_broadcasts,
+          (SELECT COUNT(*) FROM (
+             SELECT 1 FROM tasks t
+              WHERE t.status = 'TC'
+                AND (t.owner_agent_id = %(aid)s OR t.worker_agent_id = %(aid)s)
+                AND NOT EXISTS (
+                  SELECT 1 FROM terminal_acks
+                   WHERE entity_type='task' AND entity_id=t.id AND agent_id=%(aid)s
+                )
+             UNION ALL
+             SELECT 1 FROM consolidations c
+              WHERE c.status IN ('D','F')
+                AND (c.agent_a_id = %(aid)s OR c.agent_b_id = %(aid)s)
+                AND NOT EXISTS (
+                  SELECT 1 FROM terminal_acks
+                   WHERE entity_type='consolidation' AND entity_id=c.id AND agent_id=%(aid)s
+                )
+             UNION ALL
+             SELECT 1 FROM clarifications cl
+              WHERE cl.status IN ('CC','QR')
+                AND (cl.asker_agent_id = %(aid)s OR cl.responder_agent_id = %(aid)s)
+                AND NOT EXISTS (
+                  SELECT 1 FROM terminal_acks
+                   WHERE entity_type='clarification' AND entity_id=cl.id AND agent_id=%(aid)s
+                )
+          ) t) AS terminal_pending_ack,
+          (SELECT COUNT(*) FROM agent_runs
+             WHERE merged_into_agent_id = %(aid)s AND status = 'decommissioned'
+          ) AS proxied_count
+        """,
+        {"aid": agent_id, "atype": agent_type},
+    )
+    if row is None:
+        return "(snapshot unavailable — call get_action_items_summary mid-wake)"
+
+    lines = []
+    if row["consolidations_pending"]: lines.append(f"- consolidations_pending: {row['consolidations_pending']}")
+    if row["tasks_pending"]:           lines.append(f"- tasks_pending: {row['tasks_pending']}")
+    if row["clarifications_pending"]:  lines.append(f"- clarifications_pending: {row['clarifications_pending']}")
+    if row["unacked_chats"]:           lines.append(f"- unacked_chats: {row['unacked_chats']}")
+    if row["unacked_broadcasts"]:      lines.append(f"- unacked_broadcasts: {row['unacked_broadcasts']}")
+    if row["terminal_pending_ack"]:    lines.append(f"- terminal_pending_ack: {row['terminal_pending_ack']}  (call ack_terminal on each)")
+    if row["proxied_count"]:           lines.append(f"- proxied_count: {row['proxied_count']}  (inherited work — call get_my_proxy_items, then act_on_proxy_item)")
+    if not lines:
+        return "(no pending items at snapshot time — admin chat or mutation override may have triggered this wake)"
+    return "\n".join(lines)
 
 
 class AgentManager:
@@ -151,9 +250,23 @@ class AgentManager:
                 return ""
 
         if prompt is None:
+            # Phase 7.4.13 (token-opt Round 2 #5): pre-compute action-items
+            # snapshot once via SQL and inject into the user message.
+            # Saves the get_action_items_summary + get_action_items_detail
+            # round-trips on every wake. Goes in user message NOT
+            # system_prompt (system_prompt must remain byte-identical
+            # across wakes for cache hits).
+            try:
+                snapshot = _build_action_items_snapshot(agent_id, agent["agent_type"])
+            except Exception:
+                logger.exception("action-items snapshot failed for %s; proceeding without", agent_id)
+                snapshot = "(snapshot unavailable — call get_action_items_summary mid-wake)"
+            from datetime import datetime
             prompt = _GENERIC_INVOCATION_PROMPT_TEMPLATE.format(
                 agent_id=agent_id,
                 agent_type=agent["agent_type"],
+                snapshot_ts=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                action_items_snapshot=snapshot,
             )
 
         # For SMEs, look up the assigned resource from RCA (single source of
