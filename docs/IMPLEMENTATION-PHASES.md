@@ -3444,6 +3444,271 @@ SCHEMA.md unchanged (no schema deltas in 7.4.4/7.4.5).
 
 ---
 
+## Token Optimisation Plan (2026-04-29 — Round 1+ in flight)
+
+Comprehensive token + cost reduction plan derived from forensic
+analysis of the project-lifetime spend ($1,234.85 across 14,894 LLM
+round-trips, 92.7% cache hit ratio). Sources: per-agent JSONL token
+usage, tool-call sequence analysis, mcp_audit. Target: ~43% reduction
+in lifetime spend (~$535 saved over current spend; ~$1,500-1,800
+per active month at current scale).
+
+### Diagnostic findings driving the plan
+
+- **44.5% of assistant messages are TEXT-ONLY** (no tool_use blocks).
+  Pure reasoning / "I'll start by..." preambles / post-hoc summaries.
+  Each is a paid /v1/messages round-trip producing only output tokens.
+- **0.08% of messages emit >1 tool_use block** (parallel tool calls).
+  Pre-fix the prompt explicitly forbade parallelisation; now removed
+  in commit `5b3144d`. Awaiting next-session sample to measure uptake.
+- **27 consecutive same-tool runs of ≥3 in one representative SME's
+  session** — 112 round-trips wasted on textbook batchable patterns
+  (11× upsert_attribution, 13× upsert_catalog, etc.).
+- **Per-type cost distribution:** orch ($220, 17% of total) + resolver
+  ($94, 8%) + iterator ($92, 7%) + sme ($828, 67%). Orch+resolver are
+  on opus-4-6; iterators have legacy opus-4-7 history; sme is on
+  sonnet-4-6.
+- **Per-agent average context size at last wake:** sme 97K tokens
+  (max 192K), iterator 113K, orch 47K, resolver 42K.
+- **Cache hit ratio per type:** resolver 94.7%, orch 94.4%, iterator
+  92.8%, sme 90.4%. Caching IS working; ~$13K saved over the project
+  lifetime vs the no-cache equivalent.
+- **Output tokens (never cached):** 12.18M cumulative, ~$417 cost
+  (34% of total spend). 67.7% on sonnet, 30.7% on opus-4-7 (Max
+  default during early sessions), 1.5% on opus-4-6.
+
+### Final plan — what we're shipping, in order
+
+| # | Lever | Effort | Saving | Round | Status |
+|---|---|---|---:|---|---|
+| 0 | Parallel tool calls (BATCH block) | done | 20-30% | — | ✅ shipped (`5b3144d`) |
+| 1 | Concise output rule | XS (5 min) | 8-10% | Round 1 | pending |
+| 2 | Orch → sonnet (resolver STAYS opus-4-6) | XS (5 min) | 10-14% | Round 1 | pending |
+| 3 | Bulk MCP tools (7 writes/acks + 3 reads + 2 delete/bind) | M (~3 hrs) | 6-9% | Round 2 | pending |
+| 4 | BULK MCP TACTIC concrete examples | XS (10 min) | 3-5% | Round 2 | pending |
+| 5 | Pre-inject action items in user message | S (~30 LOC) | 3-5% | Round 2 | pending |
+| 6 | Wake debouncing (5-min window) | M (~80 LOC) | 10-15% | Round 3 | pending |
+
+**Compound math:**
+
+```
+Project lifetime spend:                   $1,234.85
+After Round 1 (#1 + #2):                  ~$987     (-20%)
+After Round 2 (#3 + #4 + #5):             ~$820     (-34%)
+After Round 3 (#6):                       ~$700     (-43%)
+```
+
+**~43% reduction → ~$535 saved over project lifetime, ~$1,500-1,800/month at sustained scale.**
+
+### Levers explicitly DROPPED (not shipping)
+
+| Lever | Why dropped |
+|---|---|
+| Session reset at phase boundaries | Loses context continuity — user flagged as not-aligned. |
+| Lane-cap quiet mode | Doesn't help in our system — bursts dominate, not quiet periods. The cap matters during contention, not during idle. |
+| Haiku for trivial wakes / skip terminal-ack-only wakes | Kills agent's productive follow-up opportunity on those wakes. |
+| Effort='low' on opus | Subsumed by #2 (orch → sonnet). Only resolver remains on opus and we want medium effort there. |
+| Zero-state-change wake skip | Scanners are already state-driven (verified scanner SQL). Speculative against bugs we don't have. |
+| Resolver → sonnet | Resolver does the highest-stakes reasoning (merge/split approve/reject, absorber-pick heuristic, pre-M conflict checks). Saving $94 there isn't worth a wrong-merge that corrupts graph state. STAY opus-4-6. |
+| Generic `bulk_execute(calls=[...])` dispatcher | Re-implements native parallel tool calls, but stringly-typed (no schema introspection). Native parallel + per-shape bulk variants cover the same ground with better LLM ergonomics. |
+
+### Round 1 — Concise output rule (#1)
+
+New `== CONCISE OUTPUT — DON'T NARRATE WHAT YOU'RE ABOUT TO DO ==`
+block in `base.py::MISSION_AND_VOCABULARY`. Defines:
+
+- Default ≤2 sentences of explanation per assistant turn unless user
+  asked for detail.
+- NO preambles ("I'll start by...", "Let me first...", "Here's what
+  I'm going to do...").
+- NO post-hoc summaries unless they capture a NON-obvious result the
+  next agent will need.
+- Tool calls speak for themselves — don't restate what the tool will
+  do; just call it.
+- When responding to admin/orchestrator chat: state the answer + cite
+  evidence; skip throat-clearing.
+- When investigating during consolidation: cite file paths +
+  identifiers, don't explain methodology.
+
+**CRITICAL caveat — DO NOT compromise on identifiers, file paths,
+hostnames, or specific data.** Trim only the english/jargon
+regurgitation, never the concrete evidence. The savings come from
+removing prose, not from being vague.
+
+Reserve longer text for: `component_doc_md` (3-8 lines, structured),
+consolidation message bodies (one paragraph max with concrete
+evidence), `blocker_detail` (specific + actionable), `record_insight`
+body (non-obvious finding).
+
+**Saving:** 8-10% (output tokens are 34% of spend; cutting ~30% of
+text-only narration messages × full output rate).
+
+### Round 1 — Orch → sonnet (#2)
+
+`orchestrator.py::build_config`: `model="claude-sonnet-4-6"` (down
+from `claude-opus-4-6`). Drop `effort="medium"` (sonnet doesn't take
+effort flag). **Resolver UNTOUCHED — stays on `claude-opus-4-6` with
+`effort="medium"`.** Resolver does merge/split approve/reject decisions
+which are too high-stakes to downgrade.
+
+Rationale: orchestrator is mostly routing + monitoring + blocker
+triage — high-volume but per-call lower-stakes than resolver. Sonnet
+handles it fine; if quality drops we revert.
+
+**Saving:** ~$155 over project lifetime (orch's $220 → ~$65 if equivalent
+calls done on sonnet). ~10-14% of total.
+
+### Round 2 — Bulk MCP tools (#3)
+
+Three sub-batches:
+
+**Top tier (high-frequency observed streaks):**
+- `upsert_attributions_bulk(agent_id, component_id, attributions[])`
+- `upsert_catalogs_bulk(agent_id, component_id, catalogs[])`
+- `upsert_edges_outbound_bulk(agent_id, edges[])`
+- `upsert_flows_bulk(agent_id, component_id, flows[])`
+- `insert_unresolved_bulk(agent_id, items[])`
+- `ack_broadcasts_bulk(agent_id, communication_ids[])`
+- `ack_terminals_bulk(agent_id, items[{entity_type, entity_id}])`
+
+**Middle tier (resolver triangulation gap, §3.10):**
+- `get_attributions_bulk(component_ids[])`
+- `get_components_bulk(ids[])`
+- `get_component_edges_bulk(ids[])`
+
+**Lower tier (companions to existing single-row tools):**
+- `bind_edges_bulk(agent_id, bindings[])`
+- `delete_edges_bulk(agent_id, edge_ids[])`
+
+**Implementation pattern (atomic-with-pre-validation):**
+1. Pre-validate every row server-side BEFORE opening transaction.
+2. If any pre-check failed → return per-row errors map, write nothing,
+   `{committed: False, errors: {...}, applied: 0}`.
+3. If all clear → atomic transaction → commit → return per-row results
+   `{committed: True, applied: N, rows: [...]}`.
+4. For idempotent UPSERT operations: per-row results report
+   `{inserted: bool, updated: bool}` — no failures from key collisions
+   (the U in upsert handles them as success-with-update).
+
+**EXPLICITLY NOT shipping:**
+- `respond_*_bulk` for state-machine tools (per-row validation differs;
+  partial-failure semantics nasty; low frequency; per-call is correct).
+- `delete_attributions_bulk` / `delete_catalogs_bulk` (no single-row
+  delete exists; soft-delete via metadata is current pattern).
+- `vector_search_bulk` (each query needs its own embedding call;
+  parallel tool_use blocks already cover this case).
+
+**Saving:** 6-9% (token reduction on aggregate result-side input + less
+output-side boilerplate; insurance against parallel-tool-call
+under-adoption).
+
+### Round 2 — BULK MCP TACTIC concrete examples in prompt (#4)
+
+The `BULK MCP CALLS — PYTHON SCRIPT TACTIC` block already exists in
+SME + iterator prompts but is abstract. Strengthen with worked
+examples in priority order:
+
+```
+1. If a bulk MCP variant exists (upsert_attributions_bulk etc.),
+   use that. One tool_use call. Atomic.
+2. If no bulk variant, emit the N tool_use blocks as a parallel
+   batch in ONE assistant turn (per BATCH + PARALLEL TOOL CALLS).
+   Two LLM round-trips total.
+3. For >50 same-shape calls (no bulk variant + parallel batch
+   would blow the per-tool-arg token ceiling), Python script via
+   Bash tool over JSON-RPC HTTP to localhost:8100/mcp. Zero LLM
+   round-trips for the batch itself.
+```
+
+Plus one concrete example per pattern.
+
+**Saving:** 3-5% (concretises the abstract guidance).
+
+### Round 2 — Pre-inject action items (#5)
+
+`agent_manager.py::invoke_agent`: before spawning `claude -p`, run a
+single SQL query to fetch the agent's pending items
+(consolidations + tasks + clarifications + unacked-chats +
+unacked-broadcasts + terminal_pending + proxied summary). Serialise as
+concise markdown into the **invocation USER MESSAGE** (NOT
+system_prompt — modifying system_prompt would bust the prompt cache
+key, cost 10× more than it saves).
+
+Format:
+```
+== ACTION ITEMS SNAPSHOT (at <iso_ts>) ==
+- consolidations_pending: 3   (B2: a1b2c3, R: d4e5f6)
+- tasks_pending: 1            (BW: ghi789)
+- unacked_chats: 2            (admin)
+- unacked_broadcasts: 0
+- terminal_pending_ack: 5
+- proxied_count: 0
+
+Use get_action_items_detail for full rows. Use get_action_items_*
+tools mid-wake if you need fresher state.
+```
+
+Existing `get_agent_notifications` PostToolUse hook stays — it serves
+a different purpose (mid-session live interrupts on new
+admin/orchestrator chats). The pre-injection covers the **first-turn**
+fetch; the hook covers **mid-session new arrivals**.
+
+**Caveat — cache safety critical:** the snapshot text MUST go in the
+invocation user message, not in `--system-prompt`. The system prompt
+must remain byte-identical across wakes for cache hits. Test before
+merge: smoke-fire a wake, confirm the response's
+`cache_read_input_tokens > cache_creation_input_tokens` (i.e. the
+system prompt still cached even with the new user message).
+
+**Saving:** 3-5% (skip 1-2 round-trips per wake spent on
+`get_action_items_summary` + `_detail` calls). Bonus: kills one of the
+text-only narration turns where Claude says "Let me first check my
+action items..."
+
+### Round 3 — Wake debouncing 5-min (#6)
+
+Schema migration: add `agent_runs.first_pending_at TIMESTAMPTZ NULL`.
+Each scanner stamps it on first pending observation; clears when
+agent yields with empty queue.
+
+Trigger logic change: before flipping `trigger_lock=TRUE`, check
+`now() - first_pending_at >= INTERVAL '5 minutes'`. EXEMPTIONS that
+override the debounce:
+- Pending admin chat (always immediate).
+- Agent is `mutation_assigned_to` on a state=M consolidation
+  (mid-mutation must not be delayed).
+- An orchestrator on a phase transition (debatable — we may not
+  enforce this, just exempt via the broader admin override).
+
+Trade-off: routine work (peer consolidation responses, broadcasts,
+non-admin chats from orch) sees up to 5-min latency between event
+arrival and agent wake. Mid-merge dance (already-in-state-M) stays
+responsive. Admin chat stays instant.
+
+**Saving:** 10-15% (eliminates the "drip-fed wakes" pattern where 3
+items arrive 30s apart and trigger 3 separate wakes paying the 16K
+system-prompt re-read each time).
+
+### Verification + ship discipline
+
+After each Round, re-run the per-agent JSONL tool-call distribution
+analysis and check:
+- Round 1: text-only message ratio drops from 44.5% to <30%.
+- Round 1: per-message output token average drops from ~1010 (sonnet)
+  toward ~600.
+- After parallel-tool-call uptake (already shipped): >1-tool-use rate
+  climbs from 0.08% to ≥10% on tool-heavy phases.
+- Round 2: 7-tool hygiene sweeps appear as 1 turn with 7 tool_uses
+  (or 1 bulk tool_use if bulk variant available).
+- Round 3: per-agent invocation count drops while tool-call total
+  stays steady → drip-fed wakes coalesced.
+
+Each lever ships as its own commit, individually revertable. Smoke-
+test SYSTEM_PROMPT_TEMPLATE.format() before every prompt commit
+(caught 2 brace bugs already: `{get,post}` and `{id}`).
+
+---
+
 ## Phase 8+: Future phases (planned, not started)
 
 **Phase 8 — Phase-flow completion** (orchestrator-driven sweeps):
