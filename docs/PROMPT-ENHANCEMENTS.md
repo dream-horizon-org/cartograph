@@ -1520,5 +1520,292 @@ captures intent.
 
 ---
 
+## 7. Round 5 backlog — DEMO8 token-savings gap analysis (2026-04-29)
+
+DEMO8 ran end-to-end (22/23 phases PASS, 1 FAIL). Token-optimisation
+levers from Rounds 1-3 + Phase 8 shipped; ~35-50% of the 43% target
+realised. Two prompt-induced changes are NOT biting; three insights
+from agents flagged real follow-ups. Quantification + fix paths
+below.
+
+### 7.1 [HIGH] Parallel tool calls — 0/851 messages emitted >1 tool_use
+
+**Symptom (DEMO8 evidence, 2026-04-29):** JSONL inspection across 6
+agents (orch + 5 SMEs) over 851 assistant messages found **zero**
+turns with >1 tool_use block. Identical to the 0.08% pre-fix rate
+measured before commit `5b3144d` (Phase 7.4.12-prompts BATCH+PARALLEL
+block was shipped).
+
+**Bittersweet evidence:** sme-monolith's `tactic_win` insight
+described the parallel hygiene pattern correctly in prose (`get_my_catalog_callers + get_unmatched_callers in one parallel turn`)
+but the JSONL shows it emitted them sequentially across separate
+turns. The SME *understands* the pattern, just can't *emit* it.
+This is the same prompt-vs-execution gap as DEMO8 Phase 23 FAIL.
+
+**Saving lost:** 20-30% of total spend (~$245-370 over the project
+lifetime baseline of $1,234.85).
+
+**Three root-cause hypotheses (untested, ordered by leverage):**
+
+1. **`claude -p` subprocess flag.** Anthropic's tool-use API has
+   `disable_parallel_tool_use` defaulting to `False` (parallel
+   enabled). But the Claude Code subprocess we spawn might be
+   passing `True` by default or via an env var.
+   **Investigate first:** read `agent_management/agent_manager.py`
+   subprocess command construction; grep for any
+   `--disable-parallel-tool-use` or `--enable-parallel-tool-use`
+   flag. If present and not explicitly False, that's the silent
+   killer.
+   **Effort if fix is a one-line CLI flag:** XS.
+   **Realised saving on fix:** the full 20-30% gap closes
+   immediately.
+
+2. **Sonnet model default behaviour under heavy system-prompt load.**
+   System prompt is 76k+ chars. The BATCH+PARALLEL block lives
+   ~50% through. Sonnet may not pattern-match parallel-emission
+   examples buried that deep.
+   **Investigate:** A/B test same agent task with a stripped-down
+   prompt (BATCH+PARALLEL block + minimal everything else) — see
+   if parallelism appears.
+   **Fix candidates if confirmed:** (a) move BATCH+PARALLEL block
+   to top of `MISSION_AND_VOCABULARY`; (b) inject parallel
+   reminder into the user-message invocation prompt (same channel
+   we already use for ACTION ITEMS SNAPSHOT) every wake; (c) add
+   per-RUNG worked examples in EACH materialisation step.
+   **Effort:** S-M.
+
+3. **Bulk tools cover the common case anyway.** DEMO8 shows agents
+   correctly use `upsert_attributions_bulk × 8`,
+   `ack_terminals_bulk × 13`, etc. — 60/61 successful bulk calls.
+   For HOMOGENEOUS batches (same tool, N rows), bulks already
+   handle it.
+   **Parallel-tool-call gap only matters for HETEROGENEOUS
+   batches** — different tool types in one turn:
+   - 5-tool wake-start hygiene sweep: `get_action_items_summary`
+     + `get_my_catalogs` + `get_unmatched_callers`
+     + `get_orphan_catalogs` + `get_stale_edges` (no bulk variant)
+   - Resolver triangulation: `get_attributions_bulk` +
+     `get_catalogs_bulk` + `get_component_edges_bulk` in one turn
+     (each on same N component_ids)
+   - Mid-investigation reads: `get_consolidation_thread` +
+     `get_component` + `vector_search` (different reads)
+   So the practical loss is narrower than the 20-30% upper bound;
+   probably 12-18% of total. Still significant but not
+   catastrophic.
+
+**Recommendation:** investigate hypothesis #1 first (one-line read of
+agent_manager.py). If that's the cause, single-LOC fix recovers all
+the gap. If not, prioritise hypothesis #2 (B-test on shorter prompt)
+to scope the model-vs-prompt question.
+
+---
+
+### 7.2 [HIGH] Concise output rule — 46.5% text-only msgs (vs 44.5% pre-fix, basically unchanged)
+
+**Symptom (DEMO8 evidence):** 396/851 assistant messages emit zero
+tool_use blocks (text-only narration / preambles / post-hoc
+summaries). Pre-fix baseline measured at 44.5%; post-fix at 46.5%.
+The Round 1 #1 concise output rule (commit `c9bb733`) is not
+inducing terser turns.
+
+**Saving lost:** 8-10% of total spend (~$100-125 over lifetime).
+Output tokens are billed at full rate (never cached) so this is
+direct $ leak.
+
+**Likely root cause:**
+The "≤2 sentences default, no preambles, no post-hoc summaries"
+block lives in `MISSION_AND_VOCABULARY` (~50% through the 76k-char
+prompt). Sonnet's default is verbose; an instruction buried mid-
+prompt doesn't override it.
+
+**Three fix candidates (ordered by ease):**
+
+1. **Move concise rule to TOP of `MISSION_AND_VOCABULARY`** and add
+   one explicit example: "Don't write 'I'll start by checking my
+   action items, then process each one'. Just call the tool."
+   **Effort:** XS (5 LOC reorder).
+
+2. **Inject concise reminder into the user-message invocation
+   prompt** every wake. We already vary the user message per wake
+   (Phase 7.4.13 ACTION ITEMS SNAPSHOT). Add 2 lines like:
+   "Be terse. No preambles. Tool calls speak for themselves."
+   **Effort:** XS (~5 LOC in agent_manager.py).
+   **Why this might work better than system_prompt:** the user
+   message is read fresh on every turn, system prompt is cached
+   and skimmed.
+
+3. **Hard cap on assistant message length via `max_tokens`** on the
+   `claude -p` subprocess. Cuts off long generations. Crude but
+   effective. Risk: cuts off legitimate long content (component_doc_md
+   updates, evidence-citing consolidation responses).
+   **Effort:** XS (CLI flag).
+   **Don't ship this without thinking** — could break Phase 12
+   STEP 4 component_doc_md auto-generation.
+
+**Recommendation:** ship #1 + #2 in tandem. Both are XS, both target
+the same problem from different angles. Re-measure post-fix on next
+DEMO run.
+
+---
+
+### 7.3 [HIGH] Owner-wake on WD tasks burns cycles (insight from sme-3ed92c56, prompt_gap)
+
+**Insight source (DEMO8):** `sme-3ed92c56` filed `prompt_gap` /
+`sme.wake-trigger`:
+
+> Trigger scanner re-wakes task owners for WD-status tasks even when
+> no owner action is possible. Owner can only act on tasks in
+> BO/WD-returning states — while a task is WD awaiting the worker,
+> the owner is helpless and the re-wake burns a cycle + forces a
+> "must change state" chat/insight to avoid a no-op response.
+
+**Concrete pattern observed:** "owner re-woken twice in 2 minutes
+for same WD task". Each owner-wake on a WD they can't act on costs
+a full LLM round-trip (cached prompt read + tool call to
+`get_my_tasks` + an unhappy "I see this is awaiting worker, no
+action needed" assistant turn).
+
+**Saving estimate:** 3-5% of total spend (~$40-60 over lifetime).
+Similar magnitude to wake-debouncing (Round 3 #6) since it's the
+same class of problem — drip-fed wakes that don't change anything.
+
+**Two fix candidates:**
+
+1. **Filter `tasks_pending` in `get_action_items_summary` to
+   exclude WD-where-caller-is-owner.** SQL change: add
+   `AND NOT (status='WD' AND owner_agent_id = %s)` to the count.
+   This removes the wake signal entirely for owner-on-WD.
+   **Effort:** XS (~5 LOC SQL).
+   **Trade-off:** owner stops seeing WDs in their summary. They
+   still see them via `get_my_tasks` if they explicitly look. But
+   they won't be PINGED by the trigger scanner.
+
+2. **Add stale-WD timeout escalation.** If a task has been WD for
+   >N minutes (e.g. 30 min), surface it as actionable for the
+   owner ("worker hasn't responded in 30min — consider
+   bouncing"). Otherwise hide.
+   **Effort:** S (~30 LOC SQL + scanner).
+   **Better UX** — owner CAN intervene if worker is stuck, just
+   not pinged for fresh WDs.
+
+**Recommendation:** #2 with N=30min. Same pattern as the existing
+recovery scanner (60s/300s/1800s backoff for errored agents); just
+applied to "stuck WD task" instead of errored-agent.
+
+---
+
+### 7.4 [MEDIUM] Pre-merge handoff timing awkward (insight from sme-227d8ca4, workflow_friction)
+
+**Insight source:** `sme-227d8ca4` filed `workflow_friction` /
+`sme.merge`:
+
+> Pre-merge handoff clarification (Phase 6a) required explicit
+> timing coordination between sme-auth-1 and orchestrator.
+> Improvement opportunity: auto-trigger handoff clarification
+> from nominate_consolidation response rather than a separate task
+> dispatch.
+
+**Saving estimate:** 1-2% (mild — saves orch a follow-up task
+dispatch + saves SME a re-read of the consolidation thread). But
+ergonomic improvement is bigger than the token saving.
+
+**Fix:** modify `nominate_consolidation` MCP tool to OPTIONALLY
+auto-create a clarification from agent_a → agent_b when nominating
+a merge. Two-step → one-step:
+
+```python
+nominate_consolidation(
+    agent_id, comp_a, comp_b, type='merge', confidence,
+    message,
+    auto_handoff=True  # NEW — creates the pre-merge handoff
+                       # clarification atomically with the nomination
+)
+```
+
+**Effort:** S (~30 LOC in `tools/consolidation.py` + prompt update
+in `sme.py`).
+
+**Recommendation:** ship as Phase 9.x small ergonomic improvement.
+Not urgent.
+
+---
+
+### 7.5 [MEDIUM] Pre-compute transfer ids before split nomination (insight from sme-3ed92c56, tactic_win)
+
+**Insight source:** `sme-3ed92c56` `tactic_win` / `sme.split`:
+
+> When nominating a split, write the split_briefing to capture the
+> exact source_slice paths + transfer_attribution_ids
+> + transfer_edge_ids for the child BEFORE calling
+> nominate_consolidation. This way the mutation turn is a single
+> atomic spawn_child_agent call with all transfer lists pre-
+> computed — no need to re-read or re-grep during mutation.
+> Reduces mutation-phase latency and eliminates risk of
+> transferring stale/incomplete attribution sets.
+
+**This is a SHOULD-BE-IN-PROMPT recommendation.** The SME
+discovered the pattern; it's not in the prompt. Adding it would
+prevent every future split SME from re-discovering.
+
+**Effort:** XS (~10 LOC addition to `sme.py` mutation block, in
+the split-nomination section).
+
+**Recommendation:** add to SME prompt's mutation section now.
+This is exactly the kind of insight the Phase 5.9 record_insight
+loop was designed to produce. Promote.
+
+---
+
+### 7.6 Realised vs target token savings (post-DEMO8 quantification)
+
+| Lever | Target | DEMO8 Status |
+|---|---:|---|
+| Round 1 #1 — concise output rule | 8-10% | ❌ NOT realised (see §7.2) |
+| Round 1 #2 — orch → sonnet-4-6 | 10-14% | ✅ realised |
+| Round 2 #3 — top-3 bulk MCP writes | 6-9% | ✅ realised (60/61 bulk calls succeeded) |
+| Round 2 #4 — BULK CALLS DECISION LADDER | 3-5% | ✅ realised |
+| Round 2 #5 — pre-inject action items | 3-5% | ✅ realised (verified in JSONL) |
+| Round 3 #6 — wake debouncing 5-min | 10-15% | ✅ realised (verified Phase 21) |
+| Phase 7.4.12-prompts — parallel tool calls | 20-30% | ❌ NOT realised (see §7.1) |
+| Phase 8 — corrective deletes + read bulks + idempotency | 2-4% | ✅ realised |
+
+**Realised:** ~35-50% reduction (~$435-635 over $1,234.85 baseline).
+**Lost to §7.1:** ~12-18% (parallel narrowed by bulk coverage).
+**Lost to §7.2:** ~8-10%.
+**Available if both fix:** ~55-74% total reduction.
+
+Plus §7.3 (WD-owner-wake) adds another 3-5% if shipped.
+
+**Aggregate ceiling if Round 5 ships everything: ~58-79% reduction.**
+That's well above the original 43% target.
+
+---
+
+### 7.7 Round 5 ship order (recommended)
+
+**Day 1 (XS effort, high leverage):**
+
+1. **§7.1 hypothesis #1 verification** — read agent_manager.py
+   subprocess flags. If single-flag fix exists, ship immediately.
+   **(unblocks 12-18% saving on confirmed root cause).**
+2. **§7.2 fix #1 + #2** — concise rule reorder + user-message
+   reminder. Both XS, both XS. **(unblocks 8-10% saving).**
+3. **§7.5 SME prompt addition** — pre-compute transfer ids before
+   split nomination. **(captures shipped insight as durable
+   prompt rule).**
+
+**Day 2 (S-M effort, medium leverage):**
+
+4. **§7.3 WD-task owner-wake filter** — add stale-WD timeout
+   escalation. **(unblocks 3-5% saving).**
+5. **§7.4 auto-handoff clarification on nominate_consolidation
+   merge** — ergonomic + saves 1-2%.
+
+After Round 5: re-run DEMO8 (call it DEMO8-r2), measure parallel-
+tool-call rate + concise-output rate from JSONL, compare. If both
+biting at >10x baseline, mark as durably fixed.
+
+---
+
 End of doc. Add new entries to §3 as they're diagnosed; promote to §2
 when shipped with a commit hash + diagnostic context preserved.
