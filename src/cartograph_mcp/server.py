@@ -967,6 +967,64 @@ def delete_unresolved_bulk(
 
 
 @mcp.tool()
+def upsert_flows_bulk(
+    agent_id: str,
+    component_id: str,
+    flows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """[Phase 8.4] Atomic-with-pre-validation bulk flow upsert on THIS
+    SME's component. Each row: {incoming_catalog_id, outgoing_edge_id,
+    metadata?, confidence?}. Idempotent on the unique triple.
+
+    Pre-validates every row (catalog belongs to component, outgoing
+    edge originates from component). All-or-nothing. Max 500.
+    """
+    return components_tool.upsert_flows_bulk(agent_id, component_id, flows)
+
+
+@mcp.tool()
+def insert_unresolved_bulk(
+    agent_id: str, items: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """[Phase 8.4] Atomic-with-pre-validation bulk unresolved insert.
+    Idempotent on (found_in_component_id, reference_type, reference_value)
+    per the new UNIQUE constraint — repeats bump attempts.
+
+    Each row: {found_in_component_id, reference_type, reference_value,
+    context?}. RCA-checks each found_in_component_id. Max 500.
+    """
+    return components_tool.insert_unresolved_bulk(agent_id, items)
+
+
+@mcp.tool()
+def ack_broadcasts_bulk(
+    agent_id: str, communication_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.4] Bulk ack N broadcasts in one round-trip.
+
+    Each id ack'd via INSERT ON CONFLICT DO NOTHING. Max 500.
+
+    Returns {"committed": True, "applied": <newly-acked count>,
+             "rows": [{communication_id, already_acked}]}.
+    """
+    from cartograph_mcp.tools import broadcast as broadcast_tool
+    return broadcast_tool.ack_broadcasts_bulk(agent_id, communication_ids)
+
+
+@mcp.tool()
+def ack_terminals_bulk(
+    agent_id: str, items: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """[Phase 8.4] Bulk ack N terminal entities in one round-trip.
+
+    Each item: {entity_type, entity_id}. Pre-validates participation +
+    terminal-state for every item. Max 500. Atomic — if any item
+    fails pre-validation, reject WHOLE batch.
+    """
+    return terminal_acks_tool.ack_terminals_bulk(agent_id, items)
+
+
+@mcp.tool()
 def upsert_flow(
     agent_id: str,
     component_id: str,

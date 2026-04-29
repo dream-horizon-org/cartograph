@@ -100,3 +100,50 @@ def _is_orchestrator(agent_id: str) -> bool:
         (agent_id,),
     )
     return row is not None
+
+
+def ack_broadcasts_bulk(
+    agent_id: str, communication_ids: list[str]
+) -> dict:
+    """[Phase 8.4] Bulk ack N broadcasts in one round-trip.
+
+    Each id is ack'd via INSERT ON CONFLICT DO NOTHING. Missing comm_ids
+    or non-broadcast comm rows insert nothing for that id. Atomic — all
+    inserts in one transaction. Max 500 ids.
+
+    Returns {"committed": True, "applied": <int>, "rows": [{communication_id, already_acked}]}.
+    """
+    if not isinstance(communication_ids, list) or not communication_ids:
+        raise ValueError("communication_ids must be a non-empty list")
+    if len(communication_ids) > 500:
+        raise ValueError(
+            f"max 500 ids per bulk call (got {len(communication_ids)})"
+        )
+
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for raw in communication_ids:
+        s = str(raw or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        normalized.append(s)
+
+    rows = []
+    for s in normalized:
+        inserted = execute_returning(
+            """INSERT INTO broadcast_acks (communication_id, agent_id)
+               VALUES (%s::uuid, %s)
+               ON CONFLICT (communication_id, agent_id) DO NOTHING
+               RETURNING acked_at""",
+            (s, agent_id),
+        )
+        rows.append({
+            "communication_id": s,
+            "already_acked": inserted is None,
+        })
+    return {
+        "committed": True,
+        "applied": sum(1 for r in rows if not r["already_acked"]),
+        "rows": rows,
+    }

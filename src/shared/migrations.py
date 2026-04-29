@@ -553,6 +553,33 @@ def run_migrations() -> None:
                 "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS first_pending_at TIMESTAMPTZ"
             )
 
+            # Phase 8.4: unresolved idempotency. Add a UNIQUE on
+            # (found_in_component_id, reference_type, reference_value)
+            # so insert_unresolved can ON CONFLICT DO UPDATE attempts++,
+            # eliminating the "repeated grep sweep duplicates rows" bloat.
+            # Defensive: if duplicates exist (e.g. restored from a pre-8.4
+            # snapshot), log + skip the constraint addition. Operator
+            # de-dups manually then re-runs migrations.
+            cur.execute(
+                """SELECT 1 FROM pg_constraint
+                   WHERE conname = 'unresolved_unique_per_ref'"""
+            )
+            if cur.fetchone() is None:
+                # Constraint absent — check for blocking duplicates first.
+                cur.execute(
+                    """SELECT 1 FROM unresolved
+                       GROUP BY found_in_component_id, reference_type, reference_value
+                       HAVING COUNT(*) > 1
+                       LIMIT 1"""
+                )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        "ALTER TABLE unresolved ADD CONSTRAINT "
+                        "unresolved_unique_per_ref UNIQUE "
+                        "(found_in_component_id, reference_type, reference_value)"
+                    )
+                # else: skip silently — operator can de-dup later.
+
             # Phase 3: SME-authored human-readable component doc rendered
             # in the graph-viz hover popup. Markdown; nullable.
             cur.execute(

@@ -103,6 +103,89 @@ def ack_terminal(agent_id: str, entity_type: str, entity_id: str) -> dict:
     return {"acked": True, "already_acked": False}
 
 
+def ack_terminals_bulk(
+    agent_id: str, items: list[dict]
+) -> dict:
+    """[Phase 8.4] Bulk ack N terminal entities in one round-trip.
+
+    Each item: {entity_type, entity_id}. Pre-validates every item
+    (entity_type valid, entity exists, entity is in terminal state,
+    caller is participant). If ANY item fails pre-validation, reject
+    the WHOLE batch with per-row errors (atomic-with-pre-validation).
+
+    Max 500 items. Returns:
+      {"committed": True, "applied": N, "rows": [{entity_type, entity_id, already_acked}]}
+      {"committed": False, "applied": 0, "errors": {<idx>: <reason>}}
+    """
+    require_active_agent(agent_id)
+    if not isinstance(items, list) or not items:
+        raise ValueError("items must be a non-empty list")
+    if len(items) > 500:
+        raise ValueError(f"max 500 items per bulk call (got {len(items)})")
+
+    errors: dict[int, str] = {}
+    normalized: list[dict] = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            errors[i] = "item must be a dict"
+            continue
+        et = (it.get("entity_type") or "").strip()
+        eid = str(it.get("entity_id") or "").strip()
+        if et not in _VALID_ENTITY_TYPES:
+            errors[i] = (
+                f"Invalid entity_type '{et}'. Allowed: {sorted(_VALID_ENTITY_TYPES)}"
+            )
+            continue
+        if not eid:
+            errors[i] = "entity_id is required"
+            continue
+        normalized.append({"i": i, "entity_type": et, "entity_id": eid})
+
+    if not errors:
+        for n in normalized:
+            result = _participants(n["entity_type"], n["entity_id"])
+            if result is None:
+                errors[n["i"]] = (
+                    f"{n['entity_type']} {n['entity_id']} not found"
+                )
+                continue
+            participants, status = result
+            if status not in _TERMINAL_STATES[n["entity_type"]]:
+                errors[n["i"]] = (
+                    f"{n['entity_type']} {n['entity_id']} not in terminal "
+                    f"state (current: {status})"
+                )
+                continue
+            if agent_id not in participants:
+                errors[n["i"]] = (
+                    f"agent {agent_id} not a participant of "
+                    f"{n['entity_type']} {n['entity_id']}"
+                )
+
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    rows = []
+    for n in normalized:
+        inserted = execute_returning(
+            """INSERT INTO terminal_acks (entity_type, entity_id, agent_id)
+               VALUES (%s, %s::uuid, %s)
+               ON CONFLICT (entity_type, entity_id, agent_id) DO NOTHING
+               RETURNING acked_at""",
+            (n["entity_type"], n["entity_id"], agent_id),
+        )
+        rows.append({
+            "entity_type": n["entity_type"],
+            "entity_id": n["entity_id"],
+            "already_acked": inserted is None,
+        })
+    return {
+        "committed": True,
+        "applied": sum(1 for r in rows if not r["already_acked"]),
+        "rows": rows,
+    }
+
+
 def auto_ack_for_decommission(agent_id: str) -> int:
     """Bulk-ack every terminal entity the agent participates in but
     hasn't acked. Called by absorb_agent when decommissioning a target,

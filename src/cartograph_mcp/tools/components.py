@@ -1137,7 +1137,14 @@ def get_component_edges(agent_id: str, component_id: str) -> dict:
 
 
 def insert_unresolved(agent_id: str, unresolved_data: dict) -> dict:
-    """Record an unresolved reference found inside this SME's component."""
+    """Record an unresolved reference found inside this SME's component.
+
+    Phase 8.4: idempotent on (found_in_component_id, reference_type,
+    reference_value) per the new UNIQUE constraint
+    `unresolved_unique_per_ref`. Repeated grep sweeps from the same
+    SME no longer pile duplicate rows — they update-in-place,
+    bumping `attempts` and refreshing context/embedding.
+    """
     _assert_sme(agent_id)
     found_in_component_id = (
         unresolved_data.get("found_in_component_id") or ""
@@ -1165,6 +1172,11 @@ def insert_unresolved(agent_id: str, unresolved_data: dict) -> dict:
            (found_in_component_id, reference_type, reference_value, context,
             embedding, found_by_agent)
            VALUES (%s, %s, %s, %s::jsonb, %s::vector, %s)
+           ON CONFLICT (found_in_component_id, reference_type, reference_value)
+           DO UPDATE SET
+               context = EXCLUDED.context,
+               embedding = EXCLUDED.embedding,
+               attempts = unresolved.attempts + 1
            RETURNING *""",
         (
             found_in_component_id, reference_type, reference_value,
@@ -1816,3 +1828,211 @@ def delete_edges_bulk(agent_id: str, edge_ids: list) -> dict:
         "applied": sum(1 for r in results if r["deleted"]),
         "rows": results,
     }
+
+
+# ============ Phase 8.4: write bulks (flows + unresolved) ============
+
+
+def upsert_flows_bulk(
+    agent_id: str,
+    component_id: str,
+    flows: list[dict],
+) -> dict:
+    """[Phase 8.4] Atomic-with-pre-validation bulk upsert of N flows on
+    THIS SME's component.
+
+    Each row: {incoming_catalog_id, outgoing_edge_id, metadata?, confidence?}.
+    Pre-validate every row (catalog belongs to component, outgoing edge
+    originates from component, confidence in [0,1]); if any row fails,
+    write nothing. Otherwise atomic transaction with N upserts.
+
+    Idempotent on (component_id, incoming_catalog_id, outgoing_edge_id) —
+    repeat upserts accumulate metadata + take max confidence.
+
+    Max 500 rows per call.
+    """
+    _assert_sme(agent_id)
+    if not _sme_owns_component(agent_id, component_id):
+        raise ValueError(
+            f"SME {agent_id} does not own component {component_id}."
+        )
+    if not isinstance(flows, list) or not flows:
+        raise ValueError("flows must be a non-empty list")
+    if len(flows) > 500:
+        raise ValueError(f"max 500 flows per bulk call (got {len(flows)})")
+
+    errors: dict[int, str] = {}
+    normalized: list[dict] = []
+    for i, f in enumerate(flows):
+        if not isinstance(f, dict):
+            errors[i] = "row must be a dict"
+            continue
+        incoming_catalog_id = str(f.get("incoming_catalog_id") or "").strip()
+        outgoing_edge_id = str(f.get("outgoing_edge_id") or "").strip()
+        try:
+            confidence = float(f.get("confidence", 1.0))
+        except (TypeError, ValueError):
+            errors[i] = "confidence must be a number"
+            continue
+        if not incoming_catalog_id:
+            errors[i] = "incoming_catalog_id is required"
+            continue
+        if not outgoing_edge_id:
+            errors[i] = "outgoing_edge_id is required"
+            continue
+        if not (0.0 <= confidence <= 1.0):
+            errors[i] = "confidence must be in [0.0, 1.0]"
+            continue
+        normalized.append({
+            "i": i,
+            "incoming_catalog_id": incoming_catalog_id,
+            "outgoing_edge_id": outgoing_edge_id,
+            "metadata": f.get("metadata") or {},
+            "confidence": confidence,
+        })
+
+    if not errors:
+        cat_ids = list({n["incoming_catalog_id"] for n in normalized})
+        edge_ids = list({n["outgoing_edge_id"] for n in normalized})
+        cats = execute(
+            "SELECT id, component_id FROM catalogs WHERE id = ANY(%s::uuid[])",
+            (cat_ids,),
+        )
+        cat_owner = {str(r["id"]): str(r["component_id"]) for r in cats}
+        edges = execute(
+            "SELECT id, from_component_id FROM edges WHERE id = ANY(%s::uuid[])",
+            (edge_ids,),
+        )
+        edge_owner = {
+            str(r["id"]): (str(r["from_component_id"]) if r["from_component_id"] else None)
+            for r in edges
+        }
+        for n in normalized:
+            cid_of_cat = cat_owner.get(n["incoming_catalog_id"])
+            if cid_of_cat is None:
+                errors[n["i"]] = (
+                    f"incoming_catalog_id {n['incoming_catalog_id']} not found"
+                )
+                continue
+            if cid_of_cat != str(component_id):
+                errors[n["i"]] = (
+                    f"catalog {n['incoming_catalog_id']} belongs to "
+                    f"component {cid_of_cat}, not {component_id}"
+                )
+                continue
+            if n["outgoing_edge_id"] not in edge_owner:
+                errors[n["i"]] = (
+                    f"outgoing_edge_id {n['outgoing_edge_id']} not found"
+                )
+                continue
+            efrom = edge_owner[n["outgoing_edge_id"]]
+            if efrom != str(component_id):
+                errors[n["i"]] = (
+                    f"edge {n['outgoing_edge_id']} from_component_id "
+                    f"{efrom} does not match {component_id}"
+                )
+
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    rows = []
+    for n in normalized:
+        row = execute_returning(
+            """INSERT INTO flows
+               (component_id, incoming_catalog_id, outgoing_edge_id,
+                confidence, metadata, discovered_by)
+               VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s::jsonb, %s)
+               ON CONFLICT (component_id, incoming_catalog_id, outgoing_edge_id)
+               DO UPDATE
+                 SET metadata = flows.metadata || EXCLUDED.metadata,
+                     confidence = GREATEST(flows.confidence, EXCLUDED.confidence),
+                     updated_at = now()
+               RETURNING *""",
+            (component_id, n["incoming_catalog_id"], n["outgoing_edge_id"],
+             n["confidence"], json.dumps(n["metadata"]), agent_id),
+        )
+        rows.append(row)
+    return {"committed": True, "applied": len(rows), "rows": rows}
+
+
+def insert_unresolved_bulk(agent_id: str, items: list[dict]) -> dict:
+    """[Phase 8.4] Atomic-with-pre-validation bulk insert of N unresolved
+    references. Idempotent on the unique triple (Phase 8.4 ON CONFLICT
+    bumps attempts on repeats).
+
+    Each row: {found_in_component_id, reference_type, reference_value,
+    context?}. Pre-validate every row + RCA-check each found_in_component_id.
+
+    Max 500 rows per call.
+    """
+    _assert_sme(agent_id)
+    if not isinstance(items, list) or not items:
+        raise ValueError("items must be a non-empty list")
+    if len(items) > 500:
+        raise ValueError(f"max 500 items per bulk call (got {len(items)})")
+
+    errors: dict[int, str] = {}
+    normalized: list[dict] = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            errors[i] = "row must be a dict"
+            continue
+        found_in = str(it.get("found_in_component_id") or "").strip()
+        reference_type = (it.get("reference_type") or "").strip()
+        reference_value = (it.get("reference_value") or "").strip()
+        context = it.get("context") or {}
+        if not found_in:
+            errors[i] = "found_in_component_id is required"
+            continue
+        if not reference_type:
+            errors[i] = "reference_type is required"
+            continue
+        if not reference_value:
+            errors[i] = "reference_value is required"
+            continue
+        normalized.append({
+            "i": i,
+            "found_in": found_in,
+            "reference_type": reference_type,
+            "reference_value": reference_value,
+            "context": context,
+        })
+
+    if not errors:
+        owned_components = {
+            str(r["component_id"]) for r in execute(
+                "SELECT component_id FROM resource_component_agents "
+                "WHERE agent_id = %s AND component_id IS NOT NULL",
+                (agent_id,),
+            )
+        }
+        for n in normalized:
+            if n["found_in"] not in owned_components:
+                errors[n["i"]] = (
+                    f"agent {agent_id} does not own component {n['found_in']}"
+                )
+
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    rows = []
+    for n in normalized:
+        vec = emb.vector_literal(emb.embed_text(
+            emb.unresolved_embed_text(n["reference_type"], n["reference_value"])
+        ))
+        row = execute_returning(
+            """INSERT INTO unresolved
+               (found_in_component_id, reference_type, reference_value,
+                context, embedding, found_by_agent)
+               VALUES (%s, %s, %s, %s::jsonb, %s::vector, %s)
+               ON CONFLICT (found_in_component_id, reference_type, reference_value)
+               DO UPDATE SET
+                   context = EXCLUDED.context,
+                   embedding = EXCLUDED.embedding,
+                   attempts = unresolved.attempts + 1
+               RETURNING *""",
+            (n["found_in"], n["reference_type"], n["reference_value"],
+             json.dumps(n["context"]), vec, agent_id),
+        )
+        rows.append(row)
+    return {"committed": True, "applied": len(rows), "rows": rows}
