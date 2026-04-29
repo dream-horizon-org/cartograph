@@ -1415,3 +1415,167 @@ def get_stale_flows(agent_id: str) -> list[dict]:
            ORDER BY f.updated_at DESC""",
         (my_comp_id,),
     )
+
+
+# ============ Phase 8.2: corrective deletes (attribution, flow, unresolved) ============
+
+
+def delete_attribution(
+    agent_id: str, attribution_id: str, reason: str | None = None
+) -> dict:
+    """[Phase 8.2] Owner-scoped, idempotent attribution delete.
+
+    Closes the corrective-action gap from sme-daa3b7b3 insight (an SME
+    wrote `outbound_db_host` as own attribution; the DB hostname should
+    have been an EDGE to the DB component). Without this tool, the
+    only recovery was leaving the wrong-shape row in place.
+
+    Authorisation: caller must own the row's component_id via RCA.
+
+    Cascade behaviour:
+      - edges.source_attr_id / target_attr_id pointing at this row →
+        SET NULL (existing FK). Edge survives as a structural fact;
+        only the evidence pointer is severed. Cross-owner edges are
+        affected (callers who cited this attribution as target_attr_id);
+        their edge.evidence JSONB still carries free-form context.
+
+    Idempotent: deleting a non-existent attribution_id returns
+    {"deleted": False, "id": <id>, "reason": "not_found"}.
+
+    Returns:
+      {"deleted": True,  "id": <id>, "severed_edge_pointers": <int>}
+      {"deleted": False, "id": <id>, "reason": "not_found"}
+
+    Optional `reason` param surfaces in mcp_audit.args_hash for
+    forensic queries.
+    """
+    _ = reason  # captured by mcp_audit; not stored on the row
+    _assert_sme(agent_id)
+    attribution_id_s = str(attribution_id or "").strip()
+    if not attribution_id_s:
+        raise ValueError("attribution_id is required")
+
+    attr = execute_one(
+        "SELECT id, component_id FROM attributions WHERE id = %s::uuid",
+        (attribution_id_s,),
+    )
+    if attr is None:
+        return {"deleted": False, "id": attribution_id_s, "reason": "not_found"}
+
+    if not _sme_owns_component(agent_id, str(attr["component_id"])):
+        raise ValueError(
+            f"SME {agent_id} does not own component {attr['component_id']} "
+            "(attribution belongs to a component you don't own)."
+        )
+
+    # Count edges that cite this attribution as evidence — purely
+    # informative; the FK SET NULL fires automatically.
+    severed_row = execute_one(
+        """SELECT COUNT(*) AS n FROM edges
+           WHERE source_attr_id = %s::uuid OR target_attr_id = %s::uuid""",
+        (attribution_id_s, attribution_id_s),
+    )
+    severed = int(severed_row["n"]) if severed_row else 0
+
+    execute_mutate(
+        "DELETE FROM attributions WHERE id = %s::uuid",
+        (attribution_id_s,),
+    )
+    return {
+        "deleted": True,
+        "id": attribution_id_s,
+        "severed_edge_pointers": severed,
+    }
+
+
+def delete_flow(
+    agent_id: str, flow_id: str, reason: str | None = None
+) -> dict:
+    """[Phase 8.2] Owner-scoped, idempotent flow delete.
+
+    Closes the gap where an SME wired a flow with the wrong
+    catalog→outgoing join and needs to remove it (upsert_flow is
+    set-based on the unique triple — calling it with a different
+    triple ADDS a flow rather than replacing the wrong one).
+
+    Authorisation: caller must own the row's component_id via RCA.
+
+    No cascade — flows are leaf rows. Nothing references them.
+
+    Idempotent: deleting a non-existent flow_id returns
+    {"deleted": False, "id": <id>, "reason": "not_found"}.
+
+    Returns:
+      {"deleted": True,  "id": <id>}
+      {"deleted": False, "id": <id>, "reason": "not_found"}
+    """
+    _ = reason
+    _assert_sme(agent_id)
+    flow_id_s = str(flow_id or "").strip()
+    if not flow_id_s:
+        raise ValueError("flow_id is required")
+
+    flow = execute_one(
+        "SELECT id, component_id FROM flows WHERE id = %s::uuid",
+        (flow_id_s,),
+    )
+    if flow is None:
+        return {"deleted": False, "id": flow_id_s, "reason": "not_found"}
+
+    if not _sme_owns_component(agent_id, str(flow["component_id"])):
+        raise ValueError(
+            f"SME {agent_id} does not own component {flow['component_id']}."
+        )
+
+    execute_mutate(
+        "DELETE FROM flows WHERE id = %s::uuid",
+        (flow_id_s,),
+    )
+    return {"deleted": True, "id": flow_id_s}
+
+
+def delete_unresolved(
+    agent_id: str, unresolved_id: str, reason: str | None = None
+) -> dict:
+    """[Phase 8.2] Owner-scoped, idempotent unresolved delete.
+
+    Closes the gap where an SME flagged a reference as unresolved,
+    later realised it was a typo / not actually a dependency, and has
+    no clean way to remove it.
+
+    Authorisation: caller must own the row's found_in_component_id
+    via RCA.
+
+    No cascade — unresolved is a leaf row.
+
+    Idempotent: deleting a non-existent unresolved_id returns
+    {"deleted": False, "id": <id>, "reason": "not_found"}.
+
+    Returns:
+      {"deleted": True,  "id": <id>}
+      {"deleted": False, "id": <id>, "reason": "not_found"}
+    """
+    _ = reason
+    _assert_sme(agent_id)
+    unresolved_id_s = str(unresolved_id or "").strip()
+    if not unresolved_id_s:
+        raise ValueError("unresolved_id is required")
+
+    row = execute_one(
+        "SELECT id, found_in_component_id FROM unresolved WHERE id = %s::uuid",
+        (unresolved_id_s,),
+    )
+    if row is None:
+        return {"deleted": False, "id": unresolved_id_s, "reason": "not_found"}
+
+    if not _sme_owns_component(agent_id, str(row["found_in_component_id"])):
+        raise ValueError(
+            f"SME {agent_id} does not own component "
+            f"{row['found_in_component_id']}."
+        )
+
+    execute_mutate(
+        "DELETE FROM unresolved WHERE id = %s::uuid",
+        (unresolved_id_s,),
+    )
+    return {"deleted": True, "id": unresolved_id_s}

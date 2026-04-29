@@ -791,6 +791,111 @@ def delete_edge(agent_id: str, edge_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def delete_attribution(
+    agent_id: str, attribution_id: str, reason: str | None = None
+) -> dict[str, Any]:
+    """[Phase 8.2] Owner-scoped, idempotent attribution delete.
+
+    Closes the corrective-action gap from sme-daa3b7b3 insight (an
+    SME wrote `outbound_db_host` as own attribution; the DB hostname
+    should have been an EDGE to the DB component). Without this tool,
+    the only recovery was leaving the wrong-shape row in place.
+
+    Authorisation: caller must own the row's component_id via RCA.
+
+    Cascade: edges.source_attr_id / target_attr_id pointing at this
+    row → SET NULL (existing FK). Edge survives as a structural fact;
+    only the evidence pointer is severed. Cross-owner edges are
+    affected (callers who cited this attribution as target_attr_id);
+    their edge.evidence JSONB still carries free-form context.
+
+    Idempotent: deleting a non-existent attribution_id returns
+    {"deleted": False, "id": <id>, "reason": "not_found"}.
+
+    Optional `reason` surfaces in mcp_audit.args_hash for forensic
+    queries (e.g. reason='wrong shape — converting to edge').
+
+    Returns:
+      {"deleted": True,  "id": <id>, "severed_edge_pointers": <int>}
+      {"deleted": False, "id": <id>, "reason": "not_found"}
+    """
+    return components_tool.delete_attribution(agent_id, attribution_id, reason)
+
+
+@mcp.tool()
+def delete_catalog(
+    agent_id: str, catalog_id: str, reason: str | None = None
+) -> dict[str, Any]:
+    """[Phase 8.2] Owner-scoped, idempotent catalog delete.
+
+    Authorisation: caller must own the row's component_id via RCA.
+
+    Cascade: flows.incoming_catalog_id has ON DELETE CASCADE — flows
+    anchored on this catalog row are removed atomically. Bound caller
+    edges bridged via (target, edge_type, identifier) are NOT FK-
+    linked — they surface via get_unmatched_callers on the next
+    hygiene sweep.
+
+    Idempotent: missing catalog_id → {"deleted": False, "reason": "not_found"}.
+
+    Optional `reason` surfaces in mcp_audit.args_hash (e.g.
+    reason='deprecated since YYYY-MM').
+
+    Returns:
+      {"deleted": True,  "id": <id>, "cascaded_flows": <int>}
+      {"deleted": False, "id": <id>, "reason": "not_found"}
+    """
+    return catalogs_tool.delete_catalog(agent_id, catalog_id, reason)
+
+
+@mcp.tool()
+def delete_flow(
+    agent_id: str, flow_id: str, reason: str | None = None
+) -> dict[str, Any]:
+    """[Phase 8.2] Owner-scoped, idempotent flow delete.
+
+    Authorisation: caller must own the flow's component_id via RCA.
+
+    No cascade — flows are leaf rows.
+
+    Use case: you wired a flow with the wrong catalog→outgoing join
+    and need to remove it (upsert_flow is set-based on the unique
+    triple — calling it with a different triple ADDS a flow rather
+    than replacing the wrong one).
+
+    Idempotent: missing flow_id → {"deleted": False, "reason": "not_found"}.
+
+    Returns:
+      {"deleted": True,  "id": <id>}
+      {"deleted": False, "id": <id>, "reason": "not_found"}
+    """
+    return components_tool.delete_flow(agent_id, flow_id, reason)
+
+
+@mcp.tool()
+def delete_unresolved(
+    agent_id: str, unresolved_id: str, reason: str | None = None
+) -> dict[str, Any]:
+    """[Phase 8.2] Owner-scoped, idempotent unresolved delete.
+
+    Authorisation: caller must own the row's found_in_component_id
+    via RCA.
+
+    No cascade — unresolved is a leaf row.
+
+    Use case: SME flagged a reference as unresolved, later realised
+    it was a typo / not actually a dependency, needs to remove it.
+
+    Idempotent: missing unresolved_id → {"deleted": False, "reason": "not_found"}.
+
+    Returns:
+      {"deleted": True,  "id": <id>}
+      {"deleted": False, "id": <id>, "reason": "not_found"}
+    """
+    return components_tool.delete_unresolved(agent_id, unresolved_id, reason)
+
+
+@mcp.tool()
 def upsert_flow(
     agent_id: str,
     component_id: str,

@@ -354,3 +354,71 @@ def edge_type_to_kind(edge_type: str) -> str:
     /api/graph payload (which still surfaces catalog rows under a
     `kind='catalog'` discriminator with a derived edge_type)."""
     return _EDGE_TYPE_TO_KIND.get(edge_type, "endpoint")
+
+
+# ============ Phase 8.2: corrective delete ============
+
+
+def delete_catalog(
+    agent_id: str, catalog_id: str, reason: str | None = None
+) -> dict:
+    """[Phase 8.2] Owner-scoped, idempotent catalog delete.
+
+    Closes the gap where an SME declared a catalog row that's
+    deprecated / wrong-shape and has no way to remove it. Without
+    this, the only options were leaving the stale row in place or
+    decommissioning the whole component.
+
+    Authorisation: caller must own the row's component_id via RCA.
+
+    Cascade behaviour:
+      - flows.incoming_catalog_id has ON DELETE CASCADE — flows that
+        anchored on this catalog row are removed atomically.
+      - bound caller edges that bridged via (target, edge_type,
+        identifier) are NOT FK-linked — they become unmatched on the
+        next hygiene sweep and surface via get_unmatched_callers on
+        the still-existing component owner.
+
+    Idempotent: deleting a non-existent catalog_id returns
+    {"deleted": False, "id": <id>, "reason": "not_found"}.
+
+    Returns:
+      {"deleted": True,  "id": <id>, "cascaded_flows": <int>}
+      {"deleted": False, "id": <id>, "reason": "not_found"}
+
+    Optional `reason` param surfaces in mcp_audit.args_hash.
+    """
+    _ = reason
+    require_active_agent(agent_id)
+    catalog_id_s = str(catalog_id or "").strip()
+    if not catalog_id_s:
+        raise ValueError("catalog_id is required")
+
+    cat = execute_one(
+        "SELECT id, component_id FROM catalogs WHERE id = %s::uuid",
+        (catalog_id_s,),
+    )
+    if cat is None:
+        return {"deleted": False, "id": catalog_id_s, "reason": "not_found"}
+
+    if not _agent_owns_component(agent_id, str(cat["component_id"])):
+        raise ValueError(
+            f"Agent {agent_id} does not own component {cat['component_id']} "
+            "(catalog belongs to a component you don't own)."
+        )
+
+    flow_count_row = execute_one(
+        "SELECT COUNT(*) AS n FROM flows WHERE incoming_catalog_id = %s::uuid",
+        (catalog_id_s,),
+    )
+    cascaded_flows = int(flow_count_row["n"]) if flow_count_row else 0
+
+    execute_mutate(
+        "DELETE FROM catalogs WHERE id = %s::uuid",
+        (catalog_id_s,),
+    )
+    return {
+        "deleted": True,
+        "id": catalog_id_s,
+        "cascaded_flows": cascaded_flows,
+    }
