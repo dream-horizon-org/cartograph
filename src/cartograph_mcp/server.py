@@ -896,6 +896,77 @@ def delete_unresolved(
 
 
 @mcp.tool()
+def delete_attributions_bulk(
+    agent_id: str, attribution_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.3] Atomic-with-pre-validation bulk attribution delete.
+
+    Per-row owner check via RCA. Missing ids silently skipped
+    (idempotent). Cross-owner rows reject the WHOLE batch with per-row
+    errors. Max 500 ids per call.
+
+    Cascade: edges' source_attr_id / target_attr_id pointing at
+    deleted rows go NULL (existing FK SET NULL).
+
+    Returns {"committed": True, "applied": N, "rows": [...]}
+        OR  {"committed": False, "applied": 0, "errors": {<idx>: <reason>}}
+    """
+    return components_tool.delete_attributions_bulk(agent_id, attribution_ids)
+
+
+@mcp.tool()
+def delete_catalogs_bulk(
+    agent_id: str, catalog_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.3] Atomic-with-pre-validation bulk catalog delete.
+
+    Per-row owner check via RCA. Missing ids skipped. Cascades flows
+    (FK CASCADE on flows.incoming_catalog_id). Max 500.
+    """
+    return catalogs_tool.delete_catalogs_bulk(agent_id, catalog_ids)
+
+
+@mcp.tool()
+def delete_flows_bulk(
+    agent_id: str, flow_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.3] Atomic-with-pre-validation bulk flow delete.
+
+    Per-row owner check via RCA. Missing ids skipped. No cascade
+    (flows are leaf rows). Max 500.
+    """
+    return components_tool.delete_flows_bulk(agent_id, flow_ids)
+
+
+@mcp.tool()
+def delete_edges_bulk(
+    agent_id: str, edge_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.3] Atomic-with-pre-validation bulk edge delete.
+
+    Per-row owner check on from_component_id (mirrors single delete_edge).
+    Catalog rows (from IS NULL — pre-7.4 remnants) reject with
+    'catalog_not_supported' on those rows. Missing ids skipped.
+    Cascades flows (FK CASCADE on flows.outgoing_edge_id). Max 500.
+
+    Companion to delete_edge — useful for post-merge dedup batches.
+    """
+    return components_tool.delete_edges_bulk(agent_id, edge_ids)
+
+
+@mcp.tool()
+def delete_unresolved_bulk(
+    agent_id: str, unresolved_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.3] Atomic-with-pre-validation bulk unresolved delete.
+
+    Per-row owner check via RCA on found_in_component_id. Missing ids
+    skipped. No cascade. Max 500.
+    """
+    return components_tool.delete_unresolved_bulk(agent_id, unresolved_ids)
+
+
+@mcp.tool()
 def upsert_flow(
     agent_id: str,
     component_id: str,

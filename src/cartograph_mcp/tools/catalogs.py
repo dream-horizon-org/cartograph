@@ -422,3 +422,81 @@ def delete_catalog(
         "id": catalog_id_s,
         "cascaded_flows": cascaded_flows,
     }
+
+
+def delete_catalogs_bulk(agent_id: str, catalog_ids: list) -> dict:
+    """[Phase 8.3] Atomic-with-pre-validation bulk catalog delete.
+
+    Per-row owner check via RCA. Missing ids skipped (idempotent).
+    Cascades flows (FK CASCADE on flows.incoming_catalog_id). Max 500.
+
+    Returns:
+      {"committed": True, "applied": N,
+       "rows": [{deleted, id, cascaded_flows}]}
+      {"committed": False, "applied": 0, "errors": {<idx>: <reason>}}
+    """
+    require_active_agent(agent_id)
+    if not isinstance(catalog_ids, list) or not catalog_ids:
+        raise ValueError("catalog_ids must be a non-empty list")
+    if len(catalog_ids) > 500:
+        raise ValueError(f"max 500 ids per bulk call (got {len(catalog_ids)})")
+
+    normalized: list[tuple[int, str]] = []
+    errors: dict[int, str] = {}
+    seen: set[str] = set()
+    for i, raw in enumerate(catalog_ids):
+        s = str(raw or "").strip()
+        if not s:
+            errors[i] = "id is required"
+            continue
+        if s in seen:
+            errors[i] = f"duplicate id within batch: {s}"
+            continue
+        seen.add(s)
+        normalized.append((i, s))
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    id_strs = [n[1] for n in normalized]
+    rows = execute(
+        "SELECT id, component_id FROM catalogs WHERE id = ANY(%s::uuid[])",
+        (id_strs,),
+    )
+    by_id = {str(r["id"]): str(r["component_id"]) for r in rows}
+
+    owned_components = {
+        str(r["component_id"]) for r in execute(
+            "SELECT component_id FROM resource_component_agents "
+            "WHERE agent_id = %s AND component_id IS NOT NULL",
+            (agent_id,),
+        )
+    }
+    for idx, s in normalized:
+        if s not in by_id:
+            continue
+        if by_id[s] not in owned_components:
+            errors[idx] = (
+                f"catalog {s} component_id {by_id[s]} not owned by {agent_id}"
+            )
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    results: list[dict] = []
+    for idx, s in normalized:
+        if s not in by_id:
+            results.append({"deleted": False, "id": s, "reason": "not_found"})
+            continue
+        cnt = execute_one(
+            "SELECT COUNT(*) AS n FROM flows WHERE incoming_catalog_id = %s::uuid",
+            (s,),
+        )
+        cascaded = int(cnt["n"]) if cnt else 0
+        execute_mutate("DELETE FROM catalogs WHERE id = %s::uuid", (s,))
+        results.append({
+            "deleted": True, "id": s, "cascaded_flows": cascaded,
+        })
+    return {
+        "committed": True,
+        "applied": sum(1 for r in results if r["deleted"]),
+        "rows": results,
+    }

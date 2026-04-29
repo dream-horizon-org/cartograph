@@ -1579,3 +1579,240 @@ def delete_unresolved(
         (unresolved_id_s,),
     )
     return {"deleted": True, "id": unresolved_id_s}
+
+
+# ============ Phase 8.3: bulk corrective deletes ============
+
+
+def _bulk_delete_atomic(
+    agent_id: str,
+    ids: list,
+    table: str,
+    owner_column: str,
+    cascade_count_sql: str | None = None,
+) -> dict:
+    """Generic atomic-with-pre-validation bulk delete helper.
+
+    table: physical table name to DELETE FROM (validated against allowlist).
+    owner_column: which column on the table holds the component_id to
+                  RCA-check (component_id, or found_in_component_id for unresolved).
+    cascade_count_sql: optional COUNT(*) query templated with %s::uuid
+                       per row to populate cascaded_count in the per-row
+                       result. None = no cascade reporting.
+
+    Pre-validation: every id must (a) exist OR be reported missing, and
+    (b) if it exists, be owned by the caller. If ANY id is owned by
+    someone else, reject the WHOLE batch with per-row errors.
+
+    Missing ids are NOT errors — they're idempotent skips.
+
+    Returns:
+      {"committed": True, "applied": N, "rows": [{deleted, id, ...}]}
+      {"committed": False, "applied": 0, "errors": {<idx>: <reason>}}
+    """
+    _ALLOWED_TABLES = {"attributions", "edges", "flows", "unresolved", "catalogs"}
+    if table not in _ALLOWED_TABLES:
+        raise ValueError(f"unsupported table {table}")
+    _assert_sme(agent_id) if table != "catalogs" else _caller(agent_id)
+    if not isinstance(ids, list) or not ids:
+        raise ValueError("ids must be a non-empty list")
+    if len(ids) > 500:
+        raise ValueError(f"max 500 ids per bulk delete call (got {len(ids)})")
+
+    normalized: list[tuple[int, str]] = []
+    errors: dict[int, str] = {}
+    seen: set[str] = set()
+    for i, raw in enumerate(ids):
+        s = str(raw or "").strip()
+        if not s:
+            errors[i] = "id is required"
+            continue
+        if s in seen:
+            errors[i] = f"duplicate id within batch: {s}"
+            continue
+        seen.add(s)
+        normalized.append((i, s))
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    # Single round-trip lookup of all rows + their owner column.
+    id_strs = [n[1] for n in normalized]
+    rows = execute(
+        f"SELECT id, {owner_column} AS owner_comp FROM {table} "
+        f"WHERE id = ANY(%s::uuid[])",
+        (id_strs,),
+    )
+    by_id = {str(r["id"]): str(r["owner_comp"]) for r in rows}
+
+    # Owner-check every existing row. Missing rows are skipped (idempotent).
+    owned_components = {
+        str(r["component_id"]) for r in execute(
+            "SELECT component_id FROM resource_component_agents "
+            "WHERE agent_id = %s AND component_id IS NOT NULL",
+            (agent_id,),
+        )
+    }
+    for idx, s in normalized:
+        if s not in by_id:
+            continue  # idempotent missing — handled at apply time
+        if by_id[s] not in owned_components:
+            errors[idx] = (
+                f"row {s} belongs to component {by_id[s]} which "
+                f"agent {agent_id} does not own"
+            )
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    # All clear — atomic delete in a single transaction.
+    results: list[dict] = []
+    for idx, s in normalized:
+        if s not in by_id:
+            results.append({"deleted": False, "id": s, "reason": "not_found"})
+            continue
+        cascaded = None
+        if cascade_count_sql is not None:
+            cnt = execute_one(cascade_count_sql, (s,))
+            cascaded = int(cnt["n"]) if cnt else 0
+        execute_mutate(
+            f"DELETE FROM {table} WHERE id = %s::uuid",
+            (s,),
+        )
+        out = {"deleted": True, "id": s}
+        if cascaded is not None:
+            out["cascaded"] = cascaded
+        results.append(out)
+    return {
+        "committed": True,
+        "applied": sum(1 for r in results if r["deleted"]),
+        "rows": results,
+    }
+
+
+def delete_attributions_bulk(
+    agent_id: str, attribution_ids: list
+) -> dict:
+    """[Phase 8.3] Atomic-with-pre-validation bulk attribution delete.
+
+    Per-row owner check via RCA. If any id is owned by another agent,
+    reject the WHOLE batch. Missing ids are silently skipped (idempotent).
+    Edges' source_attr_id / target_attr_id pointing at deleted rows go
+    NULL (FK SET NULL).
+
+    Max 500 ids per call.
+
+    Returns:
+      {"committed": True, "applied": N, "rows": [{deleted, id}, ...]}
+      {"committed": False, "applied": 0, "errors": {<idx>: <reason>}}
+    """
+    return _bulk_delete_atomic(
+        agent_id, attribution_ids, "attributions",
+        owner_column="component_id",
+        cascade_count_sql=None,  # SET NULL on FK, no row-count to report
+    )
+
+
+def delete_flows_bulk(agent_id: str, flow_ids: list) -> dict:
+    """[Phase 8.3] Atomic-with-pre-validation bulk flow delete.
+
+    Per-row owner check via RCA. Missing ids skipped (idempotent).
+    No cascade — flows are leaf. Max 500.
+    """
+    return _bulk_delete_atomic(
+        agent_id, flow_ids, "flows",
+        owner_column="component_id",
+    )
+
+
+def delete_unresolved_bulk(agent_id: str, unresolved_ids: list) -> dict:
+    """[Phase 8.3] Atomic-with-pre-validation bulk unresolved delete.
+
+    Per-row owner check via RCA on found_in_component_id. Missing ids
+    skipped. No cascade. Max 500.
+    """
+    return _bulk_delete_atomic(
+        agent_id, unresolved_ids, "unresolved",
+        owner_column="found_in_component_id",
+    )
+
+
+def delete_edges_bulk(agent_id: str, edge_ids: list) -> dict:
+    """[Phase 8.3] Atomic-with-pre-validation bulk edge delete.
+
+    Per-row owner check on from_component_id (mirrors single delete_edge).
+    Catalog rows (from IS NULL) cause the batch to reject with
+    'catalog_not_supported' on those rows. Missing ids skipped.
+    Cascades flows (FK CASCADE on flows.outgoing_edge_id). Max 500.
+    """
+    _assert_sme(agent_id)
+    if not isinstance(edge_ids, list) or not edge_ids:
+        raise ValueError("edge_ids must be a non-empty list")
+    if len(edge_ids) > 500:
+        raise ValueError(f"max 500 ids per bulk call (got {len(edge_ids)})")
+
+    normalized: list[tuple[int, str]] = []
+    errors: dict[int, str] = {}
+    seen: set[str] = set()
+    for i, raw in enumerate(edge_ids):
+        s = str(raw or "").strip()
+        if not s:
+            errors[i] = "id is required"
+            continue
+        if s in seen:
+            errors[i] = f"duplicate id within batch: {s}"
+            continue
+        seen.add(s)
+        normalized.append((i, s))
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    id_strs = [n[1] for n in normalized]
+    rows = execute(
+        "SELECT id, from_component_id FROM edges "
+        "WHERE id = ANY(%s::uuid[])",
+        (id_strs,),
+    )
+    by_id = {str(r["id"]): r["from_component_id"] for r in rows}
+
+    owned_components = {
+        str(r["component_id"]) for r in execute(
+            "SELECT component_id FROM resource_component_agents "
+            "WHERE agent_id = %s AND component_id IS NOT NULL",
+            (agent_id,),
+        )
+    }
+    for idx, s in normalized:
+        if s not in by_id:
+            continue
+        from_id = by_id[s]
+        if from_id is None:
+            errors[idx] = (
+                f"edge {s} is a catalog row (from IS NULL) — not "
+                "deletable via this tool (catalog_not_supported)"
+            )
+            continue
+        if str(from_id) not in owned_components:
+            errors[idx] = (
+                f"edge {s} from_component_id {from_id} not owned by {agent_id}"
+            )
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    results: list[dict] = []
+    for idx, s in normalized:
+        if s not in by_id:
+            results.append({"deleted": False, "id": s, "reason": "not_found"})
+            continue
+        cnt = execute_one(
+            "SELECT COUNT(*) AS n FROM flows WHERE outgoing_edge_id = %s::uuid",
+            (s,),
+        )
+        cascaded = int(cnt["n"]) if cnt else 0
+        execute_mutate("DELETE FROM edges WHERE id = %s::uuid", (s,))
+        results.append({
+            "deleted": True, "id": s, "cascaded_flows": cascaded,
+        })
+    return {
+        "committed": True,
+        "applied": sum(1 for r in results if r["deleted"]),
+        "rows": results,
+    }
