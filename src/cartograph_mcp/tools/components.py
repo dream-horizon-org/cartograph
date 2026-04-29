@@ -2036,3 +2036,101 @@ def insert_unresolved_bulk(agent_id: str, items: list[dict]) -> dict:
         )
         rows.append(row)
     return {"committed": True, "applied": len(rows), "rows": rows}
+
+
+# ============ Phase 8.5: read bulks (multi-component triangulation) ============
+
+
+def _normalize_id_list(ids: list, label: str) -> list[str]:
+    if not isinstance(ids, list) or not ids:
+        raise ValueError(f"{label} must be a non-empty list")
+    if len(ids) > 500:
+        raise ValueError(f"max 500 {label} per bulk call (got {len(ids)})")
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in ids:
+        s = str(raw or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def get_components_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict:
+    """[Phase 8.5] Multi-component bulk read. Returns
+    `dict[component_id_str, component_row | None]`. Missing ids
+    surface as None entries (not omitted) so the caller can tell
+    "not found" from "skipped". Open to all active agents. Max 500.
+    """
+    _caller(agent_id)
+    ids = _normalize_id_list(component_ids, "component_ids")
+    rows = execute(
+        "SELECT * FROM components WHERE id = ANY(%s::uuid[])",
+        (ids,),
+    )
+    by_id = {str(r["id"]): r for r in rows}
+    return {cid: by_id.get(cid) for cid in ids}
+
+
+def get_attributions_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict:
+    """[Phase 8.5] Multi-component bulk attribution read. Returns
+    `dict[component_id_str, list[attribution_row]]`. Missing
+    components return empty list. Resolver triangulation use case:
+    one round-trip across N candidates. Open to all active agents.
+    Max 500.
+    """
+    _caller(agent_id)
+    ids = _normalize_id_list(component_ids, "component_ids")
+    rows = execute(
+        """SELECT * FROM attributions
+           WHERE component_id = ANY(%s::uuid[])
+           ORDER BY component_id, plane, resource_type, identifier""",
+        (ids,),
+    )
+    out: dict[str, list[dict]] = {cid: [] for cid in ids}
+    for r in rows:
+        out[str(r["component_id"])].append(r)
+    return out
+
+
+def get_component_edges_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict:
+    """[Phase 8.5] Multi-component bulk edge read. Returns
+    `dict[component_id_str, {incoming_bound, incoming_catalog,
+    outgoing_bound, outgoing_dangling}]`. Loops the single tool
+    internally; cleaner than reproducing all 4 categorisations
+    inline. Max 500.
+    """
+    _caller(agent_id)
+    ids = _normalize_id_list(component_ids, "component_ids")
+    out: dict[str, dict] = {}
+    for cid in ids:
+        out[cid] = get_component_edges(agent_id, cid)
+    return out
+
+
+def get_flows_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict:
+    """[Phase 8.5] Multi-component bulk flow read. Returns
+    `dict[component_id_str, list[flow_row]]`. Each row carries
+    incoming_catalog_id + outgoing_edge_id + metadata + confidence.
+    Open to all active agents. Max 500.
+    """
+    _caller(agent_id)
+    ids = _normalize_id_list(component_ids, "component_ids")
+    rows = execute(
+        """SELECT * FROM flows
+           WHERE component_id = ANY(%s::uuid[])
+           ORDER BY component_id, updated_at DESC""",
+        (ids,),
+    )
+    out: dict[str, list[dict]] = {cid: [] for cid in ids}
+    for r in rows:
+        out[str(r["component_id"])].append(r)
+    return out

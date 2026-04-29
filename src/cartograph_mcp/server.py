@@ -1025,6 +1025,65 @@ def ack_terminals_bulk(
 
 
 @mcp.tool()
+def get_components_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.5] Multi-component bulk read. Returns
+    `dict[component_id_str, component_row | None]` (None for missing
+    ids). Open to all active agents. Max 500.
+    """
+    return components_tool.get_components_bulk(agent_id, component_ids)
+
+
+@mcp.tool()
+def get_attributions_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.5] Multi-component bulk attribution read. Returns
+    `dict[component_id_str, list[attribution_row]]` — one round-trip
+    across N candidates for resolver triangulation. Open to all
+    active agents. Max 500.
+    """
+    return components_tool.get_attributions_bulk(agent_id, component_ids)
+
+
+@mcp.tool()
+def get_component_edges_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.5] Multi-component categorised edge read. Returns
+    `dict[component_id_str, {incoming_bound, incoming_catalog,
+    outgoing_bound, outgoing_dangling}]`. Open to all active agents.
+    Max 500.
+    """
+    return components_tool.get_component_edges_bulk(agent_id, component_ids)
+
+
+@mcp.tool()
+def get_catalogs_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.5] Multi-component bulk catalog read. Returns
+    `dict[component_id_str, list[catalog_row]]`. Resolver triangulation
+    use case: catalog overlap is a strong merge signal (Phase 7.4).
+    Max 500.
+    """
+    return catalogs_tool.get_catalogs_bulk(agent_id, component_ids)
+
+
+@mcp.tool()
+def get_flows_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict[str, Any]:
+    """[Phase 8.5] Multi-component bulk flow read. Returns
+    `dict[component_id_str, list[flow_row]]`. Each row carries
+    incoming_catalog_id + outgoing_edge_id. Open to all active
+    agents. Max 500.
+    """
+    return components_tool.get_flows_bulk(agent_id, component_ids)
+
+
+@mcp.tool()
 def upsert_flow(
     agent_id: str,
     component_id: str,

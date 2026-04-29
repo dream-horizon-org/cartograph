@@ -500,3 +500,37 @@ def delete_catalogs_bulk(agent_id: str, catalog_ids: list) -> dict:
         "applied": sum(1 for r in results if r["deleted"]),
         "rows": results,
     }
+
+
+def get_catalogs_bulk(
+    agent_id: str, component_ids: list[str]
+) -> dict:
+    """[Phase 8.5] Multi-component bulk catalog read. Returns
+    `dict[component_id_str, list[catalog_row]]`. Resolver triangulation
+    use case (catalog overlap signals during merge eval). Max 500.
+    """
+    require_active_agent(agent_id)
+    if not isinstance(component_ids, list) or not component_ids:
+        raise ValueError("component_ids must be a non-empty list")
+    if len(component_ids) > 500:
+        raise ValueError(
+            f"max 500 component_ids per bulk call (got {len(component_ids)})"
+        )
+    seen: set[str] = set()
+    ids: list[str] = []
+    for raw in component_ids:
+        s = str(raw or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            ids.append(s)
+
+    rows = execute(
+        """SELECT * FROM catalogs
+           WHERE component_id = ANY(%s::uuid[])
+           ORDER BY component_id, kind, identifier""",
+        (ids,),
+    )
+    out: dict[str, list[dict]] = {cid: [] for cid in ids}
+    for r in rows:
+        out[str(r["component_id"])].append(r)
+    return out
