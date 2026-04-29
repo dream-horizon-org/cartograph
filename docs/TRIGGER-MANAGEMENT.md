@@ -372,7 +372,7 @@ TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
 
-> **Implementation status.** 85 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 7.4.5).
+> **Implementation status.** 86 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 7.4.11). Phase 7.4.11 added `delete_edge` (owner-scoped, idempotent edge delete; cascades flows). See AGENT-PROMPTS.md §0 for the parallel-tool-calls + identifier-normalisation rules shipped alongside (commits `5b3144d`, `84b0941`).
 >
 > **Phase 7.4.4 + 7.4.5 wire-shape changes:**
 > - `vector_search` returns lean projection per row (id + identity columns + similarity) — no embedding vectors, no doc/slice/metadata blobs. Search-then-fetch pattern: callers follow up with `get_*(id)` for full detail.
@@ -786,6 +786,24 @@ resolve_reference(agent_id, unresolved_id, resolved_to_component_id)
 
 raise_blocker(agent_id, task_id, blocker_detail)
   Shortcut: sets task status to BO + sends communication to owner.
+
+delete_edge(agent_id, edge_id)  -- Phase 7.4.11
+  Owner-scoped, idempotent edge delete. Caller must own the row's
+  from_component_id. Catalog rows (from IS NULL — pre-Phase-7.4
+  remnants) refuse with reason='catalog_not_supported'. flows.outgoing_edge_id
+  has ON DELETE CASCADE → flows anchored on the deleted edge are
+  removed atomically. Idempotent: deleting non-existent edge_id
+  returns {deleted:False, reason:'not_found'}.
+
+  Use case: post-merge edge dedup. Common pattern: same logical
+  dependency observed via two planes (telemetry sees bare hostname,
+  github sees host/dbname), violating the holistic-edge invariant.
+  Workflow:
+    1. upsert_edge_outbound on the canonical (richer-identifier) edge
+       with the union of metadata from both planes.
+    2. delete_edge on the leaner-identifier duplicate.
+  Companion: SME prompt's IDENTIFIER NORMALISATION rule (Phase 7.4.11)
+  prevents the duplicates being created in the first place.
 ```
 
 **Notifications (live as of Phase 2.3):**

@@ -79,6 +79,31 @@ Every agent is a **persistent, stateful process** with its own tools and workspa
 
 **Shared runtime:** All agents share the same machine and OS environment. A tool installed by one agent (via bash) is available to all agents on their next bash call. This is why only iterators are permitted to install — prevents race conditions from parallel installs.
 
+### 2.1.0 Tool-call concurrency (parallel tool use)
+
+Anthropic's tool-use protocol allows multiple `tool_use` blocks per
+assistant response. Claude Code's agent loop (running inside each
+`claude -p` subprocess) dispatches them concurrently to the MCP
+server, collects the `tool_result`s, and bundles them into ONE
+subsequent user turn — so N parallel tool calls cost 2 LLM
+round-trips total (1 to dispatch, 1 to ingest the bundled results),
+not 2N.
+
+The base mission prompt (`base.py::MISSION_AND_VOCABULARY`) carries a
+`== BATCH + PARALLEL TOOL CALLS ==` block visible to all 4 agent
+types, defining when to parallelise (independent reads, hygiene
+sweeps, action-items triage, multi-component evidence gathering),
+when to stay sequential (output of one is input to the next, same-
+component races on metadata merge, mutation transitions, split
+nominations one-at-a-time), and when to use bulk variants
+(`upsert_resources_bulk`, `bulk_spawn_smes`, `decommission_*_bulk`,
+`reject_resources_bulk`).
+
+The protocol does NOT support partial wakes — the agent loop blocks
+until ALL parallel tools complete, then issues exactly one LLM call
+to ingest the bundled results. The LLM is never re-invoked per
+tool result mid-batch; it sees N results in one turn.
+
 ### 2.1.1 Per-type Model + Reasoning Effort
 
 `AgentTypeConfig` (`src/agent_management/agent_types/base.py`) carries
@@ -293,6 +318,7 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `upsert_edge_catalog(agent_id, edge_data)` | — | — | ✓ *own to_component* | — | Phase 3.9. Callee declares exposed endpoint / consumed topic. Writes `from_component_id=NULL`. Idempotent per `(to, type, identifier)`. |
 | `upsert_edge_outbound(agent_id, edge_data)` | — | — | ✓ *own from_component* | — | Phase 3.9. Caller's outgoing edge. `to_component_id` may be set (bound) or NULL (dangling). Metadata + max-confidence accumulation on repeat writes. |
 | `bind_edge(agent_id, edge_id, to_component_id)` | — | — | ✓ *owns from* | — | Phase 3.9. Resolves a dangling outgoing. Refuses collision with existing bound row. |
+| `delete_edge(agent_id, edge_id)` | — | — | ✓ *owns from_component_id* | — | **Phase 7.4.11.** Owner-scoped, idempotent edge delete. Closes the post-merge edge-dedup gap (e.g. one telemetry-discovered + one github-discovered with slightly different identifiers for the same dep). Cascades `flows.outgoing_edge_id` rows (ON DELETE CASCADE). Catalog rows (from IS NULL) refuse with `reason='catalog_not_supported'`. Idempotent: deleting non-existent edge_id returns `{deleted:False, reason:'not_found'}`. |
 | `upsert_flow(agent_id, component_id, incoming_catalog_id, outgoing_edge_id, metadata?, confidence?)` | — | — | ✓ *own component* | — | Phase 3.9 + 7.4.2. Links one of YOUR catalog rows (a surface YOU expose) to one of YOUR outgoing edges. Validates `catalog.component_id = component_id` (Phase 7.4.2: incoming is a catalog, not an edge) and `outgoing.from_component_id = component_id`. Set-based; idempotent on the triple. |
 | `insert_unresolved(agent_id, data)` | — | — | ✓ *own component* | — | |
 | `resolve_reference(agent_id, unresolved_id, target_component_id)` | ✓ | ✓ | ✓ | ✓ | Any active agent (cross-SME resolution). Refuses decommissioned target. |
@@ -1211,11 +1237,11 @@ READ-ONLY (one per plane, scoped per agent):
 WRITE TARGET (single, shared by all agents):
 
   cartograph-db  (FastMCP streamable-http on :8100/mcp)
-    LIVE groups (65 tools registered in src/cartograph_mcp/server.py;
+    LIVE groups (86 tools registered in src/cartograph_mcp/server.py;
     see TRIGGER-MANAGEMENT.md §3 for per-tool contracts):
       action_items    (2):  summary, detail
       chat            (4):  send, ack, unacked, history
-      broadcast       (3):  send, ack, unacked
+      broadcast       (4):  send, ack, unacked, update_persistence
       secrets         (4):  put, get, list, delete
       tasks           (5):  create, respond, raise_blocker, my, thread
       resources       (9):  upsert, upsert_bulk, get, list_for_plane,
@@ -1225,18 +1251,26 @@ WRITE TARGET (single, shared by all agents):
                             reset_agent, decommission_agent(_bulk),
                             decommission_component(_bulk),
                             sleep_self, bulk_sleep_agents, bulk_wake_agents
-      components      (16): upsert_component, upsert_attribution,
+      components      (17): upsert_component, upsert_attribution,
                             create_edge (3.9 legacy shim),
                             insert_unresolved, resolve_reference,
-                            upsert_edge_catalog, upsert_edge_outbound,
-                            bind_edge, upsert_flow (Phase 3.9),
+                            upsert_edge_catalog (7.4 deprecated shim),
+                            upsert_edge_outbound, bind_edge,
+                            upsert_flow (Phase 3.9 + 7.4.2),
+                            **delete_edge (Phase 7.4.11)** — owner-scoped,
+                            idempotent, cascades flows,
                             get_component, get_attributions, get_edges,
                             get_unresolved, get_component_edges,
                             get_flow, get_flow_inverse
       notifications   (1):  get_agent_notifications
       consolidation   (5):  nominate, respond, review, get_my, get_thread
       clarification   (4):  create, respond, get_my, get_thread
-      search          (1):  vector_search
+      search          (1):  vector_search (lean projection per Phase 7.4.4)
+      catalogs        (5):  upsert_catalog, get_my_catalogs,
+                            get_my_catalog_callers, get_unmatched_callers,
+                            get_orphan_catalogs (Phase 7.4)
+      terminal_acks   (1):  ack_terminal (Phase 7.1)
+      insights        (1):  record_insight (Phase 5.9)
 
     Phase 4 — mutation + proxy (shipped):
       execute_mutation, complete_consolidation, absorb_agent,

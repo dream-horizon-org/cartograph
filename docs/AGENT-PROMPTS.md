@@ -48,6 +48,23 @@ Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULAR
 - **`get_action_items_summary` is uniform `dict[str, int]`.** Every value is a count: consolidations_pending, tasks_pending, clarifications_pending, unacked_chats, unacked_broadcasts, terminal_pending_ack, proxied_count. Rich per-proxy breakdown (proxy_agent_id, deactivation_reason, depth, item lists) lives on `get_action_items_detail.proxied`. Triage flow: call summary FIRST, then call detail when `proxied_count > 0`.
 - **`upsert_catalog`, NOT `upsert_edge_catalog`.** The latter is a deprecated back-compat wrapper one redirect away from removal. Use the noun-form `upsert_catalog(component_id, kind, identifier)` for all new declarations. The hygiene tool `get_unmatched_callers(your_agent_id)` directly surfaces missing catalogs without manual cross-referencing.
 
+**Batch + parallel tool calls (2026-04-27, commits `5b3144d` + `c7f5fd5`):** new `== BATCH + PARALLEL TOOL CALLS — PREFER THESE OVER ONE-AT-A-TIME ==` block in `MISSION_AND_VOCABULARY` shared with all 4 agent types. Defines:
+- WHEN TO PARALLELISE: independent reads, hygiene sweeps (5 tools in one turn), action-items triage, independent acks.
+- WHEN TO STAY SEQUENTIAL: dependent inputs (upsert returns id → use in next call), same-component writes (race risk), mutation transitions (`absorb_agent` → `execute_mutation`), split nominations one-at-a-time.
+- USE BULK VARIANTS: `upsert_resources_bulk`, `bulk_spawn_smes`, `decommission_*_bulk`, `reject_resources_bulk`. For >50 same-shape calls, BULK MCP TACTIC (Python script over JSON-RPC HTTP from Bash).
+
+The "Call tools sequentially" RULE line was removed from orchestrator + sme prompts — that one rule was forcing 1 tool_use per turn (measured 0.08% parallel rate pre-fix). New positive rule explicitly enables parallel dispatch in independent-call cases. The agent loop inside the `claude -p` subprocess dispatches parallel tool_uses concurrently and bundles results into ONE next user turn — so N parallel tools cost 2 LLM round-trips total. Subprocess (claude -p) supports this natively; not configurable, just a model-decision-per-turn knob.
+
+**SME identifier normalisation rule + post-merge EDGE DEDUP (2026-04-27, commit `84b0941`):** new IDENTIFIER NORMALISATION block in SME STEP 3 (CRITICAL — edges are HOLISTIC). Concrete normalisation per identifier class:
+- DB hosts: drop `/dbname` suffix from JDBC URLs / connection strings; DB name → `metadata.db_name`.
+- HTTP endpoints: lowercase host, drop trailing slashes, drop query strings, templatise path params (`/users/{{id}}`).
+- Kafka topics / SQS queues: bare name only; cluster info in metadata.
+- Tiebreak rule: write the LEANER form (what telemetry naturally surfaces); put richer details in metadata. Telemetry rarely has richer details; code-readers almost always do.
+
+Plus a new EDGE DEDUP — MANDATORY step in the post-merge / post-split refresh block of the code-repo CLONE-MANDATORY block. Concrete pseudocode walking inherited edges via `get_component_edges`, finding (target, edge_type) pairs with different identifiers (typical post-merge pattern: bare-hostname + host/dbname), picking canonical, merging metadata via `upsert_edge_outbound`, then **`delete_edge` on the duplicate**.
+
+**`delete_edge` MCP tool (Phase 7.4.11, commit `72b4a93`):** owner-scoped, idempotent, cascades flows. Tool count 85 → 86. Closes the gap exposed by sme-7f4a958a's insight `db290ec3` — pre-7.4.11 the only post-discovery recovery for duplicate edges was metadata-marking the duplicate as superseded.
+
 **Mass prompt infusion (2026-04-27, §2.8 of `docs/PROMPT-ENHANCEMENTS.md`).** The following structural rules are now baked into the relevant `.py` system prompts so they apply to all current AND future-spawned agents (system prompt is rebuilt from disk per spawn — no agent_manager restart needed):
 
 - **Plane = DISCOVERY plane, not categorical plane.** SME prompt STEP 2 now says: "the `plane` field on each attribution is where YOU found the evidence, NOT the categorical plane the identifier feels like." A github SME finding a hostname inside a helm chart tags that attribution `plane='github'`. Other SMEs on other planes accumulate their own rows for the same identifier — `(plane, resource_type, identifier)` UNIQUE allows it.

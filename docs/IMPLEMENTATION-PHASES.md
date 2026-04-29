@@ -1,10 +1,17 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-27):** Phases 0 → 7.4.8 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`).
+**Status (2026-04-29):** Phases 0 → 7.4.11 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). Token-optimisation plan (Round 1/2/3) documented at the bottom of this file; Round 1 in flight.
 
-Most recent (2026-04-26 → 2026-04-27): Phase 7.4 (catalogs first-class), 7.4.2 (flows reference catalogs), 7.4.3/4/5/6 (DEMO7-round-1 fixes + doc syncs), 7.4.7 (per-type model + admin UI plane source from RCA→resources + agent-row plane symbols + workspace-as-memory + code-repo clone-mandatory + §2.8 mass prompt infusion), 7.4.8 (WebGL GPU memory leak fix + `/api/clientlog` + server log piping).
+Most recent (2026-04-26 → 2026-04-29):
+- 7.4 (catalogs first-class), 7.4.2 (flows reference catalogs), 7.4.3/4/5/6 (DEMO7-round-1 fixes + doc syncs).
+- 7.4.7 (per-type model + admin UI plane source from RCA→resources + agent-row plane symbols + workspace-as-memory + code-repo clone-mandatory + §2.8 mass prompt infusion).
+- 7.4.8 (WebGL GPU memory leak fix v1 — geometry/material caches + `/api/clientlog` + server log piping).
+- 7.4.9 (Communications tab — surface decommissioned agents + plane symbols on rows + component-name filter).
+- 7.4.10 (Graph crash root-cause fix v2 — pause RAF when tab hidden + visibilitychange + wheel null-deref + idempotent ctx-lost).
+- **7.4.11** (`delete_edge` MCP tool + SME identifier normalisation rule + post-merge EDGE DEDUP step) — commits `72b4a93`, `84b0941`, `bc69c23`.
+- **Parallel tool calls** (commits `5b3144d`, `c7f5fd5`) — removed "Call tools sequentially" prompt rule, shipped `== BATCH + PARALLEL TOOL CALLS ==` block in shared mission. Targets the 0.08% pre-fix parallel-tool-call rate.
 
-- **85 MCP tools** registered (verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log`).
+- **86 MCP tools** registered (verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log`).
 - Services running under the active Claude Code session: Postgres (docker), trigger_management.main (logs → `/tmp/cartograph-logs/triggers.log`), cartograph_mcp.server :8100 (`mcp.log`), admin_ui.server :8200 (`admin_ui.log`), agent_management `main` (`agents.log`), browser-side errors (`browser.log` via `/api/clientlog`). 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 - See `docs/PROMPT-ENHANCEMENTS.md` for the active prompt-quality backlog (§2 shipped, §3 open gaps, §4 operational nudges + broadcast log + chat log).
 
@@ -3202,6 +3209,226 @@ All four cartograph processes (cartograph_mcp, trigger_management, agent_managem
 - `src/admin_ui/static/index.html` — cache-bust v=59 → v=60.
 
 **Effort:** S (~1 hour). Verified with smoke-test POST landing in `browser.log`.
+
+---
+
+## Phase 7.4.9: Communications tab — decommissioned-agent surfacing + plane symbols + component-name filter ✅
+
+**Shipped 2026-04-27.** Single commit `4237393` (bundled). Closes the
+"Communications tab implicitly only showed active agents" gap (it
+didn't, but the FE participant datalists only suggested active agents,
+and `_componentLabelForAgent` lost the 📦 pill on decommissioned).
+
+- Backend `/api/communications` gains optional `participant_component`
+  query param: filters rows where either side's agent owns a component
+  whose `canonical_name` OR `display_name` matches `ILIKE %query%`.
+  Includes decommissioned agents/components for historical traffic.
+- Frontend: dual fetch in `fetchAgents` — user-facing list (respects
+  `showDecommissioned` toggle) plus `_allAgentsById` Map containing
+  ALL agents always. Comms row lookups (`_componentLabelForAgent`,
+  `_planeSymbolsForAgent`) read from the all-agents cache so
+  decommissioned agents on historical Communications rows still get
+  their 📦 + plane symbols (with `.component-tag-decom` strikethrough
+  styling for visual distinction).
+- Plane-symbol pills (G/C/T/D/F) now also render on Communications
+  rows next to from + to. Same palette as chat sidebar.
+- Participant datalists include decommissioned agents.
+- New "Component name" filter input in the Participant section of the
+  filter bar.
+
+**Files:** `admin_ui/server.py`, `admin_ui/static/{app.js,index.html,style.css}`. Cache-bust v=60→v=61.
+
+---
+
+## Phase 7.4.10: Graph crash root-cause fix v2 — RAF pause + null-deref + idempotent ctx-lost ✅
+
+**Shipped 2026-04-27.** Single commit `4237393`. The 7.4.8 GPU-leak fix
+helped but didn't eliminate Chrome GPU crashes — `browser.log` captured
+9 `webglcontextlost` events on URLs OTHER than `/graph`
+(`/chat/sme-22a64543`, `/entities`, `/catalog`). Real root cause:
+3d-force-graph kept its `requestAnimationFrame` render loop alive even
+when the Graph view was hidden via `display:none`. Every frame
+allocated link materials / arrow heads / particle systems for 597
+edges + 37 nodes — even while the user was on a different tab.
+After ~30 minutes of background rendering, GPU process OOMs → Exit
+code 5.
+
+- `switchTab()` now calls `graphInstance.pauseAnimation()` on tab
+  leave and `resumeAnimation()` on entry. Eliminates the offscreen
+  GPU burn entirely.
+- `visibilitychange` listener: pauses when whole browser tab is
+  backgrounded.
+- Wheel-handler null-deref fix (`!graphInstance.camera` would throw
+  TypeError when graphInstance had been nulled by a prior
+  context-lost teardown — `browser.log` captured 153 of these). Fixed
+  by short-circuiting on `!graphInstance` first.
+- Idempotent context-lost handler: `_ctxLostHandled` flag prevents
+  duplicate disposal when both inner `<canvas>` and outer container
+  fire `webglcontextlost` (the `geomCacheSize: 0` second-fires we saw
+  in the log). Reset on successful restore.
+
+**Files:** `admin_ui/static/app.js`. Cache-bust v=61→v=62.
+
+---
+
+## Phase 7.4.11: delete_edge MCP tool + SME identifier normalisation rule + post-merge EDGE DEDUP step ✅
+
+**Shipped 2026-04-27.** Three commits: `72b4a93` (delete_edge tool),
+`84b0941` (SME prompt update), `bc69c23` (PROMPT-ENHANCEMENTS §2.9
+log).
+
+### Symptom
+
+sme-7f4a958a (feeds-aggregator-v2-aurora) ended up with two edges for
+the same Aurora master after absorbing a github SME:
+
+| edge | discovered via | identifier |
+|---|---|---|
+| `0236cd0d` | telemetry plane | `feeds-aggregator-v2-aurora-master.dream11.local` |
+| `8f9c82ad` | github plane (transferred to me on absorb) | `feeds-aggregator-v2-aurora-master.dream11.local/FeedsAggregatorV2` |
+
+Violated the holistic-edge invariant ("one row per call/query, multi-
+source metadata accumulates — never multiple rows"). SME flagged it +
+filed insight `db290ec3`.
+
+### Root causes (two)
+
+1. **Prompt gap:** holistic-edge invariant requires identifier byte-
+   identical across SMEs from different planes. My prompt said
+   "metadata accumulates" but never told SMEs to NORMALISE the
+   identifier across planes BEFORE writing. Telemetry surfaces bare
+   hostname; github surfaces `host/dbname` (JDBC URL). Both correct
+   in isolation; the gap was the missing normalisation contract.
+2. **Tool gap:** no `delete_edge(agent_id, edge_id)` tool existed.
+   The full edge-write surface was create_edge (legacy shim),
+   upsert_edge_outbound, bind_edge, transfer_edges (mutation-scoped).
+   None remove rows. decommission_component cascades them on full
+   component teardown, but nothing for "this single duplicate is wrong."
+
+### Fix #1 — `delete_edge` MCP tool (commit `72b4a93`)
+
+- Owner-scoped: caller must own `from_component_id` (the row's
+  caller-side owner).
+- Catalog rows (from IS NULL — pre-Phase-7.4 remnants) refuse with
+  `reason='catalog_not_supported'`.
+- Idempotent: deleting non-existent edge_id returns
+  `{deleted: False, reason: 'not_found'}` rather than raising.
+- Cascade: `flows.outgoing_edge_id` has ON DELETE CASCADE — flows
+  anchored on the edge are removed atomically. Cascaded count
+  reported in the response for telemetry.
+- Tool count: 85 → 86.
+
+### Fix #2 — SME prompt: IDENTIFIER NORMALISATION rule (STEP 3) + post-merge EDGE DEDUP step (commit `84b0941`)
+
+New IDENTIFIER NORMALISATION block in STEP 3 (CRITICAL — edges are
+HOLISTIC). Concrete normalisation per identifier class:
+- DB hosts: drop `/dbname` suffix; DB name → `metadata.db_name`.
+- HTTP endpoints: lowercase host, drop trailing slashes + query
+  strings; templatise path params (`/users/{{id}}`).
+- Kafka topics / SQS queues: bare name only.
+- Heuristic: "would another SME observing this same dep from a
+  different plane write the SAME identifier string?" If no,
+  normalise more.
+- Tiebreak rule: write the LEANER form (what telemetry naturally
+  surfaces); put richer details in metadata.
+
+New EDGE DEDUP — MANDATORY step in the post-merge / post-split
+refresh block. Concrete pseudocode walking inherited edges, finding
+(target, edge_type) pairs with different identifiers, picking
+canonical, merging metadata via `upsert_edge_outbound`, then
+`delete_edge` on the duplicate.
+
+### Hot-fix in same commit
+
+Smoke-testing the prompt template caught a stray single-brace
+`'/v1/users/{id}'` in the URL example I added — Python's
+`str.format()` would have crashed with `KeyError: 'id'` on every SME
+spawn (same class as the earlier `{get,post}` bug). Doubled to
+`'/v1/users/{{id}}'`. Going forward: every prompt edit must run a
+`SYSTEM_PROMPT_TEMPLATE.format(plane='x', resource_id='y')` smoke
+test before commit.
+
+**Files:** `cartograph_mcp/{server.py,tools/components.py}`,
+`agent_management/agent_types/sme.py`,
+`docs/PROMPT-ENHANCEMENTS.md`.
+
+**Effort:** S (~1 hour).
+
+---
+
+## Phase 7.4.12: Parallel tool calls — undo "Call tools sequentially" rule ✅
+
+**Shipped 2026-04-27.** Two commits: `5b3144d` (the rule change),
+`c7f5fd5` (terminology fix from "SDK" to "subprocess").
+
+### Diagnostic
+
+Across 6 representative agents (2,596 assistant messages from JSONL),
+only 2 messages emitted >1 tool_use block — a parallel-tool-call rate
+of **0.08%**. Distribution: ~40% of messages had 0 tool_uses
+(reasoning / final response), ~60% had exactly 1, ~0% had 2+. Every
+independent tool call (e.g. get_attributions for two components, or
+five hygiene reads at the start of a wake) was being serialised into
+its own /v1/messages round-trip — re-paying the cached system prompt
+read each time.
+
+### Root cause
+
+My own prompt rules. orchestrator.py:212 had "Call tools sequentially,
+not in parallel" and sme.py:1242 had "Call tools sequentially". Claude
+obediently emitted at most one tool_use per turn.
+
+The Anthropic API supports parallel tool calling natively. Claude Code's
+agent loop has it enabled by default (`disable_parallel_tool_use=False`).
+There is no infrastructure blocker — Cartograph's MCP server handles
+concurrent tool calls fine; mutation paths that need ordering are
+already enforced server-side via state-machine validation, not via the
+prompt's "be sequential" rule.
+
+### Fix
+
+`base.py` — new shared `== BATCH + PARALLEL TOOL CALLS — PREFER THESE
+OVER ONE-AT-A-TIME ==` block in MISSION_AND_VOCABULARY (visible to all
+4 agent types). Lays out:
+- Why it matters: per-turn round-trip cost.
+- WHEN TO PARALLELISE: independent reads, hygiene sweeps, action-items
+  triage, independent acks. Concrete examples (5-tool-batch on a
+  merge investigation, 5-tool hygiene sweep at wake start).
+- WHEN TO STAY SEQUENTIAL: dependent inputs, same-component writes,
+  mutation transitions, split nominations.
+- USE BULK VARIANTS: upsert_resources_bulk, bulk_spawn_smes,
+  decommission_*_bulk, reject_resources_bulk.
+- Pointer to BULK MCP TACTIC for >50 same-shape calls.
+
+`orchestrator.py` + `sme.py` — replaced the "Call tools sequentially"
+RULES line with a positive rule pointing at the BATCH + PARALLEL block
+in shared mission, with the explicit caveats inlined.
+
+`c7f5fd5` follow-up: replaced "the SDK runs them concurrently" / "Claude
+Code SDK has it enabled" with "the agent loop running inside your
+`claude -p` subprocess dispatches them concurrently" / "the `claude -p`
+subprocess has it enabled by default" — the agent doesn't run in our
+Python SDK; it runs in the spawned Claude Code subprocess.
+
+### Mechanism (unchanged from API protocol)
+
+When the LLM emits `[tool_use_A, tool_use_B, tool_use_C]` in one
+assistant turn, the agent loop dispatches all 3 concurrently to the
+MCP server, collects all 3 results, bundles them as ONE next user turn
+(`content: [tool_result_A, tool_result_B, tool_result_C]`), and posts
+that to /v1/messages. So 6 parallel tool calls = 2 LLM round-trips
+(1 to dispatch, 1 to ingest). Compared to 6 serial tool calls = 7
+round-trips. The LLM is NEVER re-invoked per result mid-batch — it
+sees the bundled results in one turn.
+
+### Estimated savings
+
+~30-50% LLM round-trip reduction on tool-heavy phases (Materialisation,
+hygiene, merge investigation). Translates to ~$200-400 saved over
+project lifetime spend ($1,234), with steeper savings going forward
+as prompt edits stabilise and cache hits stay above 90%.
+
+**Files:** `agent_management/agent_types/{base,orchestrator,sme}.py`.
 
 ---
 

@@ -1,4 +1,4 @@
-# Cartograph — Post-Compaction Recollection (2026-04-27, updated for 7.4.7 + 7.4.8)
+# Cartograph — Post-Compaction Recollection (2026-04-29, updated through 7.4.11 + parallel-tool-calls + token-optimisation plan)
 
 > **Read this FIRST after compaction.** Then `git log --oneline -50`,
 > then the 6 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
@@ -112,6 +112,11 @@ tail -f                /tmp/cartograph-logs/admin_ui.log
 | **7.4.6** | **✅ SHIPPED 2026-04-26** | Doc + memory sync for 7.4.4 + 7.4.5 |
 | **7.4.7** | **✅ SHIPPED 2026-04-27** | Per-type model + reasoning effort (`AgentTypeConfig.model` + `.effort`); admin UI graph node planes sourced from RCA→resources (was attributions.plane — wrong because attribution.plane is DISCOVERY plane); `/api/agents` returns `resource_planes[]`; agent-row plane symbols (G/C/T/D/F); §2.8 mass prompt infusion across all 5 .py prompts (ATTRIBUTION-vs-EDGE, attribution uniqueness, plane=DISCOVERY, grep catalogs, DANGLING-EDGE-pair rule, STEP 4 pseudocode, MATERIALISATION COMPLETION CHECKLIST, code-repo CLONE-MANDATORY, workspace-as-memory, EXTERNAL MCP ONBOARDING, BULK MCP TACTIC, SLEEP rewrite, ACCESS PRECHECK, SEND_BROADCAST ACL, CREDENTIALS via put_secret, CHAT-ADDRESSED-TO-YOU, ONGOING consolidation, WAKE BUDGET) |
 | **7.4.8** | **✅ SHIPPED 2026-04-27** | WebGL GPU memory leak fix (geometry/material caches in `app.js`, `webglcontextlost`/`restored` handlers); new `POST /api/clientlog` endpoint appending to `/tmp/cartograph-logs/browser.log` (captures `window.error`, `unhandledrejection`, `webglcontextlost`, `beforeunload`); all four cartograph daemons now run under the active Claude Code session with stdout piped to `/tmp/cartograph-logs/{mcp,triggers,agents,admin_ui}.log` via `python -u -m <module>`; cache-bust v=58→v=60 |
+| **7.4.9** | **✅ SHIPPED 2026-04-27** | Communications tab — surface decommissioned agents (parallel `_allAgentsById` cache), plane-symbol pills (G/C/T/D/F) on rows, new "Component name" filter (`participant_component=` query param). |
+| **7.4.10** | **✅ SHIPPED 2026-04-27** | Graph crash root-cause fix v2: `pauseAnimation()`/`resumeAnimation()` on tab switch (offscreen RAF was the actual leak), `visibilitychange` listener for backgrounded browser tabs, wheel-handler null-deref fix (`!graphInstance` short-circuit), idempotent `webglcontextlost` handler. Cache-bust v=60→v=62. |
+| **7.4.11** | **✅ SHIPPED 2026-04-27** (commits `72b4a93`, `84b0941`, `bc69c23`) | New `delete_edge(agent_id, edge_id)` MCP tool — owner-scoped, idempotent, cascades flows. Tool count 85 → 86. SME prompt gains IDENTIFIER NORMALISATION rule (STEP 3) + post-merge EDGE DEDUP step (in code-repo block). PROMPT-ENHANCEMENTS §2.9 logs the diagnostic context. |
+| **parallel** | **✅ SHIPPED 2026-04-27** (commits `5b3144d`, `c7f5fd5`) | Removed "Call tools sequentially" rule from orchestrator + sme prompts; new `== BATCH + PARALLEL TOOL CALLS ==` block in `base.py` MISSION_AND_VOCABULARY shared with all 4 agent types. Concrete WHEN-TO-PARALLELISE / WHEN-TO-STAY-SEQUENTIAL / USE-BULK-VARIANTS guidance. Targets the 0.08% parallel-tool-call rate measured pre-fix. |
+| **token-opt plan** | **DOCUMENTED, ROUND 1+ in flight** | Token optimisation plan in IMPLEMENTATION-PHASES.md §Token Optimisation: Round 1 (concise output rule + orch→sonnet — resolver STAYS opus-4-6), Round 2 (bulk MCP tools + BULK MCP TACTIC concrete examples + pre-injected action items), Round 3 (wake debouncing 5min). Target: ~43% reduction in lifetime spend. |
 
 ---
 
@@ -223,7 +228,7 @@ Plus auto-wrapped: every @mcp.tool() registration is wrapped by
 cartograph_mcp.audit.audited (Phase 5.10) — records to mcp_audit table.
 ```
 
-**Total: 85.** Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1` (Phase 7.4.8 path).
+**Total: 86** (added `delete_edge` in Phase 7.4.11). Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`.
 
 ---
 
@@ -291,7 +296,9 @@ From the user across many sessions:
 13. **Component planes come from RCA→resources, not attributions (Phase 7.4.7):** what plane a component LIVES on is the plane(s) of its source resource(s). `attributions.plane` is the DISCOVERY plane (where the SME found the evidence) and conflates source-of-evidence with category-of-component. Three admin-UI SQL callsites flipped (`/api/components`, `/api/component/{id}/drilldown`, `/api/graph`); plane filter EXISTS sub-query also flipped.
 14. **Per-type model + effort (Phase 7.4.7):** orchestrator + resolver = `claude-opus-4-6 + medium`; iterator + sme = `claude-sonnet-4-6` (default effort). `agent_manager.py` cmd list appends `--model` + `--effort` from `AgentTypeConfig`. System prompt rebuilt fresh per spawn — no agent_manager restart needed when prompts change.
 15. **Sleep is LAST RESORT, not default (Phase 7.4.7):** yielding doesn't burn cost. Sleep ONLY when blocked on admin/external + already prompted twice; 300–600s MAX, never 24h, never >3600s. Codified in SME / iterator / orchestrator prompts.
-16. **WebGL leak fix (Phase 7.4.8):** Chrome GPU process was crashing every 5–10 min because `makeNodeMesh` in `app.js` allocated fresh THREE.Geometry + Material per node per `graphData()` invocation without disposing. Fix: shared `_geomCache` + `_matCache` Maps keyed on (type, size, color); `webglcontextlost` handler that POSTs to `/api/clientlog` and re-inits on `webglcontextrestored`. All browser-side errors now captured in `/tmp/cartograph-logs/browser.log`.
+16. **WebGL leak fix (Phase 7.4.8 + 7.4.10):** real root cause was offscreen RAF — 3d-force-graph kept rendering even when Graph view hidden via display:none. Fixed via `pauseAnimation()`/`resumeAnimation()` on tab switch + `visibilitychange` listener. Per-cache disposal + idempotent context-lost handler complete the fix. All browser-side errors → `/tmp/cartograph-logs/browser.log` via the new `POST /api/clientlog` endpoint.
+17. **Identifier normalisation across planes (Phase 7.4.11):** the holistic-edge invariant requires byte-identical identifier across SMEs from different planes. SME prompt now mandates: drop `/dbname` suffix from JDBC URLs, lowercase HTTP hosts, drop trailing slashes / query strings, templatise path params (`/users/{{id}}`). Tiebreak rule: write the LEANER form (what telemetry surfaces), put richer details in metadata. Post-merge EDGE DEDUP step uses the new `delete_edge` tool to collapse duplicate same-target rows.
+18. **Parallel tool calls (commit `5b3144d`):** Anthropic's tool-use API supports multiple `tool_use` blocks per assistant turn → all dispatched concurrently → all results bundle into ONE next user turn → ONE LLM round-trip ingests them. Pre-fix only 0.08% of our messages emitted >1 tool_use because of the "Call tools sequentially" rule that's now removed. Theoretical 30-50% round-trip reduction on tool-heavy phases. Subprocess (claude -p) supports it natively; not configurable, just a model-decision-per-turn knob.
 
 ---
 
