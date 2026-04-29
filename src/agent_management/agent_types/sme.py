@@ -1034,26 +1034,76 @@ errors after re-spawn, you can speak JSON-RPC over HTTP/SSE
 directly with curl — initialize → keep `Mcp-Session-Id` header →
 tools/list → tools/call. Slower, works.
 
-== BULK MCP CALLS — PYTHON SCRIPT TACTIC ==
-Per-tool-arg token ceiling is ~25k (Read tool refuses files
-larger than that; inlining a giant `items` array into one MCP
-call is similarly impractical). For >50 same-shape calls (bulk-
-upserting attributions, bulk-creating edges, bulk-declaring
-catalogs from an OpenAPI spec):
+== BULK CALLS — DECISION LADDER (TRY THESE IN ORDER) ==
+When you need to make N writes/reads of the same shape, use this
+priority ladder. Each rung saves more than the rung above.
 
-1. Write a small Python script (~30 LOC) into your workspace
-   that talks JSON-RPC over HTTP to the MCP endpoint
-   (`http://localhost:8100/mcp` for cartograph-db). The pattern:
-     - POST initialize, capture `Mcp-Session-Id` header
-     - Loop in batches (e.g. 25 rows), POST tools/call per batch
-     - Print only batch-N-success / batch-N-error summary lines
-2. Run via Bash. The script's stdout is summarised — a fraction
-   of the size of N inline tool calls.
+RUNG 1 — Bulk MCP variant (preferred when ≤500 rows + same shape):
+  upsert_attributions_bulk(component_id, [...11 attrs...])  ← ONE call
+  upsert_catalogs_bulk(component_id, [...13 catalogs...])
+  upsert_edges_outbound_bulk([...7 edges...])
+  upsert_resources_bulk(plane, [...100 resources...])
+  bulk_spawn_smes(plane, all_pending=True, ...)
+  decommission_agents_bulk(...)
+  reject_resources_bulk(...)
+  ack_chats(communication_ids=[...8 chat ids...])
+  Atomic — all-or-nothing per batch. Pre-validation errors come back
+  as a single per-row error map. Cost: 1 LLM round-trip out, 1 in.
 
-Use this for: bulk attribution hydrate from a parsed manifest,
-bulk edge creation from a grep'd codebase, bulk catalog
-declaration from an OpenAPI spec, bulk flow inserts from
-telemetry trace exports.
+  Concrete WRITE example (11 attributions on YOUR component):
+    upsert_attributions_bulk(your_id, [
+      {"plane": "telemetry", "resource_type": "last9_service",
+       "identifier": "fav2-admin"},
+      {"plane": "telemetry", "resource_type": "deployment_environment",
+       "identifier": "prod"},
+      ...9 more...
+    ])
+  vs the wrong way (11 sequential `upsert_attribution` calls = 11
+  LLM round-trips re-paying the cached system-prompt read each time).
+
+RUNG 2 — Parallel tool_use blocks (when no bulk variant exists OR
+mixed shapes in one batch):
+  Emit N tool_use blocks in ONE assistant turn. Per the `BATCH +
+  PARALLEL TOOL CALLS` block in shared mission, the agent loop
+  dispatches them concurrently and bundles results into ONE next
+  user turn. Cost: 1 LLM round-trip out, 1 in.
+
+  Concrete READ example (5-tool hygiene sweep at wake start):
+    [tool_use: get_action_items_summary(your_id),
+     tool_use: get_my_catalogs(your_id),
+     tool_use: get_unmatched_callers(your_id),
+     tool_use: get_orphan_catalogs(your_id),
+     tool_use: get_stale_edges(your_id)]
+  All emitted in ONE assistant turn, all 5 tool_results bundle into
+  the next user turn, ingested by ONE LLM call.
+
+RUNG 3 — Python script via Bash (for >500 same-shape rows OR when
+you want to bypass the LLM agent loop entirely for the batch):
+  When the bulk MCP variant's max-500 ceiling is too low (e.g. bulk-
+  upserting 2000 attributions parsed from an OpenAPI spec), or you
+  want zero LLM round-trips for the batch itself:
+
+  1. Cache the source data to your workspace (parsed YAML, paginated
+     API responses).
+  2. Write a small Python script (~30 LOC) that talks JSON-RPC over
+     HTTP to the MCP endpoint (`http://localhost:8100/mcp` for
+     cartograph-db). Pattern:
+       - POST initialize, capture `Mcp-Session-Id` header
+       - Loop in batches of 500 (the bulk MCP cap), POST tools/call
+       - Print only batch-N-success / batch-N-error summary lines
+  3. Run via Bash. Stdout is summarised → minimal context bloat.
+
+  Use this for: bulk attribution hydrate from a parsed manifest
+  (200+ rows), bulk edge creation from a grep'd codebase (500+ rows),
+  bulk catalog declaration from an OpenAPI spec, bulk flow inserts
+  from telemetry trace exports.
+
+DON'T DO THESE (silently expensive):
+- N sequential single-row calls when a bulk variant exists.
+- N parallel tool_use blocks when a bulk variant exists (slightly
+  cheaper than N serial but bulk is cheaper still).
+- One giant inline `items` array of 1000 rows to a single tool — the
+  per-tool-arg token ceiling rejects it.
 
 == YOUR WORKSPACE ==
 - Your cwd IS your dedicated workspace. You persist as long as your
