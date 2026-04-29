@@ -1,6 +1,6 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-29):** Phases 0 → 7.4.14 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **Token optimisation Rounds 1, 2, 3 ALL SHIPPED 2026-04-29** — see Token Optimisation section near the bottom for per-round commit hashes + verification criteria.
+**Status (2026-04-29):** Phases 0 → 7.4.14 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **Token optimisation Rounds 1, 2, 3 ALL SHIPPED 2026-04-29** — see Token Optimisation section near the bottom for per-round commit hashes + verification criteria. **Phase 8 (Token Optimisation + Gap Closings) PLANNED — see "Phase 8" section.** Closes the 4-row-type corrective delete surface, finishes Round-4 bulks, eliminates the `notify.py` PostToolUse race, makes `insert_unresolved` idempotent. Tool count 89 → 107 (+18). 7 sub-batches across ~1 day.
 
 Most recent (2026-04-26 → 2026-04-29):
 - 7.4 (catalogs first-class), 7.4.2 (flows reference catalogs), 7.4.3/4/5/6 (DEMO7-round-1 fixes + doc syncs).
@@ -3836,21 +3836,309 @@ test SYSTEM_PROMPT_TEMPLATE.format() before every prompt commit
 
 ---
 
-## Phase 8+: Future phases (planned, not started)
+## Phase 8: Token Optimisation + Gap Closings (PLANNED — to ship 2026-04-29 → 2026-04-30)
 
-**Phase 8 — Phase-flow completion** (orchestrator-driven sweeps):
+**Scope.** A cohesive sub-phase that closes the SME corrective-action surface (4 deletes — attribution, catalog, flow, unresolved), finishes the Round-4 bulk surface (writes + reads + deletes), eliminates the `notify.py` PostToolUse hook race condition, and adds idempotency to `insert_unresolved`. **No schema changes beyond ONE idempotent migration** (UNIQUE on unresolved). Cascade behaviour for all deletes piggy-backs on existing FKs — no new cascade logic to design.
+
+**Tool count: 89 → 107 (+18 tools).**
+
+### 8.0 Motivation
+
+After token-optimisation Rounds 1/2/3 shipped (2026-04-29), four open items remain that together form the next cohesive batch:
+
+1. **`notify.py` PostToolUse race** — when an agent emits N parallel tool_use blocks, N hook subprocesses spawn concurrently and race past the 10-second rate-limit gate (all read the same stale marker). All N may emit duplicate `[NOTIFY]` strings into the next bundled user turn. ~50-100 token waste per parallel batch + agent-confusing duplicate noise. Fix: `fcntl.flock(LOCK_EX | LOCK_NB)` around the marker check — one lock-holder runs, siblings exit silent. ~10 LOC.
+
+2. **No corrective deletes for the 4 row types SMEs own.** `delete_edge` shipped in Phase 7.4.11 covering post-merge edge dedup. The other three types (attribution, catalog, flow) plus `unresolved` have no owner-scoped delete path. SMEs hitting wrong-shape attributions (the `outbound_db_host` ATTRIBUTION-vs-EDGE confusion from sme-daa3b7b3 insight), deprecated catalog declarations, or wrong catalog→outgoing flow joins have no recovery path other than overwrite-with-superseded-flag.
+
+3. **Round-4 bulk completion incomplete.** Round 2 shipped 3 bulk write tools (`upsert_attributions_bulk`, `upsert_catalogs_bulk`, `upsert_edges_outbound_bulk`). Five more were planned (`upsert_flows_bulk`, `insert_unresolved_bulk`, `ack_broadcasts_bulk`, `ack_terminals_bulk`, `delete_edges_bulk`) plus 5 read bulks for resolver triangulation (`get_attributions_bulk`, `get_components_bulk`, `get_component_edges_bulk`, `get_catalogs_bulk`, `get_flows_bulk`). Without these, the BULK CALLS DECISION LADDER's Rung 1 ("use a bulk variant if available") is incomplete for half the surface.
+
+4. **`insert_unresolved` is not idempotent.** No UNIQUE constraint on `(found_in_component_id, reference_type, reference_value)` — repeated grep sweeps across SME wakes pile duplicate rows. Quiet bloat path; SMEs noticed but worked around it via `get_unresolved` + de-dup-then-insert dance.
+
+### 8.1 Pre: notify.py flock fix (~10 LOC, 1 commit)
+
+`src/agent_management/hooks/notify.py` gains `fcntl.flock(fd, LOCK_EX | LOCK_NB)` around the read-and-write of `.cartograph-notify-last`:
+
+```python
+import fcntl
+
+def main() -> int:
+    # ... arg parsing ...
+    try:
+        fd = os.open(MARKER_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return 0
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return 0  # sibling won the race; stay silent
+        # ... existing rate-limit + MCP-call + notify body, all guarded ...
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+    return 0
+```
+
+**Effect:** N parallel hooks → 1 lock holder runs the MCP call + emits NOTIFY (if any), N-1 exit silent. No duplicate strings injected into the bundled user turn. POSIX-only (macOS + Linux fine; we don't target Windows).
+
+**Verification:** spawn an SME on a tool-heavy phase, check `/tmp/cartograph-logs/agents.log` for `[NOTIFY]` strings — should appear at most once per parallel batch.
+
+### 8.2 Sub-batch A: 4 delete singletons (~180 LOC, ~16 tests, 1 commit)
+
+Mirror the Phase 7.4.11 `delete_edge` contract:
+
+| Tool | Auth | Cascade (existing FK) | Idempotent return |
+|---|---|---|---|
+| `delete_attribution(agent_id, attribution_id, reason?)` | caller owns `component_id` of attribution | edges' `source_attr_id` / `target_attr_id` → SET NULL | `{deleted: False, reason: 'not_found'}` on missing id |
+| `delete_catalog(agent_id, catalog_id, reason?)` | caller owns `component_id` of catalog | flows.incoming_catalog_id → CASCADE delete | same |
+| `delete_flow(agent_id, flow_id, reason?)` | caller owns `component_id` of flow | leaf — no cascade | same |
+| `delete_unresolved(agent_id, unresolved_id, reason?)` | caller owns `found_in_component_id` of unresolved | leaf — no cascade | same |
+
+**Common shape:**
+- Owner check via RCA: `WHERE component_id IN (SELECT component_id FROM resource_component_agents WHERE agent_id = ?)`
+- Idempotent: missing id → `{deleted: False, id: <id>, reason: 'not_found'}` (no raise)
+- Optional `reason: str | None` param — surfaces in `mcp_audit.args_hash` for forensic queries
+- Returns `{deleted, id, cascaded_flows | severed_edge_pointers | none}` per tool
+
+**Files:** `src/cartograph_mcp/tools/components.py` (delete_attribution, delete_flow, delete_unresolved), `src/cartograph_mcp/tools/catalogs.py` (delete_catalog). All four wrappers added to `src/cartograph_mcp/server.py`.
+
+**Tests:** `tests/mcp_tools/test_deletes.py` — happy path × 4, owner refusal × 4, idempotent missing-id × 4, cascade verification × 4 (where applicable).
+
+**Tool count:** 89 → 93.
+
+### 8.3 Sub-batch B: 5 delete bulks (~300 LOC, ~20 tests, 1 commit)
+
+Atomic-with-pre-validation pattern (mirror Round 2 Phase 7.4.12 bulks):
+
+| Tool | Pattern |
+|---|---|
+| `delete_attributions_bulk(agent_id, attribution_ids[])` | per-row owner check; max 500; if any not owned, reject whole batch |
+| `delete_catalogs_bulk(agent_id, catalog_ids[])` | same |
+| `delete_flows_bulk(agent_id, flow_ids[])` | same |
+| `delete_edges_bulk(agent_id, edge_ids[])` | same — companion to existing `delete_edge` |
+| `delete_unresolved_bulk(agent_id, unresolved_ids[])` | same |
+
+**Pre-validation:** check existence + owner-scope for every id. If any row not found → idempotent (skip). If any row not owned by caller → reject whole batch with per-row errors.
+
+**Returns:**
+```
+{"committed": True, "applied": N, "rows": [{deleted, id, cascaded: N}]}
+{"committed": False, "applied": 0, "errors": {<row_index>: <reason>}}
+```
+
+Atomic via `BEGIN ... DELETE ... DELETE ... COMMIT;` — Postgres FK cascades fire row-by-row inside the transaction.
+
+**Files:** same as A. **Tests:** `tests/mcp_tools/test_delete_bulks.py` — atomic on success, atomic on partial-failure pre-validation, idempotent missing-ids mixed with valid ids.
+
+**Tool count:** 93 → 98.
+
+### 8.4 Sub-batch C: 4 write bulks + unresolved idempotency + UNIQUE migration (~400 LOC, ~20 tests, 1 commit)
+
+#### Schema migration (idempotent ALTER)
+
+```sql
+-- src/shared/migrations.py — adjacent to existing unresolved index block
+ALTER TABLE unresolved
+  ADD CONSTRAINT IF NOT EXISTS unresolved_unique_per_ref
+  UNIQUE (found_in_component_id, reference_type, reference_value);
+```
+
+Single UNIQUE constraint. Existing rows with duplicate keys would fail the migration — pre-flight check before the ALTER:
+```sql
+-- Defensive: if any duplicate exists, log + skip the constraint addition.
+-- DEMO8 will run on a fresh DB so this won't fire; only matters when
+-- restoring from snap-2026-04-29-pre-demo8.sql.
+```
+If duplicates exist in restored snapshot, the migration logs a warning and skips — operator can manually de-dup later via `DELETE FROM unresolved WHERE id NOT IN (SELECT MIN(id) FROM unresolved GROUP BY ...)` then re-run migrations.
+
+#### Behaviour change — existing `insert_unresolved` becomes ON CONFLICT idempotent
+
+```sql
+INSERT INTO unresolved (found_in_component_id, reference_type, reference_value, ...)
+VALUES (...)
+ON CONFLICT (found_in_component_id, reference_type, reference_value) DO UPDATE
+  SET context = EXCLUDED.context,
+      embedding = EXCLUDED.embedding,
+      attempts = unresolved.attempts + 1
+RETURNING *;
+```
+
+Caller signature unchanged. Repeated grep sweeps now update-in-place (bumping `attempts`) instead of duplicating.
+
+#### New write bulks
+
+| Tool | Use case |
+|---|---|
+| `upsert_flows_bulk(agent_id, component_id, flows[])` | STEP 4 catalog→outgoing join produces N flows; currently fans to N calls |
+| `insert_unresolved_bulk(agent_id, items[])` | Pairs with `upsert_edges_outbound_bulk` for the DANGLING-EDGE-pair rule (each dangling needs both an unresolved + a dangling edge). `items[i] = {found_in_component_id, reference_type, reference_value, context?}`. Idempotent on the triple per the new ON CONFLICT. |
+| `ack_broadcasts_bulk(agent_id, communication_ids[])` | Bulk ack queued broadcasts in one round-trip |
+| `ack_terminals_bulk(agent_id, items[{entity_type, entity_id}])` | Bulk ack queued terminal entities |
+
+Same atomic-with-pre-validation pattern as sub-batches A/B.
+
+**Files:** `src/shared/migrations.py` (UNIQUE), `src/cartograph_mcp/tools/components.py` (insert_unresolved ON CONFLICT, insert_unresolved_bulk, upsert_flows_bulk), `src/cartograph_mcp/tools/broadcast.py` (ack_broadcasts_bulk), `src/cartograph_mcp/tools/terminal_acks.py` (ack_terminals_bulk), `src/cartograph_mcp/server.py` (4 wrappers).
+
+**Tests:** `tests/mcp_tools/test_write_bulks.py` — atomic pre-validation, idempotency, max-500 limit, owner refusal. `tests/mcp_tools/test_unresolved_idempotency.py` — repeat-insert bumps attempts not duplicates.
+
+**Tool count:** 98 → 102.
+
+### 8.5 Sub-batch D: 5 read bulks (~250 LOC, ~20 tests, 1 commit)
+
+Multi-component reads for resolver triangulation + hygiene sweeps. All open to active agents (no SME gate — these are pure reads).
+
+| Tool | Returns |
+|---|---|
+| `get_attributions_bulk(agent_id, component_ids[])` | `dict[component_id_str, list[attribution_row]]` |
+| `get_components_bulk(agent_id, component_ids[])` | `dict[component_id_str, component_row]` |
+| `get_component_edges_bulk(agent_id, component_ids[])` | `dict[component_id_str, {incoming_bound, incoming_catalog, outgoing_bound, outgoing_dangling}]` |
+| `get_catalogs_bulk(agent_id, component_ids[])` | `dict[component_id_str, list[catalog_row]]` |
+| `get_flows_bulk(agent_id, component_ids[])` | `dict[component_id_str, list[flow_row]]` |
+
+Implementation: one `WHERE component_id = ANY(%s::uuid[])` query per tool, results bucketed by component_id in Python. Max 500 ids per call.
+
+**Files:** `src/cartograph_mcp/tools/components.py` (4 of them), `src/cartograph_mcp/tools/catalogs.py` (get_catalogs_bulk), `src/cartograph_mcp/server.py` (5 wrappers).
+
+**Tests:** `tests/mcp_tools/test_read_bulks.py` — happy path × 5, empty input handling, missing-id silently omitted, max-500 limit.
+
+**Tool count:** 102 → 107.
+
+### 8.6 Sub-batch E: SME + Resolver prompt updates (~70 LOC, smoke test only, 1 commit)
+
+#### SME prompt — new `== CORRECTIVE ACTIONS — DELETE WHEN YOU GET IT WRONG ==` block
+
+> When you discover you wrote something wrong-shape, fix it cleanly:
+>
+> - **Wrong attribution** (e.g. you wrote `outbound_db_host` as own attribution, but the DB hostname is actually an EDGE to a separate component): `delete_attribution(your_id, attr_id, reason='wrong shape — converting to edge')` then write the correct edge via `upsert_edge_outbound` + `insert_unresolved`.
+> - **Stale catalog** (deprecated endpoint, was wrong all along): `delete_catalog(your_id, cat_id, reason='deprecated since YYYY-MM')`. Dependent flows cascade automatically.
+> - **Wrong flow** (you wired `catalog_A → edge_X` but the right join is `catalog_A → edge_Y`): `delete_flow(your_id, flow_id)` then upsert the correct one.
+> - **Stale unresolved** (the ref turned out to be a typo / not actually a dependency): `delete_unresolved(your_id, unresolved_id, reason='typo' | 'not_a_dep')`.
+>
+> All four are owner-scoped (caller must own the component the row belongs to) and idempotent. Use the bulk variants (`delete_*_bulk`) for batch cleanup.
+
+#### SME prompt — BULK CALLS DECISION LADDER refresh
+
+Add the new bulks to RUNG 1:
+- Reads: `get_attributions_bulk`, `get_components_bulk`, `get_component_edges_bulk`, `get_catalogs_bulk`, `get_flows_bulk` (multi-component triangulation)
+- Writes: `upsert_flows_bulk`, `insert_unresolved_bulk`, `ack_broadcasts_bulk`, `ack_terminals_bulk`
+- Deletes: `delete_attributions_bulk`, `delete_catalogs_bulk`, `delete_flows_bulk`, `delete_edges_bulk`, `delete_unresolved_bulk`
+
+#### Resolver prompt — multi-component triangulation hint
+
+> When verifying merge evidence across N candidates, prefer `get_attributions_bulk(component_ids)` + `get_catalogs_bulk(component_ids)` + `get_component_edges_bulk(component_ids)` over per-candidate loops. One round-trip vs N.
+
+**Smoke test (mandatory before commit):**
+```
+python3 -c "
+import sys; sys.path.insert(0, 'src')
+from agent_management.agent_types import sme, resolver
+print('sme:', len(sme.SYSTEM_PROMPT_TEMPLATE.format(plane='github', resource_id='test')))
+print('resolver:', len(resolver.SYSTEM_PROMPT))
+"
+```
+
+**Files:** `src/agent_management/agent_types/sme.py`, `src/agent_management/agent_types/resolver.py`.
+
+### 8.7 Sub-batch F: Final doc sync + DEMO8 prompt (~200 LOC docs, no code, 1 commit)
+
+#### Doc sync (mechanical updates across 7 docs)
+
+- **HLD.md** §2.5 + §9 — tool matrix updated (89 → 107, all 18 new tools listed with auth + cascade notes).
+- **SCHEMA.md** — note the new UNIQUE constraint on unresolved + behaviour change to `insert_unresolved`.
+- **TRIGGER-MANAGEMENT.md** §3 — new tool contracts (the 4 deletes + bulks). Cascade tables.
+- **AGENT-PROMPTS.md** — note the corrective-action surface; reference §8.6 prompt updates.
+- **IMPLEMENTATION-PHASES.md** — mark Phase 8 shipped (this file gets the per-sub-batch commit hashes).
+- **POST-COMPACTION-RECOLLECTION.md** — refresh §6 tool surface (89 → 107), §11 (mark soft-delete plan replaced by hard-delete shipped), §16 re-hydration count.
+- **PROMPT-ENHANCEMENTS.md** — promote §3 entries that were closed by Phase 8 (delete-as-corrective-action) to §2 with commit hash.
+
+#### DEMO8 prompt (`docs/oorch-test-prompt-demo8`)
+
+Comprehensive superset of DEMO7. Covers everything DEMO7 did **plus** everything shipped since:
+- DEMO7 phases: catalogs first-class, flows reference catalogs, self-loops, pre-merge handoff, terminal acks, proxy inheritance, mutation lifecycle, evidence ladder, in-flight learning, one-merge-ripens, pre-M conflict check, mcp_audit, vector_search lean projection, get_my_catalogs no-dup, summary uniform-int.
+- New since DEMO7: `delete_edge` + identifier normalisation (Phase 7.4.11), 3 Round-2 bulk writes (Phase 7.4.12), BULK CALLS DECISION LADDER, parallel tool calls (BATCH block), concise output, pre-injected action items (Phase 7.4.13), wake debouncing 5-min (Phase 7.4.14), per-type model + reasoning effort (Phase 7.4.7), graph WebGL fixes (7.4.8 + 7.4.10).
+- New in Phase 8: 4 delete singletons + 5 delete bulks (corrective actions), 4 write bulks, 5 read bulks (resolver triangulation), `insert_unresolved` idempotency, notify.py flock fix.
+
+Tag conventions: `[DEMO8-PHASE-N]`, `[DEMO8-OK]`, `[DEMO8-FAIL]`, `[DEMO8-BUG]`, `[DEMO8-NOTE]`, `[DEMO8-RESULT]`.
+
+### 8.8 Sub-phase ordering + commit cadence
+
+```
+8.1  flock fix (notify.py)                  ← Pre, ship FIRST
+8.2  4 delete singletons                     ← cohesive corrective surface
+8.3  5 delete bulks                          ← bulks of singletons
+8.4  4 write bulks + unresolved idempotency  ← schema migration runs on MCP boot
+8.5  5 read bulks                            ← resolver triangulation
+8.6  prompt updates (SME + resolver)         ← teaches agents the new tools
+8.7  doc sync + DEMO8 prompt                 ← ship-ready
+```
+
+Each sub-batch = its own commit + push. Restart MCP server between 8.1 and 8.2 so the migration in 8.4 runs cleanly. Restart agent_manager after 8.6 (system_prompt rebuild from disk per spawn — strictly not needed but cleaner).
+
+### 8.9 Test budget
+
+| Sub-batch | New tests | Modified |
+|---|---|---|
+| 8.1 flock fix | 1 (concurrent-call dedup) | 0 |
+| 8.2 delete singletons | ~16 | 0 |
+| 8.3 delete bulks | ~20 | 0 |
+| 8.4 write bulks + unresolved | ~20 (incl. idempotency) | 1 (existing test_components covers insert_unresolved) |
+| 8.5 read bulks | ~20 | 0 |
+| 8.6 prompt updates | smoke only | 0 |
+
+Total: ~77 new + ~1 modified. Target final test count: ~590 (from ~510).
+
+### 8.10 Tool surface delta
+
+| Sub-batch | Tools added | Cumulative |
+|---|---|---|
+| 8.1 | 0 | 89 |
+| 8.2 | 4 (delete_attribution, delete_catalog, delete_flow, delete_unresolved) | 93 |
+| 8.3 | 5 (4 bulks of 8.2 + delete_edges_bulk) | 98 |
+| 8.4 | 4 (upsert_flows_bulk, insert_unresolved_bulk, ack_broadcasts_bulk, ack_terminals_bulk) | 102 |
+| 8.5 | 5 (5 read bulks) | 107 |
+| 8.6 | 0 | 107 |
+| 8.7 | 0 | 107 |
+
+Verify after 8.5: `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1` → 107 tools.
+
+### 8.11 Schema delta summary
+
+- `+UNIQUE (found_in_component_id, reference_type, reference_value)` on `unresolved`
+- `insert_unresolved` becomes ON CONFLICT idempotent (behaviour, not schema)
+
+No other schema changes.
+
+### 8.12 Why this is the right scope
+
+- **Closes the 4-row-type corrective gap** (delete_attribution / catalog / flow / unresolved) — the user's primary ask.
+- **Hard delete with existing FK cascades** — no new cascade logic; Postgres handles it. No read-site filter audit (every read already filters on `WHERE deleted_at IS NULL` was the soft-delete tax we avoided).
+- **Audit trail preserved via `mcp_audit`** — every delete already captured (agent_id, tool_name, args_hash, timestamp). No second audit channel needed.
+- **Finishes Round 4 bulks** so DEMO8 exercises the complete bulk surface (write + read + delete in 5 categories).
+- **Closes `insert_unresolved` quiet bloat** with a one-line schema migration + ON CONFLICT shim.
+- **Eliminates parallel-tool-call NOTIFY noise** with a 10-LOC flock fix.
+- **No schema invasive changes** — purely additive tool surface + one idempotent UNIQUE migration.
+- **Half-day to full-day of work, 7 commits, +18 tools, +77 tests.**
+
+---
+
+## Phase 9+: Future phases (planned, not started)
+
+**Phase 9 — Phase-flow completion** (orchestrator-driven sweeps):
 - **Resolution phase orchestration** — wake config-SMEs to resolve `unresolved` table rows; re-run cosine ladder against now-consolidated component registry.
 - **Edge Discovery phase orchestration** — dedicated bidirectional-validation pass + telemetry trace edge injection.
 - **User Feedback phase** — admin UI workflows for "merge these two" / "missed this" / "this doesn't exist anymore" → orchestrator routes to the right SME(s).
 
-**Phase 9 — Observability + cost controls** (HLD §11):
+**Phase 10 — Observability + cost controls** (HLD §11):
 - Dashboard on `agent_runs`: token usage, phase progress, unresolved count, blocker count, B1/B2/R/M/MD/D/F counts.
 - `max_turns` per agent per phase, embedding budget caps, consolidation max-rounds.
 
-**Phase 10 — DM between agents** (HLD §11.2):
+**Phase 11 — DM between agents** (HLD §11.2):
 - Lighter-weight than consolidation for one-off SME↔SME clarifications.
 
-**Phase 11 — Knowledge pool** (HLD §11.3):
+**Phase 12 — Knowledge pool** (HLD §11.3):
 - Shared facts table any agent can read/write ("all dream11 services use `{service}.dream11.local`").
 
 **Phase 6 — Globe (sphere-constrained graph view)** is parked on `feat/globe-experimental` branch. Re-introduce by merging that branch when ready; doc sync brief lives at `docs/GLOBE-MERGE-BRIEF.md` on that branch.
