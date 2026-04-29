@@ -593,8 +593,44 @@ def upsert_attribution(
     attribution_data keys:
       plane (github/deploy/cloud/telemetry/config), resource_type, identifier,
       evidence (text), confidence (default 1.0), metadata (dict).
+
+    For >3 attributions on the same component, prefer
+    `upsert_attributions_bulk` — atomic, fewer round-trips.
     """
     return components_tool.upsert_attribution(agent_id, component_id, attribution_data)
+
+
+@mcp.tool()
+def upsert_attributions_bulk(
+    agent_id: str,
+    component_id: str,
+    attributions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """[Phase 7.4.12] Atomic-with-pre-validation bulk upsert of N
+    attributions on this SME's component. Round 2 #3 of token
+    optimisation: replaces N sequential `upsert_attribution` calls
+    with one MCP call + one DB transaction. Caller must own component_id.
+
+    Each row in `attributions`: same keys as `upsert_attribution`'s
+    `attribution_data` (plane, resource_type, identifier, evidence?,
+    confidence?, metadata?). All rows target the same component_id
+    (caller's own).
+
+    Pre-validate every row BEFORE opening transaction. If any row
+    fails pre-check, return per-row errors and write NOTHING (atomic).
+    If all rows pass, commit all in one transaction.
+
+    Returns:
+      {"committed": True,  "applied": N, "rows": [...]}
+      {"committed": False, "applied": 0, "errors": {<row_idx>: <reason>}}
+
+    Cross-component conflicts (any row's (plane, type, identifier)
+    already belongs to a different component) → reject the whole
+    batch with per-row error pointing at the conflicting component_id.
+
+    Max 500 attributions per call.
+    """
+    return components_tool.upsert_attributions_bulk(agent_id, component_id, attributions)
 
 
 @mcp.tool()
@@ -667,6 +703,37 @@ def upsert_edge_outbound(
         no clarification needed.
     """
     return components_tool.upsert_edge_outbound(agent_id, edge_data)
+
+
+@mcp.tool()
+def upsert_edges_outbound_bulk(
+    agent_id: str, edges: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """[Phase 7.4.12] Atomic-with-pre-validation bulk upsert of N
+    outbound edges from this SME's components. Round 2 #3 of token
+    optimisation.
+
+    Each row mirrors `upsert_edge_outbound`'s edge_data shape:
+      {from_component_id, to_component_id?, edge_type, identifier,
+       metadata?, confidence?, source_attr_id?, target_attr_id?,
+       evidence?}.
+
+    Multiple `from_component_id`s allowed across rows — caller must
+    own EACH of them via RCA. Pre-validate every row; if any fails,
+    return per-row errors and write nothing. If all pass, commit all
+    in one transaction.
+
+    Bound + dangling rows can be mixed in the same batch — each row's
+    ON CONFLICT routing depends on whether `to_component_id` is set
+    (same as `upsert_edge_outbound`). Self-loops allowed (Phase 7.3).
+
+    Returns:
+      {"committed": True,  "applied": N, "rows": [...]}
+      {"committed": False, "applied": 0, "errors": {<row_idx>: <reason>}}
+
+    Max 500 edges per call.
+    """
+    return components_tool.upsert_edges_outbound_bulk(agent_id, edges)
 
 
 @mcp.tool()
@@ -1548,6 +1615,35 @@ def upsert_catalog(
     return catalogs_tool.upsert_catalog(
         agent_id, component_id, kind, identifier, metadata, confidence,
     )
+
+
+@mcp.tool()
+def upsert_catalogs_bulk(
+    agent_id: str,
+    component_id: str,
+    catalogs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """[Phase 7.4.12] Atomic-with-pre-validation bulk upsert of N
+    catalog rows on this SME's component. Round 2 #3 of token
+    optimisation.
+
+    Each row in `catalogs`:
+      {kind, identifier, metadata?, confidence?}.
+    All rows target the same component_id (caller's own).
+
+    Pre-validate every row BEFORE opening transaction. If any row
+    fails pre-check, return per-row errors and write NOTHING (atomic).
+    If all rows pass, commit all in one transaction.
+
+    Returns:
+      {"committed": True,  "applied": N, "rows": [...]}
+      {"committed": False, "applied": 0, "errors": {<row_idx>: <reason>}}
+
+    For STEP 2b catalog declarations spanning many endpoints/topics on
+    one component: prefer this over N sequential `upsert_catalog`
+    calls. Max 500 rows per call.
+    """
+    return catalogs_tool.upsert_catalogs_bulk(agent_id, component_id, catalogs)
 
 
 @mcp.tool()

@@ -276,6 +276,150 @@ def upsert_attribution(agent_id: str, component_id: str, attribution_data: dict)
     return row
 
 
+# ============ Phase 7.4.12: bulk attribution write ============
+
+
+def upsert_attributions_bulk(
+    agent_id: str,
+    component_id: str,
+    attributions: list[dict],
+) -> dict:
+    """Atomic-with-pre-validation bulk upsert of N attributions on
+    THIS SME's component. Round 2 #3 of token optimisation.
+
+    All rows target the same component_id (caller's component). Each row
+    has independent (plane, resource_type, identifier) — collisions on the
+    global UNIQUE key are upserted in place if they belong to this
+    component, refused (whole batch) if they belong to another.
+
+    Pre-validate every row BEFORE opening the transaction. If any row
+    fails pre-check, return per-row errors and write NOTHING (atomic).
+    If all rows pass, run a single transaction with N upserts.
+
+    Returns:
+      {
+        "committed": bool,
+        "applied": int,
+        "rows": [<full attribution row>, ...]   (only on commit)
+        "errors": {<row_index>: <reason>, ...}  (only on rejection)
+      }
+    """
+    _assert_sme(agent_id)
+    if not _sme_owns_component(agent_id, component_id):
+        raise ValueError(
+            f"SME {agent_id} does not own component {component_id}. "
+            "You can only attribute to your own component."
+        )
+    if not isinstance(attributions, list) or not attributions:
+        raise ValueError("attributions must be a non-empty list")
+    if len(attributions) > 500:
+        raise ValueError("max 500 attributions per bulk call")
+
+    # Pre-validate every row + collect cross-component conflicts.
+    errors: dict[int, str] = {}
+    normalized: list[dict] = []
+    for i, attr in enumerate(attributions):
+        if not isinstance(attr, dict):
+            errors[i] = "row must be a dict"
+            continue
+        plane = (attr.get("plane") or "").strip()
+        resource_type = (attr.get("resource_type") or "").strip()
+        identifier = (attr.get("identifier") or "").strip()
+        try:
+            confidence = float(attr.get("confidence", 1.0))
+        except (TypeError, ValueError):
+            errors[i] = "confidence must be a number"
+            continue
+        if plane not in _VALID_ATTRIBUTION_PLANES:
+            errors[i] = (
+                f"Invalid plane '{plane}'. Valid: "
+                f"{sorted(_VALID_ATTRIBUTION_PLANES)}"
+            )
+            continue
+        if not resource_type:
+            errors[i] = "resource_type is required"
+            continue
+        if not identifier:
+            errors[i] = "identifier is required"
+            continue
+        if not (0.0 <= confidence <= 1.0):
+            errors[i] = "confidence must be in [0.0, 1.0]"
+            continue
+        normalized.append({
+            "i": i,
+            "plane": plane,
+            "resource_type": resource_type,
+            "identifier": identifier,
+            "evidence": attr.get("evidence"),
+            "confidence": confidence,
+            "metadata": attr.get("metadata") or {},
+        })
+
+    # Cross-component conflict detection (any row already-claimed by
+    # another component → refuse the whole batch; consolidation is
+    # the right path).
+    if not errors:
+        keys = [(n["plane"], n["resource_type"], n["identifier"])
+                for n in normalized]
+        # ANY-style query so this is one DB round-trip not N.
+        existing = execute(
+            """SELECT plane, resource_type, identifier, component_id
+                 FROM attributions
+                WHERE (plane, resource_type, identifier) IN (
+                  SELECT * FROM UNNEST(%s::text[], %s::text[], %s::text[])
+                )""",
+            ([k[0] for k in keys],
+             [k[1] for k in keys],
+             [k[2] for k in keys]),
+        )
+        ex_by_key = {(r["plane"], r["resource_type"], r["identifier"]):
+                     str(r["component_id"]) for r in existing}
+        for n in normalized:
+            ex = ex_by_key.get((n["plane"], n["resource_type"], n["identifier"]))
+            if ex is not None and ex != str(component_id):
+                errors[n["i"]] = (
+                    f"Attribution ({n['plane']}, {n['resource_type']}, "
+                    f"{n['identifier']}) already belongs to component {ex}. "
+                    "Cross-component reassignment requires consolidation."
+                )
+
+    if errors:
+        return {
+            "committed": False,
+            "applied": 0,
+            "errors": errors,
+        }
+
+    # All clear → one transaction, N upserts.
+    rows = []
+    for n in normalized:
+        vec = emb.vector_literal(emb.embed_text(
+            emb.attribution_embed_text(n["resource_type"], n["identifier"])
+        ))
+        row = execute_returning(
+            """INSERT INTO attributions
+               (component_id, plane, resource_type, identifier, evidence,
+                confidence, metadata, embedding, discovered_by, last_seen_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector, %s, now())
+               ON CONFLICT (plane, resource_type, identifier) DO UPDATE
+                 SET evidence = EXCLUDED.evidence,
+                     confidence = EXCLUDED.confidence,
+                     metadata = EXCLUDED.metadata,
+                     embedding = EXCLUDED.embedding,
+                     last_seen_at = now()
+               RETURNING *""",
+            (component_id, n["plane"], n["resource_type"], n["identifier"],
+             n["evidence"], n["confidence"], json.dumps(n["metadata"]),
+             vec, agent_id),
+        )
+        rows.append(row)
+    return {
+        "committed": True,
+        "applied": len(rows),
+        "rows": rows,
+    }
+
+
 # ============ create_edge ============
 
 
@@ -576,6 +720,145 @@ def bind_edge(agent_id: str, edge_id: str, to_component_id: str) -> dict:
         (to_component_id, edge_id),
     )
     return row
+
+
+# ============ Phase 7.4.12: bulk outbound edges ============
+
+
+def upsert_edges_outbound_bulk(
+    agent_id: str,
+    edges: list[dict],
+) -> dict:
+    """Atomic-with-pre-validation bulk upsert of N outbound edges from
+    THIS SME's components. Round 2 #3 of token optimisation.
+
+    Each row mirrors `upsert_edge_outbound`'s edge_data shape:
+      {from_component_id, to_component_id?, edge_type, identifier,
+       metadata?, confidence?, source_attr_id?, target_attr_id?,
+       evidence?}.
+
+    Multiple from_component_ids allowed in one batch — caller must own
+    EACH of them via RCA. Pre-validate all rows; if any fails, return
+    per-row errors and write nothing. If all pass, single transaction.
+    Self-loops (from = to) allowed (Phase 7.3).
+
+    Returns:
+      {"committed": bool, "applied": int, "rows": [...] | "errors": {i: reason}}
+    """
+    _assert_sme(agent_id)
+    if not isinstance(edges, list) or not edges:
+        raise ValueError("edges must be a non-empty list")
+    if len(edges) > 500:
+        raise ValueError("max 500 edges per bulk call")
+
+    errors: dict[int, str] = {}
+    normalized: list[dict] = []
+    seen_from: set[str] = set()  # components we've already verified ownership of
+    for i, e in enumerate(edges):
+        if not isinstance(e, dict):
+            errors[i] = "row must be a dict"
+            continue
+        from_id = str(e.get("from_component_id") or "").strip()
+        to_raw = e.get("to_component_id")
+        to_id = str(to_raw).strip() if to_raw is not None else None
+        if to_id == "":
+            to_id = None
+        edge_type = str(e.get("edge_type") or "").strip()
+        identifier = str(e.get("identifier") or "").strip()
+        try:
+            confidence = float(e.get("confidence", 1.0))
+        except (TypeError, ValueError):
+            errors[i] = "confidence must be a number"
+            continue
+        if not from_id:
+            errors[i] = "from_component_id is required"
+            continue
+        if edge_type not in _VALID_EDGE_TYPES:
+            errors[i] = f"Invalid edge_type '{edge_type}'. Valid: {sorted(_VALID_EDGE_TYPES)}"
+            continue
+        if not identifier:
+            errors[i] = "identifier is required"
+            continue
+        if not (0.0 <= confidence <= 1.0):
+            errors[i] = "confidence must be in [0.0, 1.0]"
+            continue
+        # Verify ownership once per distinct from_id.
+        if from_id not in seen_from:
+            if not _sme_owns_component(agent_id, from_id):
+                errors[i] = (
+                    f"SME {agent_id} does not own from_component_id {from_id}"
+                )
+                continue
+            seen_from.add(from_id)
+        normalized.append({
+            "i": i,
+            "from_id": from_id,
+            "to_id": to_id,
+            "edge_type": edge_type,
+            "identifier": identifier,
+            "source_attr_id": e.get("source_attr_id"),
+            "target_attr_id": e.get("target_attr_id"),
+            "evidence": e.get("evidence") or [],
+            "confidence": confidence,
+            "metadata": e.get("metadata") or {},
+        })
+
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    rows = []
+    for n in normalized:
+        vec = emb.vector_literal(emb.embed_text(
+            emb.edge_embed_text(n["edge_type"], n["identifier"])
+        ))
+        if n["to_id"] is None:
+            row = execute_returning(
+                """INSERT INTO edges
+                   (from_component_id, to_component_id, edge_type, identifier,
+                    source_attr_id, target_attr_id, evidence, confidence,
+                    metadata, embedding, discovered_by, last_seen_at)
+                   VALUES (%s, NULL, %s, %s, %s, %s, %s::jsonb, %s,
+                           %s::jsonb, %s::vector, %s, now())
+                   ON CONFLICT (from_component_id, edge_type, identifier)
+                     WHERE to_component_id IS NULL
+                   DO UPDATE
+                     SET metadata = edges.metadata || EXCLUDED.metadata,
+                         confidence = GREATEST(edges.confidence, EXCLUDED.confidence),
+                         source_attr_id = COALESCE(EXCLUDED.source_attr_id, edges.source_attr_id),
+                         target_attr_id = COALESCE(EXCLUDED.target_attr_id, edges.target_attr_id),
+                         embedding = EXCLUDED.embedding,
+                         last_seen_at = now()
+                   RETURNING *""",
+                (n["from_id"], n["edge_type"], n["identifier"],
+                 n["source_attr_id"], n["target_attr_id"],
+                 json.dumps(n["evidence"]), n["confidence"],
+                 json.dumps(n["metadata"]), vec, agent_id),
+            )
+        else:
+            row = execute_returning(
+                """INSERT INTO edges
+                   (from_component_id, to_component_id, edge_type, identifier,
+                    source_attr_id, target_attr_id, evidence, confidence,
+                    metadata, embedding, discovered_by, last_seen_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s,
+                           %s::jsonb, %s::vector, %s, now())
+                   ON CONFLICT (from_component_id, to_component_id, edge_type, identifier)
+                     WHERE from_component_id IS NOT NULL AND to_component_id IS NOT NULL
+                   DO UPDATE
+                     SET metadata = edges.metadata || EXCLUDED.metadata,
+                         confidence = GREATEST(edges.confidence, EXCLUDED.confidence),
+                         source_attr_id = COALESCE(EXCLUDED.source_attr_id, edges.source_attr_id),
+                         target_attr_id = COALESCE(EXCLUDED.target_attr_id, edges.target_attr_id),
+                         embedding = EXCLUDED.embedding,
+                         last_seen_at = now()
+                   RETURNING *""",
+                (n["from_id"], n["to_id"], n["edge_type"], n["identifier"],
+                 n["source_attr_id"], n["target_attr_id"],
+                 json.dumps(n["evidence"]), n["confidence"],
+                 json.dumps(n["metadata"]), vec, agent_id),
+            )
+        rows.append(row)
+    return {"committed": True, "applied": len(rows), "rows": rows}
 
 
 # ============ Phase 7.4.11: edge deletion ============

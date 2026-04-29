@@ -102,6 +102,86 @@ def upsert_catalog(
     )
 
 
+def upsert_catalogs_bulk(
+    agent_id: str,
+    component_id: str,
+    catalogs: list[dict],
+) -> dict:
+    """Atomic-with-pre-validation bulk upsert of N catalogs on THIS
+    SME's component. Round 2 #3 of token optimisation.
+
+    Each row: {kind, identifier, metadata?, confidence?}. Pre-validate
+    all rows; if any fails, return per-row errors and write nothing.
+    If all pass, run a single transaction with N upserts.
+
+    Returns:
+      {"committed": bool, "applied": int, "rows": [...] | "errors": {i: reason}}
+    """
+    require_active_agent(agent_id)
+    if not _agent_owns_component(agent_id, component_id):
+        raise ValueError(
+            f"Agent {agent_id} does not own component {component_id}"
+        )
+    if not isinstance(catalogs, list) or not catalogs:
+        raise ValueError("catalogs must be a non-empty list")
+    if len(catalogs) > 500:
+        raise ValueError("max 500 catalogs per bulk call")
+
+    errors: dict[int, str] = {}
+    normalized: list[dict] = []
+    for i, c in enumerate(catalogs):
+        if not isinstance(c, dict):
+            errors[i] = "row must be a dict"
+            continue
+        kind = (c.get("kind") or "").strip()
+        identifier = (c.get("identifier") or "").strip()
+        try:
+            confidence = float(c.get("confidence", 1.0))
+        except (TypeError, ValueError):
+            errors[i] = "confidence must be a number"
+            continue
+        if kind not in _VALID_KINDS:
+            errors[i] = f"Invalid kind '{kind}'. Allowed: {sorted(_VALID_KINDS)}"
+            continue
+        if not identifier:
+            errors[i] = "identifier is required"
+            continue
+        if not (0.0 <= confidence <= 1.0):
+            errors[i] = "confidence must be in [0.0, 1.0]"
+            continue
+        normalized.append({
+            "i": i,
+            "kind": kind,
+            "identifier": identifier,
+            "metadata": c.get("metadata") or {},
+            "confidence": confidence,
+        })
+
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    rows = []
+    for n in normalized:
+        md_json = json.dumps(n["metadata"])
+        embed_text = f"{n['kind']}: {n['identifier']}"
+        embed = _emb.embed_text(embed_text)
+        embed_str = "[" + ",".join(map(str, embed)) + "]" if embed else None
+        row = execute_returning(
+            """INSERT INTO catalogs
+                  (component_id, kind, identifier, metadata, confidence, embedding, discovered_by)
+               VALUES (%s::uuid, %s, %s, %s::jsonb, %s, %s::vector, %s)
+               ON CONFLICT (component_id, kind, identifier) DO UPDATE
+                  SET metadata = catalogs.metadata || EXCLUDED.metadata,
+                      confidence = GREATEST(catalogs.confidence, EXCLUDED.confidence),
+                      updated_at = now()
+               RETURNING *""",
+            (component_id, n["kind"], n["identifier"], md_json,
+             n["confidence"], embed_str, agent_id),
+        )
+        rows.append(row)
+    return {"committed": True, "applied": len(rows), "rows": rows}
+
+
 def get_my_catalogs(agent_id: str) -> list[dict]:
     """Catalog rows for components owned by this agent. Includes a
     `caller_count` field so the caller can spot orphans at a glance.
