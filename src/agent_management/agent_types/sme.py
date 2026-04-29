@@ -1052,10 +1052,10 @@ RUNG 1 — Bulk MCP variant (preferred when ≤500 rows + same shape):
 
   Concrete WRITE example (11 attributions on YOUR component):
     upsert_attributions_bulk(your_id, [
-      {"plane": "telemetry", "resource_type": "last9_service",
-       "identifier": "fav2-admin"},
-      {"plane": "telemetry", "resource_type": "deployment_environment",
-       "identifier": "prod"},
+      {{"plane": "telemetry", "resource_type": "last9_service",
+        "identifier": "fav2-admin"}},
+      {{"plane": "telemetry", "resource_type": "deployment_environment",
+        "identifier": "prod"}},
       ...9 more...
     ])
   vs the wrong way (11 sequential `upsert_attribution` calls = 11
