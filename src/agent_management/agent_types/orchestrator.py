@@ -235,9 +235,15 @@ def build_config(**kwargs: str) -> AgentTypeConfig:
         system_prompt=SYSTEM_PROMPT,
         priority=100,
         can_install=False,
-        # Singleton, strategic coordination + user-facing chat + phase
-        # transitions. Opus reasoning over volume; medium effort to
-        # avoid extended-thinking cost on routine routing decisions.
-        model="claude-opus-4-6",
-        effort="medium",
+        # Token-opt Round 1 #2 (2026-04-29): downgraded from
+        # claude-opus-4-6 + medium effort to claude-sonnet-4-6.
+        # Orchestrator is high-volume, mostly routing + monitoring +
+        # blocker triage; per-call reasoning load is lower than
+        # resolver's merge/split decisioning. Sonnet handles routing
+        # fine; revert if quality drops on phase transitions or
+        # blocker-resolution decisions. Resolver STAYS on opus-4-6 +
+        # medium — its merge/split approve/reject is too high-stakes
+        # to downgrade. Pre-fix orch lifetime spend was ~$220 (17% of
+        # total); post-fix expected ~$65 → ~$155 saved.
+        model="claude-sonnet-4-6",
     )
