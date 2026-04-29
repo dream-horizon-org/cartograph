@@ -26,6 +26,7 @@ Claude Code hook output contract (important!):
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -120,42 +121,67 @@ def main() -> int:
                         help="Comma-separated list of priority source types")
     args = parser.parse_args()
 
-    last_check, prev_max_seen = _read_marker()
-    if time.time() - last_check < RATE_LIMIT_S:
-        return 0  # quiet; within rate-limit window
-
-    priority = [p.strip() for p in args.priority.split(",") if p.strip()]
-    result = check_notifications(args.agent_id, priority, prev_max_seen)
-    if result is None:
-        # silent degrade — hook shouldn't block the agent on an MCP blip
-        _write_marker(prev_max_seen)
+    # Phase 8.1: lock the marker file BEFORE the rate-limit check so N
+    # parallel hooks (one per parallel tool_use block in the same
+    # assistant turn) don't all race past the gate. fcntl.flock with
+    # LOCK_NB makes siblings fail-fast and exit silent — only one of
+    # them runs the MCP call + emits NOTIFY.
+    try:
+        fd = os.open(MARKER_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
         return 0
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return 0  # sibling hook holds the lock; stay silent
 
-    _write_marker(result.get("max_seen_at") or prev_max_seen)
+        last_check, prev_max_seen = _read_marker()
+        if time.time() - last_check < RATE_LIMIT_S:
+            return 0  # quiet; within rate-limit window
 
-    count = result.get("high_priority_count", 0)
-    if count == 0:
+        priority = [p.strip() for p in args.priority.split(",") if p.strip()]
+        result = check_notifications(args.agent_id, priority, prev_max_seen)
+        if result is None:
+            # silent degrade — hook shouldn't block the agent on an MCP blip
+            _write_marker(prev_max_seen)
+            return 0
+
+        _write_marker(result.get("max_seen_at") or prev_max_seen)
+
+        count = result.get("high_priority_count", 0)
+        if count == 0:
+            return 0
+
+        breakdown = result.get("breakdown", [])
+        pieces = [
+            f"{b['count']} {b['type']}{'s' if b['count'] > 1 else ''} from {b['from']}"
+            for b in breakdown
+        ]
+        message = (
+            f"[NOTIFY] {count} new high-priority item(s): " + ", ".join(pieces) +
+            ". Call get_action_items_detail for specifics, or keep going if not urgent."
+        )
+        # Emit JSON so Claude Code injects the text as additional context into
+        # the agent's conversation. Plain stdout would only show in the user's
+        # transcript view, not reach the model.
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": message,
+            }
+        }))
         return 0
-
-    breakdown = result.get("breakdown", [])
-    pieces = [
-        f"{b['count']} {b['type']}{'s' if b['count'] > 1 else ''} from {b['from']}"
-        for b in breakdown
-    ]
-    message = (
-        f"[NOTIFY] {count} new high-priority item(s): " + ", ".join(pieces) +
-        ". Call get_action_items_detail for specifics, or keep going if not urgent."
-    )
-    # Emit JSON so Claude Code injects the text as additional context into
-    # the agent's conversation. Plain stdout would only show in the user's
-    # transcript view, not reach the model.
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": message,
-        }
-    }))
-    return 0
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
