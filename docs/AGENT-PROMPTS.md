@@ -48,6 +48,27 @@ Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULAR
 - **`get_action_items_summary` is uniform `dict[str, int]`.** Every value is a count: consolidations_pending, tasks_pending, clarifications_pending, unacked_chats, unacked_broadcasts, terminal_pending_ack, proxied_count. Rich per-proxy breakdown (proxy_agent_id, deactivation_reason, depth, item lists) lives on `get_action_items_detail.proxied`. Triage flow: call summary FIRST, then call detail when `proxied_count > 0`.
 - **`upsert_catalog`, NOT `upsert_edge_catalog`.** The latter is a deprecated back-compat wrapper one redirect away from removal. Use the noun-form `upsert_catalog(component_id, kind, identifier)` for all new declarations. The hygiene tool `get_unmatched_callers(your_agent_id)` directly surfaces missing catalogs without manual cross-referencing.
 
+**Concise output rule (2026-04-29, commit `c9bb733`):** new `== CONCISE OUTPUT — DON'T NARRATE, DON'T REGURGITATE ==` block in `MISSION_AND_VOCABULARY` shared with all 4 agent types. Default ≤2 sentences of explanation per turn (unless admin asked or filling a structured artifact); no preambles ("I'll start by...", "Let me first..."), no post-hoc summaries restating tool results, no methodology explanations, no rephrasing of admin's input.
+
+**CRITICAL caveat:** the rule trims English/jargon only — DO NOT compromise on identifiers, file paths, hostnames, IDs, line numbers, hashes, version strings, error messages, or specific data. Concrete data is what the next agent / admin / future-self needs.
+
+Reserved long-text contexts (where brevity yields to information density, NOT narration filler): `component_doc_md` (3-8 lines structured), consolidation message bodies (one paragraph with concrete evidence — cite file_path:line, hostnames, deploy paths), `blocker_detail` (specific + actionable), `record_insight` body (non-obvious findings only).
+
+Targets the 44.5% of assistant messages measured pre-fix as text-only narration. Output tokens are billed at full rate (never cached) — this is direct $ savings. Estimated: 8-10% of total spend.
+
+**Bulk MCP write tools (2026-04-29, commit `716554d`):** three new tools shipped, atomic-with-pre-validation:
+- `upsert_attributions_bulk(agent_id, component_id, attributions[])` — 11× streak observed in real runs.
+- `upsert_catalogs_bulk(agent_id, component_id, catalogs[])` — 13× / 8× / 8× / 8× streaks observed.
+- `upsert_edges_outbound_bulk(agent_id, edges[])` — 7× streak observed.
+
+Each row pre-validated server-side before any DB write. If any row fails pre-check, write nothing and return per-row errors. If all pass, atomic transaction commits all. Cross-component conflicts in `upsert_attributions_bulk` reject the whole batch (consolidation is the right path). Mixed bound/dangling allowed in `upsert_edges_outbound_bulk`. Self-loops permitted (Phase 7.3). Max 500 rows per call. Tool count: 86 → 89.
+
+**BULK CALLS DECISION LADDER in SME prompt (2026-04-29, commit `135bc57` + brace-escape hot-fix `5e969a1`):** strengthened the existing BULK MCP TACTIC block in `sme.py` with a 3-rung concrete priority order — RUNG 1 use a bulk MCP variant if available (most efficient — atomic, fewer round-trips, less token cost); RUNG 2 emit parallel tool_use blocks in one assistant turn (when no bulk variant or mixed shapes); RUNG 3 Python script via Bash for >500 rows. Each rung has a concrete worked example.
+
+**Pre-injected action items (2026-04-29, commit `08c58d1`):** `agent_manager.invoke_agent` now pre-computes a snapshot of pending items via direct SQL and injects it into the invocation USER message (NOT system_prompt — system_prompt must remain byte-identical for cache hits). Replaces the agent's first-turn `get_action_items_summary` + `get_action_items_detail` round-trips with on-disk-already data. Agent calls those tools mid-wake only if it suspects drift. Snapshot includes proxied_count for inherited work from decommissioned agents.
+
+**Wake debouncing (2026-04-29, commit `8d1a7d3`):** `trigger_management/trigger_loop.py` introduces a 5-minute debounce window before flipping `trigger_lock=TRUE`. Drip-fed events coalesce into one wake instead of N (each previously re-paid the 16k-token system-prompt read). Override conditions bypass the debounce: pending admin chat, or agent is `mutation_assigned_to` on a state=M consolidation. Schema: `agent_runs.first_pending_at TIMESTAMPTZ` stamped on first sighting, cleared on yield. See TRIGGER-MANAGEMENT.md §2.4 for the full sequence.
+
 **Batch + parallel tool calls (2026-04-27, commits `5b3144d` + `c7f5fd5`):** new `== BATCH + PARALLEL TOOL CALLS — PREFER THESE OVER ONE-AT-A-TIME ==` block in `MISSION_AND_VOCABULARY` shared with all 4 agent types. Defines:
 - WHEN TO PARALLELISE: independent reads, hygiene sweeps (5 tools in one turn), action-items triage, independent acks.
 - WHEN TO STAY SEQUENTIAL: dependent inputs (upsert returns id → use in next call), same-component writes (race risk), mutation transitions (`absorb_agent` → `execute_mutation`), split nominations one-at-a-time.

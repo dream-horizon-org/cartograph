@@ -366,13 +366,59 @@ TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
       │  → lock again                    │                              │
 ```
 
+### 2.4 Wake debouncing (Phase 7.4.14 — token-opt Round 3 #6)
+
+To avoid the "drip-fed wakes" cost pattern (3 events arrive 30s apart →
+3 separate wakes each re-paying the 16k-token cached system-prompt
+read), the trigger scanner debounces wakes by a 5-minute window.
+
+```
+agent_runs gains:
+  first_pending_at TIMESTAMPTZ NULL
+
+trigger_loop.run_once() flow per agent:
+  if has_pending_items(agent):
+      if first_pending_at IS NULL:
+          stamp first_pending_at = now()  -- start of debounce window
+      if has_debounce_override(agent):
+          → wake immediately
+      elif first_pending_at + 5min <= now():
+          → wake (window elapsed)
+      else:
+          → skip (still in debounce window; will re-evaluate next cycle)
+  else:
+      if first_pending_at IS NOT NULL:
+          clear first_pending_at  -- no work, reset
+
+agent_manager on yield → idle:
+  clear first_pending_at  -- fresh window per cycle
+```
+
+**Override conditions (bypass the 5-min window):**
+
+1. **Pending admin chat** — admin chat is the wake-from-sleep auto-wake
+   signal; debouncing it would defeat the urgency contract.
+2. **Agent is `mutation_assigned_to` on a state=M consolidation** —
+   mid-mutation must not be delayed; resolver is waiting for the
+   M → MD transition.
+
+**Configurability:** the window is `WAKE_DEBOUNCE_SECONDS = 300` in
+`trigger_loop.py`. Adjust if 5 min proves too long for the work
+cadence (e.g. drop to 60s during interactive demo runs).
+
+**Trade-off documented for the user:**
+- Routine work (peer consolidation responses, broadcasts, non-admin
+  chats from orchestrator, terminal_pending_ack reminders) sees up
+  to 5-min latency between event arrival and agent wake.
+- Mid-merge dance + admin chat stay responsive via the override.
+
 ---
 
 ## 3. Agent Tools
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
 
-> **Implementation status.** 86 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 7.4.11). Phase 7.4.11 added `delete_edge` (owner-scoped, idempotent edge delete; cascades flows). See AGENT-PROMPTS.md §0 for the parallel-tool-calls + identifier-normalisation rules shipped alongside (commits `5b3144d`, `84b0941`).
+> **Implementation status.** 89 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 7.4.14). Phase 7.4.11 added `delete_edge`. Phase 7.4.12 added 3 bulk write variants (`upsert_attributions_bulk`, `upsert_catalogs_bulk`, `upsert_edges_outbound_bulk`) — atomic-with-pre-validation, max 500 rows per call. Phase 7.4.13 pre-injects action-items snapshot in invocation user message (saves 1-2 round-trips per wake). Phase 7.4.14 introduces wake debouncing (5-min window, see §2.4 below). See AGENT-PROMPTS.md §0 for parallel-tool-calls + concise output + identifier normalisation prompt rules.
 >
 > **Phase 7.4.4 + 7.4.5 wire-shape changes:**
 > - `vector_search` returns lean projection per row (id + identity columns + similarity) — no embedding vectors, no doc/slice/metadata blobs. Search-then-fetch pattern: callers follow up with `get_*(id)` for full detail.

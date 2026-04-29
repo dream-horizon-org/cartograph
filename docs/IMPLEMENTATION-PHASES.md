@@ -1,6 +1,6 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-29):** Phases 0 → 7.4.11 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). Token-optimisation plan (Round 1/2/3) documented at the bottom of this file; Round 1 in flight.
+**Status (2026-04-29):** Phases 0 → 7.4.14 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **Token optimisation Rounds 1, 2, 3 ALL SHIPPED 2026-04-29** — see Token Optimisation section near the bottom for per-round commit hashes + verification criteria.
 
 Most recent (2026-04-26 → 2026-04-29):
 - 7.4 (catalogs first-class), 7.4.2 (flows reference catalogs), 7.4.3/4/5/6 (DEMO7-round-1 fixes + doc syncs).
@@ -11,7 +11,7 @@ Most recent (2026-04-26 → 2026-04-29):
 - **7.4.11** (`delete_edge` MCP tool + SME identifier normalisation rule + post-merge EDGE DEDUP step) — commits `72b4a93`, `84b0941`, `bc69c23`.
 - **Parallel tool calls** (commits `5b3144d`, `c7f5fd5`) — removed "Call tools sequentially" prompt rule, shipped `== BATCH + PARALLEL TOOL CALLS ==` block in shared mission. Targets the 0.08% pre-fix parallel-tool-call rate.
 
-- **86 MCP tools** registered (verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log`).
+- **89 MCP tools** registered (Phase 7.4.11 added `delete_edge`; Phase 7.4.12 added 3 bulk write variants). Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log`.
 - Services running under the active Claude Code session: Postgres (docker), trigger_management.main (logs → `/tmp/cartograph-logs/triggers.log`), cartograph_mcp.server :8100 (`mcp.log`), admin_ui.server :8200 (`admin_ui.log`), agent_management `main` (`agents.log`), browser-side errors (`browser.log` via `/api/clientlog`). 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
 - See `docs/PROMPT-ENHANCEMENTS.md` for the active prompt-quality backlog (§2 shipped, §3 open gaps, §4 operational nudges + broadcast log + chat log).
 
@@ -3356,7 +3356,134 @@ test before commit.
 
 ---
 
-## Phase 7.4.12: Parallel tool calls — undo "Call tools sequentially" rule ✅
+## Phase 7.4.12: Bulk MCP write tools (Round 2 #3 of token optimisation) ✅
+
+**Shipped 2026-04-29.** Single commit `716554d`. Adds 3 atomic-with-pre-validation bulk write tools targeting the highest-frequency same-tool streaks observed in real agent runs:
+
+- `upsert_attributions_bulk(agent_id, component_id, attributions[])` — sme-22a64543 had 11× streak.
+- `upsert_catalogs_bulk(agent_id, component_id, catalogs[])` — sme-22a64543 had 13×, 8×, 8×, 8× streaks.
+- `upsert_edges_outbound_bulk(agent_id, edges[])` — sme-22a64543 had 7× streak.
+
+### Atomic-with-pre-validation pattern
+
+1. Pre-validate every row server-side BEFORE opening transaction (plane/kind/identifier required, confidence 0..1, agent owns from_component_id, etc.)
+2. If any row fails pre-check → return per-row errors map, write NOTHING:
+   ```
+   {"committed": False, "applied": 0, "errors": {<row_idx>: <reason>}}
+   ```
+3. If all rows pass → atomic transaction with N upserts:
+   ```
+   {"committed": True, "applied": N, "rows": [...]}
+   ```
+4. For idempotent UPSERT operations: per-row results report `{inserted: bool, updated: bool}` — no failures from key collisions (the U in upsert handles them as success-with-update).
+
+### Cross-component conflict handling (upsert_attributions_bulk)
+
+If any row's `(plane, resource_type, identifier)` already belongs to a DIFFERENT component → reject the WHOLE batch with per-row error pointing at the conflicting component_id. Consolidation is the right path for cross-component reassignment; bulk write isn't.
+
+### Mixed bound/dangling (upsert_edges_outbound_bulk)
+
+Each row's `to_component_id` independently determines ON CONFLICT routing (bound on `(from, to, type, identifier)` vs dangling on `(from, type, identifier) WHERE to IS NULL`). Self-loops permitted (Phase 7.3).
+
+### Single-row tools updated
+
+`upsert_attribution`, `upsert_catalog`, `upsert_edge_outbound` doc-strings now point at the bulk variant for ≥3 same-component writes.
+
+### Tool count
+
+86 → 89. Verify via `grep "tools registered" /tmp/cartograph-logs/mcp.log`.
+
+**Files:** `cartograph_mcp/{server.py, tools/components.py, tools/catalogs.py}`. Companion: SME prompt's BULK CALLS DECISION LADDER (Phase 7.4.12 prompt update — commit `135bc57` + hot-fix `5e969a1` for brace-escape) directs SMEs to use the bulk variant before falling back to parallel tool_use blocks or Python-script bypass.
+
+**Effort:** M (~3 hrs incl. tests + smoke).
+
+---
+
+## Phase 7.4.13: Pre-injected action items in invocation prompt (Round 2 #5) ✅
+
+**Shipped 2026-04-29.** Single commit `08c58d1`. Replaces the agent's first-turn `get_action_items_summary` + `get_action_items_detail` round-trips with a snapshot pre-computed by `agent_manager` at spawn time + embedded in the invocation USER message (NOT system_prompt — system_prompt must remain byte-identical for cache hits).
+
+### Mechanism
+
+- `agent_manager._build_action_items_snapshot(agent_id, agent_type)` runs ONE SQL query aggregating pending counts:
+  - consolidations_pending, tasks_pending, clarifications_pending
+  - unacked_chats, unacked_broadcasts
+  - terminal_pending_ack
+  - proxied_count
+- Mirrors `get_action_items_summary`'s logic but as direct DB query (saves the MCP round-trip too).
+- `_GENERIC_INVOCATION_PROMPT_TEMPLATE` gains an `== ACTION ITEMS SNAPSHOT (at <ts>) ==` block with formatted counts inline.
+- `invoke_agent()` calls the helper before spawning `claude -p`; if it fails, falls back gracefully with "snapshot unavailable" note.
+
+### Cache safety
+
+CRITICAL: snapshot text varies per wake → goes in USER message (the `-p` prompt arg). System prompt (`--system-prompt config.system_prompt`) remains byte-identical → still hits 1h-extended cache.
+
+### Workflow note
+
+Updated invocation template tells the agent: "Use `get_action_items_detail` only if you need full row contents the snapshot didn't include (e.g. message bodies, blocker_detail)." Agent CAN still fetch fresh detail mid-wake if it suspects drift — just doesn't do it unconditionally on every wake.
+
+### Companion to PostToolUse notification hook
+
+The existing `notify.py` PostToolUse hook stays — it serves a DIFFERENT purpose (mid-session live interrupts on new admin/orchestrator chats, not first-turn summary). The two are complementary: pre-injection covers the wake-time snapshot; the hook covers mid-wake new arrivals.
+
+### Estimated saving
+
+3-5% of total spend (1-2 round-trips per wake × 247 wakes lifetime).
+
+**Files:** `agent_management/agent_manager.py`. **Effort:** S (~30 LOC).
+
+---
+
+## Phase 7.4.14: Wake debouncing 5-min (Round 3 #6 of token optimisation) ✅
+
+**Shipped 2026-04-29.** Single commit `8d1a7d3`. Coalesces drip-fed action items into one wake instead of N small wakes (each previously re-paying the 16k-token cached system-prompt read).
+
+### Schema (idempotent migration)
+
+```sql
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS first_pending_at TIMESTAMPTZ;
+```
+
+In `shared/migrations.py` adjacent to the Phase 2.5 sleep_until column. No backfill needed; column starts NULL and gets stamped on first scanner observation.
+
+### Trigger loop changes (`trigger_management/trigger_loop.py`)
+
+- New `WAKE_DEBOUNCE_SECONDS = 300` constant.
+- `get_idle_agents()` returns `first_pending_at` so caller can compare.
+- New `stamp_first_pending(agent_id)` — idempotent, sets the column on first sighting.
+- New `clear_first_pending(agent_id)` — clears when no items pending.
+- New `has_debounce_override(agent_id)` — bypass conditions:
+  - Pending admin chat (always immediate; admin chat is the auto-wake-from-sleep signal).
+  - Agent is `mutation_assigned_to` on a state=M consolidation (mid-mutation must not be delayed).
+- `run_once()` flow per agent:
+  1. Skip agents with no pending items (clear stale stamp if any).
+  2. Stamp `first_pending_at` on first sighting.
+  3. If override fires → wake immediately.
+  4. If `first_pending_at + 5min > now()` → still in debounce window, skip this cycle. Wake on a later cycle.
+
+### Agent manager changes (`agent_management/{db.py, agent_manager.py}`)
+
+- New `db.clear_first_pending(agent_id)` — called from `invoke_agent` on yield. Trigger scanner re-stamps when it next sees pending items, starting a fresh 5-min window per cycle.
+
+### Trade-off
+
+- Routine work (peer consolidation responses, broadcasts, non-admin chats from orch) sees up to 5-min latency between event arrival and agent wake.
+- Mid-merge dance (state=M `mutation_assigned_to`) stays responsive via override.
+- Admin chat stays instant via override.
+
+### Estimated saving
+
+10-15% of total spend (eliminates the "drip-fed wakes" pattern where 3 items arrive 30s apart and trigger 3 separate wakes).
+
+### Tunability
+
+`WAKE_DEBOUNCE_SECONDS` in `trigger_loop.py` — drop to 60s during interactive demo runs if 5 min proves too long for the work cadence.
+
+**Files:** `shared/migrations.py`, `trigger_management/trigger_loop.py`, `agent_management/{db.py, agent_manager.py}`. **Effort:** M (~120 LOC + migration).
+
+---
+
+## Phase 7.4.12 [LEGACY NUMBERING]: Parallel tool calls — undo "Call tools sequentially" rule ✅
 
 **Shipped 2026-04-27.** Two commits: `5b3144d` (the rule change),
 `c7f5fd5` (terminology fix from "SDK" to "subprocess").
@@ -3477,17 +3604,17 @@ per active month at current scale).
   (34% of total spend). 67.7% on sonnet, 30.7% on opus-4-7 (Max
   default during early sessions), 1.5% on opus-4-6.
 
-### Final plan — what we're shipping, in order
+### Final plan — what shipped, in order (all 3 rounds done 2026-04-29)
 
-| # | Lever | Effort | Saving | Round | Status |
+| # | Lever | Effort | Saving | Round | Status / Commit |
 |---|---|---|---:|---|---|
-| 0 | Parallel tool calls (BATCH block) | done | 20-30% | — | ✅ shipped (`5b3144d`) |
-| 1 | Concise output rule | XS (5 min) | 8-10% | Round 1 | pending |
-| 2 | Orch → sonnet (resolver STAYS opus-4-6) | XS (5 min) | 10-14% | Round 1 | pending |
-| 3 | Bulk MCP tools (7 writes/acks + 3 reads + 2 delete/bind) | M (~3 hrs) | 6-9% | Round 2 | pending |
-| 4 | BULK MCP TACTIC concrete examples | XS (10 min) | 3-5% | Round 2 | pending |
-| 5 | Pre-inject action items in user message | S (~30 LOC) | 3-5% | Round 2 | pending |
-| 6 | Wake debouncing (5-min window) | M (~80 LOC) | 10-15% | Round 3 | pending |
+| 0 | Parallel tool calls (BATCH block) | done | 20-30% | — | ✅ shipped 2026-04-27 (`5b3144d`) |
+| 1 | Concise output rule | XS | 8-10% | Round 1 | ✅ shipped (`c9bb733`) |
+| 2 | Orch → sonnet (resolver STAYS opus-4-6) | XS | 10-14% | Round 1 | ✅ shipped (`53a6ef1`) |
+| 3 | Top-3 bulk MCP write tools | M | 6-9% | Round 2 | ✅ shipped (`716554d`) — top tier (attributions/catalogs/edges_outbound). Middle + lower tiers (read bulks, bind/delete bulks) still queued. |
+| 4 | BULK MCP TACTIC concrete examples (DECISION LADDER) | XS | 3-5% | Round 2 | ✅ shipped (`135bc57` + brace-fix `5e969a1`) |
+| 5 | Pre-inject action items in user message | S | 3-5% | Round 2 | ✅ shipped (`08c58d1`) |
+| 6 | Wake debouncing (5-min window) | M | 10-15% | Round 3 | ✅ shipped (`8d1a7d3`) |
 
 **Compound math:**
 

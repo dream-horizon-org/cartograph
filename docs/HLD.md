@@ -319,6 +319,9 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `upsert_edge_outbound(agent_id, edge_data)` | — | — | ✓ *own from_component* | — | Phase 3.9. Caller's outgoing edge. `to_component_id` may be set (bound) or NULL (dangling). Metadata + max-confidence accumulation on repeat writes. |
 | `bind_edge(agent_id, edge_id, to_component_id)` | — | — | ✓ *owns from* | — | Phase 3.9. Resolves a dangling outgoing. Refuses collision with existing bound row. |
 | `delete_edge(agent_id, edge_id)` | — | — | ✓ *owns from_component_id* | — | **Phase 7.4.11.** Owner-scoped, idempotent edge delete. Closes the post-merge edge-dedup gap (e.g. one telemetry-discovered + one github-discovered with slightly different identifiers for the same dep). Cascades `flows.outgoing_edge_id` rows (ON DELETE CASCADE). Catalog rows (from IS NULL) refuse with `reason='catalog_not_supported'`. Idempotent: deleting non-existent edge_id returns `{deleted:False, reason:'not_found'}`. |
+| `upsert_attributions_bulk(agent_id, component_id, attributions[])` | — | — | ✓ *own component* | — | **Phase 7.4.12 (token-opt R2 #3).** Atomic-with-pre-validation bulk upsert. Pre-validate all rows; if any fails, write nothing and return per-row errors. If all pass, single transaction commits all. Cross-component conflicts (any row's (plane, type, identifier) belongs to different component) reject the whole batch. Max 500/call. Returns `{committed, applied, rows / errors}`. |
+| `upsert_catalogs_bulk(agent_id, component_id, catalogs[])` | — | — | ✓ *own component* | — | **Phase 7.4.12 (token-opt R2 #3).** Atomic-with-pre-validation bulk upsert. Each row: `{kind, identifier, metadata?, confidence?}`. Same atomic semantics as above. Max 500/call. |
+| `upsert_edges_outbound_bulk(agent_id, edges[])` | — | — | ✓ *owns each from_component_id* | — | **Phase 7.4.12 (token-opt R2 #3).** Atomic-with-pre-validation bulk upsert. Each row mirrors `upsert_edge_outbound`'s edge_data. Multiple from_component_ids allowed across rows (caller must own each). Mixed bound + dangling allowed. Self-loops permitted (Phase 7.3). Max 500/call. |
 | `upsert_flow(agent_id, component_id, incoming_catalog_id, outgoing_edge_id, metadata?, confidence?)` | — | — | ✓ *own component* | — | Phase 3.9 + 7.4.2. Links one of YOUR catalog rows (a surface YOU expose) to one of YOUR outgoing edges. Validates `catalog.component_id = component_id` (Phase 7.4.2: incoming is a catalog, not an edge) and `outgoing.from_component_id = component_id`. Set-based; idempotent on the triple. |
 | `insert_unresolved(agent_id, data)` | — | — | ✓ *own component* | — | |
 | `resolve_reference(agent_id, unresolved_id, target_component_id)` | ✓ | ✓ | ✓ | ✓ | Any active agent (cross-SME resolution). Refuses decommissioned target. |
@@ -1237,7 +1240,7 @@ READ-ONLY (one per plane, scoped per agent):
 WRITE TARGET (single, shared by all agents):
 
   cartograph-db  (FastMCP streamable-http on :8100/mcp)
-    LIVE groups (86 tools registered in src/cartograph_mcp/server.py;
+    LIVE groups (89 tools registered in src/cartograph_mcp/server.py;
     see TRIGGER-MANAGEMENT.md §3 for per-tool contracts):
       action_items    (2):  summary, detail
       chat            (4):  send, ack, unacked, history
@@ -1251,24 +1254,27 @@ WRITE TARGET (single, shared by all agents):
                             reset_agent, decommission_agent(_bulk),
                             decommission_component(_bulk),
                             sleep_self, bulk_sleep_agents, bulk_wake_agents
-      components      (17): upsert_component, upsert_attribution,
+      components      (19): upsert_component, upsert_attribution,
+                            **upsert_attributions_bulk (Phase 7.4.12)**,
                             create_edge (3.9 legacy shim),
                             insert_unresolved, resolve_reference,
                             upsert_edge_catalog (7.4 deprecated shim),
-                            upsert_edge_outbound, bind_edge,
-                            upsert_flow (Phase 3.9 + 7.4.2),
+                            upsert_edge_outbound,
+                            **upsert_edges_outbound_bulk (Phase 7.4.12)**,
+                            bind_edge, upsert_flow (Phase 3.9 + 7.4.2),
                             **delete_edge (Phase 7.4.11)** — owner-scoped,
                             idempotent, cascades flows,
                             get_component, get_attributions, get_edges,
                             get_unresolved, get_component_edges,
                             get_flow, get_flow_inverse
+      catalogs        (6):  upsert_catalog,
+                            **upsert_catalogs_bulk (Phase 7.4.12)**,
+                            get_my_catalogs, get_my_catalog_callers,
+                            get_unmatched_callers, get_orphan_catalogs (Phase 7.4)
       notifications   (1):  get_agent_notifications
       consolidation   (5):  nominate, respond, review, get_my, get_thread
       clarification   (4):  create, respond, get_my, get_thread
       search          (1):  vector_search (lean projection per Phase 7.4.4)
-      catalogs        (5):  upsert_catalog, get_my_catalogs,
-                            get_my_catalog_callers, get_unmatched_callers,
-                            get_orphan_catalogs (Phase 7.4)
       terminal_acks   (1):  ack_terminal (Phase 7.1)
       insights        (1):  record_insight (Phase 5.9)
 

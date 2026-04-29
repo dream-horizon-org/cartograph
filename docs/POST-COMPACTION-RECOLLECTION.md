@@ -1,4 +1,4 @@
-# Cartograph — Post-Compaction Recollection (2026-04-29, updated through 7.4.11 + parallel-tool-calls + token-optimisation plan)
+# Cartograph — Post-Compaction Recollection (2026-04-29, updated through 7.4.14 + token-optimisation Rounds 1/2/3 shipped)
 
 > **Read this FIRST after compaction.** Then `git log --oneline -50`,
 > then the 6 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
@@ -116,7 +116,10 @@ tail -f                /tmp/cartograph-logs/admin_ui.log
 | **7.4.10** | **✅ SHIPPED 2026-04-27** | Graph crash root-cause fix v2: `pauseAnimation()`/`resumeAnimation()` on tab switch (offscreen RAF was the actual leak), `visibilitychange` listener for backgrounded browser tabs, wheel-handler null-deref fix (`!graphInstance` short-circuit), idempotent `webglcontextlost` handler. Cache-bust v=60→v=62. |
 | **7.4.11** | **✅ SHIPPED 2026-04-27** (commits `72b4a93`, `84b0941`, `bc69c23`) | New `delete_edge(agent_id, edge_id)` MCP tool — owner-scoped, idempotent, cascades flows. Tool count 85 → 86. SME prompt gains IDENTIFIER NORMALISATION rule (STEP 3) + post-merge EDGE DEDUP step (in code-repo block). PROMPT-ENHANCEMENTS §2.9 logs the diagnostic context. |
 | **parallel** | **✅ SHIPPED 2026-04-27** (commits `5b3144d`, `c7f5fd5`) | Removed "Call tools sequentially" rule from orchestrator + sme prompts; new `== BATCH + PARALLEL TOOL CALLS ==` block in `base.py` MISSION_AND_VOCABULARY shared with all 4 agent types. Concrete WHEN-TO-PARALLELISE / WHEN-TO-STAY-SEQUENTIAL / USE-BULK-VARIANTS guidance. Targets the 0.08% parallel-tool-call rate measured pre-fix. |
-| **token-opt plan** | **DOCUMENTED, ROUND 1+ in flight** | Token optimisation plan in IMPLEMENTATION-PHASES.md §Token Optimisation: Round 1 (concise output rule + orch→sonnet — resolver STAYS opus-4-6), Round 2 (bulk MCP tools + BULK MCP TACTIC concrete examples + pre-injected action items), Round 3 (wake debouncing 5min). Target: ~43% reduction in lifetime spend. |
+| **token-opt R1** | **✅ SHIPPED 2026-04-29** | Round 1: concise output rule (`c9bb733` — base.py CONCISE block, ≤2-sentence default, no preambles, NO compromise on identifiers/data); orch → sonnet-4-6 (`53a6ef1` — resolver STAYS opus-4-6 + medium effort). Targets 8-10% (concise) + 10-14% (orch swap) = ~20% reduction. |
+| **token-opt R2** | **✅ SHIPPED 2026-04-29** | Round 2: top-3 bulk MCP write tools (`716554d` — `upsert_attributions_bulk` / `upsert_catalogs_bulk` / `upsert_edges_outbound_bulk`, atomic-with-pre-validation, max 500/call; tool count 86 → 89). BULK CALLS DECISION LADDER 3-rung concrete examples in SME prompt (`135bc57` + hot-fix `5e969a1` for brace escape). Pre-inject action items in invocation user message (`08c58d1` — agent_manager pre-computes snapshot via SQL, embeds in user msg NOT system_prompt for cache safety; includes proxied_count). Targets 6-9% + 3-5% + 3-5% = ~15-19%. |
+| **token-opt R3** | **✅ SHIPPED 2026-04-29** | Round 3: wake debouncing 5-min (`8d1a7d3` — new agent_runs.first_pending_at column, scanner refuses lock until window elapsed unless override; admin chat + mid-mutation override; clears on yield). Targets 10-15% reduction by coalescing drip-fed events. |
+| **bulk MCP tools** | **shipped, 89 tools registered** | Verify via `grep "tools registered" /tmp/cartograph-logs/mcp.log`. Tool count: 85 (pre-7.4.11) → 86 (delete_edge) → 89 (3 bulk writes). |
 
 ---
 
@@ -228,7 +231,7 @@ Plus auto-wrapped: every @mcp.tool() registration is wrapped by
 cartograph_mcp.audit.audited (Phase 5.10) — records to mcp_audit table.
 ```
 
-**Total: 86** (added `delete_edge` in Phase 7.4.11). Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`.
+**Total: 89** (Phase 7.4.11 added `delete_edge`; Phase 7.4.12 added `upsert_attributions_bulk`, `upsert_catalogs_bulk`, `upsert_edges_outbound_bulk`). Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`.
 
 ---
 
