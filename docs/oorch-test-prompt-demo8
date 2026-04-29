@@ -6,12 +6,12 @@ DEMO8 — End-to-end verification (paste this whole block to orchestrator)
 You are orchestrating a comprehensive end-to-end verification dance for
 Cartograph covering EVERY shipped feature: DEMO7's full surface PLUS
 everything added since (Phase 7.4.7 → Phase 8). This is a structured
-22-phase test — each phase verifies a specific feature surface.
+23-phase test — each phase verifies a specific feature surface.
 
 == REPORT-BACK CONVENTIONS ==
 
 Tag every status / observation message with one of:
-  [DEMO8-PHASE-N]    section header (N = 1..22)
+  [DEMO8-PHASE-N]    section header (N = 1..23)
   [DEMO8-OK]         a verification passed
   [DEMO8-FAIL]       a verification failed (note expected vs actual)
   [DEMO8-BUG]        unexpected behavior worth flagging
@@ -299,104 +299,295 @@ REPORT [DEMO8-PHASE-11] header.
 
 == PHASE 12 — Flows reference catalogs first-class (Phase 7.4.2) ==
 
-(Same scope as DEMO7 Phase 12: declare ≥2 flows per SME with at least
-one catalog + one outgoing edge. Use upsert_flows_bulk where
-applicable to exercise Phase 8.4.)
+The most important new mechanic from Phase 7.4.2: a flow's incoming
+is canonically a catalog row (NOT an edge id). This phase exercises
+declaration, fan-out, both read tools, the new contract on
+get_flow_inverse, the negative-path validation, AND seeds enough
+flows across the topology so the admin can validate the 3D graph viz
+interactively (LOS BFS, junction conflation, hover zones).
+
+★ MANDATORY VIZ-SEEDING STEP — every SME with at least one catalog
+AND at least one outgoing edge MUST declare ≥2 flows. The admin will
+click edges in the 3D graph after the demo and watch LOS chains light
+up — this only works if real flow rows exist.
 
 Per-SME flow targets:
-  sme-auth-1 (post-merge — owns POST /verify + POST /token + inherited):
-    ≥2 flows on different catalogs. Use upsert_flows_bulk.
-  sme-monolith (pre-split — owns POST /payments/charge + GET /feeds/scores):
-    ≥3 flows including 1 fan-out (catalog → 2 outgoings).
-  sme-payments-split (post-split — owns the carved POST /payments/charge):
-    ≥1 flow.
-  sme-cron (owns trigger_target daily-rebalance + the self-loop):
-    1 flow on the self-loop edge.
 
-Total target: ≥7 flow rows. Verify via /api/graph that flows.length
-is ≥ 7.
+  sme-auth-1 (after merge — owns POST /verify + POST /token +
+    absorbed catalogs from sme-auth-2):
+      • flow: catalog(POST /verify) → outgoing edge of your choice
+      • flow: catalog(POST /token)  → another outgoing
+      → 2 visible LOS chain origins on auth-svc
+      → ★ EXERCISE Phase 8.4 upsert_flows_bulk for both flows in
+        ONE bulk call.
 
-★ NEGATIVE PATH: sme-monolith tries upsert_flow with sme-cron's
-  catalog id as incoming_catalog_id. Should raise "does not belong to
-  component".
+  sme-monolith (before split — owns POST /payments/charge +
+    GET /feeds/scores):
+      • flow: catalog(POST /payments/charge) → bound outgoing
+        (monolith → feeds-db "INSERT ledger")
+      • flow: catalog(POST /payments/charge) → second outgoing
+        (monolith → notify "payment.completed")  [fan-out demo]
+      • flow: catalog(GET /feeds/scores) → bound outgoing
+        (monolith → feeds-cache "GET live:scores")
+      → fan-out junction visible on monolith
 
-REPORT [DEMO8-PHASE-12] header.
+  sme-payments-split (post-split — owns carved POST /payments/charge):
+      • re-declare 1 flow: catalog(POST /payments/charge) →
+        outgoing edge (payments-split → feeds-db "INSERT ledger")
+      → confirms split-side flows render correctly post-mutation
 
-== PHASE 13 — Vector search on catalogs ==
+  sme-cron (owns trigger_target daily-rebalance + the self-loop
+    edge from Phase 4):
+      • flow: catalog(daily-rebalance) → self-loop edge
+      → demonstrates self-loop participating in flow rendering
 
-sme-auth-1: vector_search(query_text='login verify endpoint',
-                          table='catalogs', limit=5)
-Verify response carries POST /verify (top hits) + lean projection
-(no embedding, no metadata blobs — Phase 7.4.4).
+Total target: ≥6 flow rows. Verify /api/graph returns flows.length>=6.
 
-Cross-check: vector_search table='edges' for the same queries does NOT
-return catalog-shaped rows (catalogs not in edges post-7.4).
+REPORT [DEMO8-NOTE] with the per-SME flow count after PHASE-12
+completes so the admin can spot under-seeding.
 
-REPORT [DEMO8-PHASE-13] header.
+12a. DECLARE A FLOW (single):
+     sme-monolith owns a catalog "POST /payments/charge" + a bound
+     outgoing edge to feeds-db at "INSERT ledger". Wire them:
+       upsert_flow(
+         agent_id=sme-monolith,
+         component_id=monolith_component_id,
+         incoming_catalog_id=<POST /payments/charge catalog id>,
+         outgoing_edge_id=<INSERT ledger edge id>,
+         metadata={"src": "code"}, confidence=0.9,
+       )
+     Verify the returned row has incoming_catalog_id set (NOT
+     incoming_edge_id — that column does not exist anymore).
+
+12b. FAN-OUT (one catalog → multiple outgoings):
+     Add a SECOND outgoing — e.g. publishes_to to a notify topic — and
+     wire a second flow:
+       upsert_flow(monolith, monolith_id, charge_catalog_id,
+                   <notify edge id>)
+     Confirm get_flow(monolith_id, charge_catalog_id) returns BOTH
+     outgoings (set-based fan-out).
+
+12c. INVERSE LOOKUP (contract change verification):
+     get_flow_inverse(monolith_id, <INSERT ledger edge id>) should
+     return CATALOG ROWS (not edge rows). Verify the returned row has
+     a `kind` field (catalog rows do; edge rows don't) and that its
+     id matches charge_catalog_id.
+
+12d. NEGATIVE PATH — foreign-component catalog refused:
+     sme-monolith tries upsert_flow using sme-cron's catalog id as
+     incoming_catalog_id. Should raise ValueError matching
+     "does not belong to component".
+
+12e. CATALOG CASCADE — flow disappears when catalog is deleted:
+     ★ Phase 8.2 delete_catalog now exists — use it directly:
+     Take a synthetic catalog (kind='topic',
+     identifier='test.delete-me') on monolith, wire one flow on it,
+     then call:
+       delete_catalog(sme-monolith, <synth_catalog_id>,
+                      reason='cascade test')
+     Verify the response carries cascaded_flows: 1 AND that the flow
+     row is gone (FK ON DELETE CASCADE confirmed end-to-end).
+
+REPORT [DEMO8-PHASE-12] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 12a–12e + the per-SME
+viz seeding + the upsert_flows_bulk call.
+
+== PHASE 13 — Vector search on catalogs (Phase 7.4 follow-up) ==
+
+Catalogs are embedded at write time ("{kind}: {identifier}") and
+surfaced via vector_search.
+
+13a. sme-auth-1 calls:
+       vector_search(agent_id=sme-auth-1,
+                     query_text='login verify endpoint',
+                     table='catalogs', limit=5)
+     Verify:
+       - Response shape is {query_embedded: bool, results: [...]}.
+       - If query_embedded is True, results array is non-empty AND
+         sme-auth-1's POST /verify catalog appears (or near-match)
+         in the top 5.
+       - If query_embedded is False (Ollama unreachable), report
+         [DEMO8-NOTE] — graceful-degrade contract, not a failure.
+
+13b. sme-monolith calls:
+       vector_search(agent_id=sme-monolith,
+                     query_text='charge payment',
+                     table='catalogs', limit=5)
+     Verify monolith's POST /payments/charge appears.
+
+13c. CROSS-CHECK — vector_search with table='edges' for the same
+     queries should NOT return catalog-shaped rows anymore (catalogs
+     are not in edges post-Phase-7.4). Just bound + dangling rows.
+
+13d. LEAN PROJECTION (Phase 7.4.4) — verify each catalogs result row
+     has keys subset of {id, component_id, kind, identifier,
+     confidence, similarity}. Forbidden fields: embedding, metadata.
+
+REPORT [DEMO8-PHASE-13] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 13a–13d.
 
 == PHASE 14 — Admin UI catalog endpoints (Phase 7.4.2) ==
 
-(Same as DEMO7 Phase 14: spot-check /api/components.catalog_count > 0,
-/api/component/{id}/drilldown.edges.catalog populated,
-/api/graph flows[].incoming_catalog_id present.)
+These FE-facing endpoints were silently broken pre-7.4.2 (returning
+0 / empty for every component). Verify via curl from bash:
 
-REPORT [DEMO8-PHASE-14] header.
+14a. /api/components.catalog_count > 0:
+     curl -s 'http://localhost:8200/api/components?q=auth' | \
+       python3 -c "import sys,json; d=json.load(sys.stdin); \
+         print([(c['canonical_name'], c['edge_count']) for c in d['components']])"
+     Verify: sme-auth-1's component has edge_count.catalog >= 2
+     (POST /verify + POST /token + any from absorb of sme-auth-2).
 
-== PHASE 15 — Phase 7.4.4 + 7.4.5 fix verifications ==
+14b. /api/component/{id}/drilldown.edges.catalog populated:
+     curl -s "http://localhost:8200/api/component/<auth-1-component-id>/drilldown" | \
+       python3 -c "import sys,json; d=json.load(sys.stdin); \
+         print('catalog rows:', len(d['edges']['catalog'])); \
+         [print(' ', c.get('catalog_kind'), c.get('identifier')) for c in d['edges']['catalog']]"
+     Verify: catalog rows are non-empty AND each carries
+     `catalog_kind` (e.g. 'endpoint') alongside identifier.
 
-(Same as DEMO7 Phases 15 + 16 — confirm fixes hold:
-  spawn_child_agent transfer_catalog_ids exposed in MCP wrapper;
-  Phase 7.3 self-loop guards stay dead;
-  vector_search lean projection holds;
-  get_my_catalogs no duplicates post-merge;
-  get_action_items_summary uniform-int shape;
-  SME prompts reference upsert_catalog not upsert_edge_catalog.)
+14c. /api/graph flows[].incoming_catalog_id present:
+     curl -s 'http://localhost:8200/api/graph' | \
+       python3 -c "import sys,json; d=json.load(sys.stdin); \
+         print('flows:', len(d['flows'])); \
+         [print(' ', list(f.keys())) for f in d['flows'][:1]]"
+     Verify: flow rows carry `incoming_catalog_id` (NOT
+     `incoming_edge_id` — that field name no longer exists).
 
-REPORT [DEMO8-PHASE-15] header.
+REPORT [DEMO8-PHASE-14] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 14a–14c.
 
-== PHASE 16 — Phase 7.4.7 per-type model + plane semantics ==
+== PHASE 15 — Phase 7.4.4 fix verifications (DEMO7-round-1 regressions) ==
 
-16a. Verify orchestrator runs on sonnet-4-6 (post-Round-1 #2).
-     Inspect a recent orch run via mcp_audit (model is in args_hash
-     args? not directly; check /tmp/cartograph-logs/agents.log for
-     `--model claude-sonnet-4-6` in the orch invoke command).
+DEMO7-round-1 surfaced 3 holes; all 3 fixed in commit ead74bf.
+Verify the fixes hold:
 
-16b. Verify resolver runs on opus-4-6 + medium effort. Same log
-     inspection.
+15a. spawn_child_agent MCP wrapper exposes transfer_catalog_ids:
+     Phase 7 (split) above already uses this param. Confirm the
+     spawn_child_agent response carries `transferred_catalogs >= 1`.
+     Cross-verify on the data side: query
+     get_my_catalogs(sme-payments-split) — the carved POST
+     /payments/charge catalog should appear under the CHILD's
+     component, not the parent's. If both show it (or only parent
+     shows it), [DEMO8-FAIL] — wrapper plumb still missing.
 
-16c. Verify /api/components and /api/graph nodes carry planes[]
-     sourced from RCA→resources (not attributions). Spot-check via
-     curl.
+15b. Phase 7.3 self-loop guards stay dead:
+     Same as PHASE 4 above (4a + 4b + 4c). Confirm all three were
+     [DEMO8-OK]. If any was [DEMO8-FAIL] with verbatim "no
+     self-loops", the Python guard regressed.
 
-16d. Verify /api/agents returns resource_planes[] for each agent.
-     Admin UI agent list shows G/C/T/D/F plane symbols.
+15c. vector_search lean projection:
+     Any agent calls:
+       vector_search(agent_id, 'auth verify endpoint', 'components', 5)
+     Verify:
+       - Each result row has keys: {id, canonical_name, display_name,
+         component_type, status, similarity}
+       - Each result row does NOT carry: embedding, component_doc_md,
+         source_slice, metadata.
+       - Total response < 5KB for 5 rows.
+     Then call vector_search on each of attributions / unresolved /
+     edges / catalogs and confirm no leak.
 
-REPORT [DEMO8-PHASE-16] header.
+REPORT [DEMO8-PHASE-15] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 15a / 15b / 15c.
 
-== PHASE 17 — Phase 7.4.11 delete_edge + identifier normalisation ==
+== PHASE 16 — Phase 7.4.5 fix verifications (DEMO7-round-1 pre-existing bugs) ==
 
-17a. Already exercised in Phase 3 (sme-auth-1 deleted wrong edge).
-     Confirm by querying edges table for the deleted edge_id — should
-     be gone. Confirm the response carried cascaded_flows count.
+DEMO7-round-1 surfaced 3 pre-existing bugs (insights cad0edf5,
+d4c923dc, plus the resolver's get_action_items_summary crashes); all
+fixed in commit 9b94805.
 
-17b. IDENTIFIER NORMALISATION smoke test: ask sme-auth-1 via send_chat
-     "What's the right identifier shape if telemetry surfaces a bare
-     hostname and github surfaces host/dbname for the same DB?"
-     Expected response references the DB-host normalisation rule
-     (drop /dbname, put db_name in metadata).
+16a. get_my_catalogs no duplicates post-merge:
+     After Phase 6 absorb, sme-auth-1 (the merge survivor) calls
+     get_my_catalogs(sme-auth-1).
+     Verify:
+       - Each catalog id appears EXACTLY ONCE.
+       - Total row count equals distinct count.
+       - POST /verify (sme-auth-1's original) and any inherited
+         POST /<X> from sme-auth-2 each appear once.
+     Pre-7.4.5 the JOIN-on-RCA cardinality bug caused each catalog
+     to appear 2× post-merge. [DEMO8-FAIL] if any catalog id repeats.
 
-REPORT [DEMO8-PHASE-17] header.
+16b. get_action_items_summary uniform-int shape:
+     Resolver (which has at least one closed consolidation in
+     terminal_pending_ack from Phase 6) calls
+     get_action_items_summary(resolver_id).
+     Verify:
+       - Response is a flat dict with keys: consolidations_pending,
+         tasks_pending, clarifications_pending, unacked_chats,
+         unacked_broadcasts, terminal_pending_ack, **proxied_count**.
+       - EVERY value is an int (no list anywhere).
+       - Response does NOT crash with "Input should be a valid
+         integer [type=int_type, input_value=[], input_type=list]".
+       - `proxied` field is GONE; `proxied_count` is present.
+     Then call get_action_items_detail(resolver_id) and verify the
+     rich per-proxy breakdown lives there: response has both `my`
+     and `proxied` buckets, and `proxied` is a list of dicts with
+     {proxy_agent_id, deactivation_reason, depth, items}.
 
-== PHASE 18 — Phase 7.4.12 bulk MCP write tools ==
+16c. SME prompt update — upsert_catalog (not upsert_edge_catalog):
+     Spawn ONE fresh SME (sme-prompt-check). On its first wake, it
+     should declare its catalog using `upsert_catalog`. If it uses
+     `upsert_edge_catalog` instead, the Phase 7.4.5 prompt cleanup
+     didn't reach the materialisation hygiene cycle.
+     Cross-verify: ask via send_chat "Which tool should you use to
+     declare a new endpoint catalog row?" — response should mention
+     `upsert_catalog` not the deprecated wrapper.
+
+REPORT [DEMO8-PHASE-16] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 16a / 16b / 16c.
+
+== PHASE 17 — Phase 7.4.7 per-type model + plane semantics ==
+
+17a. Verify orchestrator runs on sonnet-4-6 (post-Round-1 #2).
+     Check /tmp/cartograph-logs/agents.log for `--model
+     claude-sonnet-4-6` in a recent orch invoke command.
+
+17b. Verify resolver runs on opus-4-6 + medium effort. Same log
+     inspection: `--model claude-opus-4-6 --effort medium`.
+
+17c. Verify /api/components and /api/graph nodes carry planes[]
+     sourced from RCA→resources (not attributions). Spot-check:
+       curl -s 'http://localhost:8200/api/graph' | \
+         python3 -c "import sys,json; d=json.load(sys.stdin); \
+           print([(n['canonical_name'], n.get('planes',[])) for n in d['nodes'][:5]])"
+     A github SME's component should show planes=['github'].
+
+17d. Verify /api/agents returns resource_planes[] for each agent.
+     Admin UI agent list shows G/C/T/D/F plane symbols next to
+     component tag.
+
+REPORT [DEMO8-PHASE-17] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 17a–17d.
+
+== PHASE 18 — Phase 7.4.11 delete_edge + identifier normalisation ==
+
+18a. Already exercised in Phase 3 (sme-auth-1 deleted wrong edge).
+     Confirm by querying edges table for the deleted edge_id —
+     should be gone. Confirm response carried cascaded_flows count.
+
+18b. IDENTIFIER NORMALISATION smoke test: ask sme-auth-1 via
+     send_chat "What's the right identifier shape if telemetry
+     surfaces a bare hostname and github surfaces host/dbname for
+     the same DB?" Expected response references the DB-host
+     normalisation rule (drop /dbname, put db_name in metadata).
+
+REPORT [DEMO8-PHASE-18] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 18a / 18b.
+
+== PHASE 19 — Phase 7.4.12 bulk MCP write tools ==
 
 Already exercised across Phases 1, 2, 3, 7. Confirm by counting:
   curl -s 'http://localhost:8200/api/mcp_audit?tool_name=upsert_attributions_bulk&limit=5'
+  curl -s 'http://localhost:8200/api/mcp_audit?tool_name=upsert_catalogs_bulk&limit=5'
+  curl -s 'http://localhost:8200/api/mcp_audit?tool_name=upsert_edges_outbound_bulk&limit=5'
 
-Should return ≥1 row from this demo run.
+Each should return ≥1 row from this demo run.
 
-REPORT [DEMO8-PHASE-18] header.
+REPORT [DEMO8-PHASE-19] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of the 3 bulk tools.
 
-== PHASE 19 — Phase 7.4.13 pre-injected action items ==
+== PHASE 20 — Phase 7.4.13 pre-injected action items ==
 
 Verify by inspecting an SME wake's invocation prompt. The user
 message should include `== ACTION ITEMS SNAPSHOT (at <ts>) ==` with
@@ -406,129 +597,146 @@ Easiest way: pause work for 5+ minutes so the snapshot has interesting
 counts, then look at /tmp/cartograph-logs/agents.log for the next
 SME wake's snapshot block.
 
-REPORT [DEMO8-PHASE-19] header.
+REPORT [DEMO8-PHASE-20] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL].
 
-== PHASE 20 — Phase 7.4.14 wake debouncing ==
+== PHASE 21 — Phase 7.4.14 wake debouncing ==
 
 Trigger the override conditions to bypass the 5-min debounce:
-  20a. Admin chat to a sleeping/idle SME → instant wake (no 5-min wait).
-  20b. Resolver approves merge with mutation_assigned_to=sme-X → sme-X
+  21a. Admin chat to a sleeping/idle SME → instant wake (no 5-min wait).
+  21b. Resolver approves merge with mutation_assigned_to=sme-X → sme-X
        wakes instantly (mid-mutation override).
+  21c. ROUTINE WAKE BASELINE — broadcast to all SMEs without admin
+       override → confirm scanner stamps first_pending_at and HOLDS
+       wake until 5 min elapses (check
+       /tmp/cartograph-logs/triggers.log for the debounce-skip
+       message AND a later wake at +5min).
 
 Verify by watching /tmp/cartograph-logs/triggers.log for the
-debounce-skip messages or wake timestamps.
+debounce-skip messages + wake timestamps.
 
-REPORT [DEMO8-PHASE-20] header.
+REPORT [DEMO8-PHASE-21] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 21a–21c.
 
-== PHASE 21 — Phase 8 corrective deletes + read bulks (NEW SURFACE) ==
+== PHASE 22 — Phase 8 corrective deletes + read bulks (NEW SURFACE) ==
 
 THIS IS THE PHASE-8 EXERCISE — must hit every new tool at least once.
 
-21a. **delete_attribution + bulk** — sme-monolith intentionally writes
+22a. **delete_attribution + bulk** — sme-monolith intentionally writes
      a wrong-shape attribution (e.g. `outbound_db_host`) then realises
      the mistake (per the ATTRIBUTION-vs-EDGE rule). Calls:
        delete_attribution(its_id, wrong_attr_id, reason='wrong shape')
      Then writes the correct edge. Verify the attribution is gone +
      mcp_audit row records reason in args_hash.
 
-21b. **delete_attributions_bulk** — sme-cron writes 3 stale
+22b. **delete_attributions_bulk** — sme-cron writes 3 stale
      attributions, then deletes all 3 in one bulk call. Verify all
      3 gone, response carries committed=True, applied=3.
 
-21c. **delete_catalog + bulk** — sme-payments-split declares 2 stale
+22c. **delete_catalog + bulk** — sme-payments-split declares 2 stale
      catalogs (e.g. POST /old-charge, POST /old-refund), wires a
      flow on one of them, then deletes both via delete_catalogs_bulk.
      Verify cascaded_flows count matches (flow disappears with its
      catalog).
 
-21d. **delete_flow + bulk** — sme-monolith creates a wrong flow join
+22d. **delete_flow + bulk** — sme-monolith creates a wrong flow join
      then deletes it via delete_flow. No cascade — confirm the
-     catalog + edge still exist.
+     catalog + edge still exist. Then sme-cron creates 2 wrong flows
+     and deletes both via delete_flows_bulk.
 
-21e. **delete_unresolved + bulk** — sme-auth-1 writes 2 unresolved
+22e. **delete_unresolved + bulk** — sme-auth-1 writes 2 unresolved
      refs that turn out to be typos, deletes via
      delete_unresolved_bulk.
 
-21f. **insert_unresolved idempotency** — sme-auth-1 writes the same
+22f. **insert_unresolved idempotency** — sme-auth-1 writes the same
      unresolved ref twice. Second call updates in place + bumps
      attempts (verify via get_unresolved). No duplicate row.
 
-21g. **insert_unresolved_bulk** — sme-cron writes 3 unresolved refs
+22g. **insert_unresolved_bulk** — sme-cron writes 3 unresolved refs
      in one call.
 
-21h. **upsert_flows_bulk** — already exercised in Phase 7.
+22h. **upsert_flows_bulk** — already exercised in Phase 7. Confirm
+     via mcp_audit count.
 
-21i. **ack_broadcasts_bulk** — already exercised in Phase 10.
+22i. **ack_broadcasts_bulk** — already exercised in Phase 10. Confirm
+     via mcp_audit count.
 
-21j. **ack_terminals_bulk** — already exercised in Phase 6.
+22j. **ack_terminals_bulk** — already exercised in Phase 6. Confirm
+     via mcp_audit count.
 
-21k. **delete_edges_bulk** — sme-monolith creates 3 self-loop edges,
+22k. **delete_edges_bulk** — sme-monolith creates 3 self-loop edges,
      deletes all 3 in one bulk call. Verify cascaded_flows reported
      per row.
 
-21l. **5 read bulks** — resolver already used get_attributions_bulk +
+22l. **5 read bulks** — resolver already used get_attributions_bulk +
      get_catalogs_bulk + get_component_edges_bulk in Phase 5.
      Additionally exercise:
        get_components_bulk([auth-1, monolith, cron])
        get_flows_bulk([auth-1, monolith, payments-split])
      Verify all return dict[component_id_str, ...] shape.
 
-21m. **OWNER GATE TEST** — sme-auth-1 tries to delete one of
+22m. **OWNER GATE TEST** — sme-auth-1 tries to delete one of
      sme-cron's attributions (cross-owner). Should raise
      "does not own".
 
-21n. **NEGATIVE BULK** — sme-auth-1 calls delete_attributions_bulk
+22n. **NEGATIVE BULK** — sme-auth-1 calls delete_attributions_bulk
      with one of its own ids + one of sme-cron's. Should reject the
      WHOLE batch with per-row errors (atomic-with-pre-validation).
      Verify sme-auth-1's row STILL EXISTS post-call (atomic — nothing
      was deleted).
 
-REPORT [DEMO8-PHASE-21] header.
-REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 21a–21n.
+22o. **IDEMPOTENT MISSING-ID** — call delete_flows_bulk with one
+     valid id + one fake UUID. Expected: committed=True, applied=1
+     (valid one deletes), missing one returns reason='not_found'
+     in the rows array (not an error).
 
-== PHASE 22 — notify.py flock + parallel tool calls ==
+REPORT [DEMO8-PHASE-22] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 22a–22o.
 
-22a. **PARALLEL TOOL CALLS (Phase 7.4.12-prompts):** sme-auth-1 should
+== PHASE 23 — notify.py flock + parallel tool calls ==
+
+23a. **PARALLEL TOOL CALLS (Phase 7.4.12-prompts):** sme-auth-1 should
      emit ≥1 assistant turn with ≥3 parallel tool_use blocks during
      this demo (e.g. hygiene sweep at wake start).
+     Verify by grepping the agent's JSONL session file for an
+     assistant message with ≥3 tool_use blocks. Path:
+     ~/.claude/projects/<path-of-cwd>/<session>.jsonl
 
-     Verify by grepping the agent's JSONL session file for an assistant
-     message with ≥3 tool_use blocks. Path: ~/.claude/projects/<path-of-cwd>/<session>.jsonl
-
-22b. **flock fix (Phase 8.1):** when the parallel batch fires, only
+23b. **flock fix (Phase 8.1):** when the parallel batch fires, only
      ONE [NOTIFY] string should appear in the bundled user turn (not
      N copies). Inspect the JSONL — search for the next user message
      after the parallel tool_use turn, count [NOTIFY] strings in
      additionalContext. Expected: 0 or 1, not N.
 
-REPORT [DEMO8-PHASE-22] header.
-REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 22a / 22b.
+REPORT [DEMO8-PHASE-23] section header.
+REPORT [DEMO8-OK] / [DEMO8-FAIL] for each of 23a / 23b.
 
 == FINAL SCORECARD ==
 
-Once all 22 phases complete, emit a [DEMO8-RESULT] block:
+Once all 23 phases complete, emit a [DEMO8-RESULT] block:
   [DEMO8-RESULT] Phase 1  setup ........................ PASS / FAIL — short summary
   [DEMO8-RESULT] Phase 2  catalogs ..................... PASS / FAIL
   [DEMO8-RESULT] Phase 3  unmatched callers + delete_edge PASS / FAIL
   [DEMO8-RESULT] Phase 4  self-loops .................... PASS / FAIL (3 sub-results)
   [DEMO8-RESULT] Phase 5  merge nominate + bulk reads .... PASS / FAIL
-  [DEMO8-RESULT] Phase 6  handoff+absorb+ack ............ PASS / FAIL
+  [DEMO8-RESULT] Phase 6  handoff+absorb+ack ............ PASS / FAIL (4 sub-results)
   [DEMO8-RESULT] Phase 7  split+transfers+upsert_flows_bulk PASS / FAIL
   [DEMO8-RESULT] Phase 8  proxy inheritance ............. PASS / FAIL
   [DEMO8-RESULT] Phase 9  insights ...................... PASS / FAIL
   [DEMO8-RESULT] Phase 10 persistence toggle + ack_broadcasts_bulk PASS / FAIL
   [DEMO8-RESULT] Phase 11 mcp audit .................... PASS / FAIL
-  [DEMO8-RESULT] Phase 12 flows-on-catalogs ............ PASS / FAIL
-  [DEMO8-RESULT] Phase 13 catalog vector_search ........ PASS / FAIL
-  [DEMO8-RESULT] Phase 14 admin UI catalogs ............ PASS / FAIL
-  [DEMO8-RESULT] Phase 15 7.4.4/7.4.5 regression ....... PASS / FAIL
-  [DEMO8-RESULT] Phase 16 per-type model + plane source  PASS / FAIL
-  [DEMO8-RESULT] Phase 17 delete_edge + identifier norm  PASS / FAIL
-  [DEMO8-RESULT] Phase 18 Round-2 bulk writes ........... PASS / FAIL
-  [DEMO8-RESULT] Phase 19 pre-injected action items .... PASS / FAIL
-  [DEMO8-RESULT] Phase 20 wake debouncing override ..... PASS / FAIL
-  [DEMO8-RESULT] Phase 21 Phase 8 corrective deletes + read bulks (14 sub-results) PASS / FAIL
-  [DEMO8-RESULT] Phase 22 parallel tool calls + flock fix PASS / FAIL
+  [DEMO8-RESULT] Phase 12 flows-on-catalogs ............ PASS / FAIL (5 sub-results)
+  [DEMO8-RESULT] Phase 13 catalog vector_search ........ PASS / FAIL (4 sub-results)
+  [DEMO8-RESULT] Phase 14 admin UI catalogs ............ PASS / FAIL (3 sub-results)
+  [DEMO8-RESULT] Phase 15 Phase 7.4.4 fix verification . PASS / FAIL (3 sub-results)
+  [DEMO8-RESULT] Phase 16 Phase 7.4.5 fix verification . PASS / FAIL (3 sub-results)
+  [DEMO8-RESULT] Phase 17 per-type model + plane source  PASS / FAIL (4 sub-results)
+  [DEMO8-RESULT] Phase 18 delete_edge + identifier norm  PASS / FAIL (2 sub-results)
+  [DEMO8-RESULT] Phase 19 Round-2 bulk writes ........... PASS / FAIL (3 sub-results)
+  [DEMO8-RESULT] Phase 20 pre-injected action items .... PASS / FAIL
+  [DEMO8-RESULT] Phase 21 wake debouncing + override ... PASS / FAIL (3 sub-results)
+  [DEMO8-RESULT] Phase 22 Phase 8 corrective deletes + read bulks PASS / FAIL (15 sub-results)
+  [DEMO8-RESULT] Phase 23 parallel tool calls + flock fix PASS / FAIL (2 sub-results)
 
 Plus list every [DEMO8-BUG] line you emitted earlier (if any) at the
 bottom of the scorecard so the user can quickly identify what to
