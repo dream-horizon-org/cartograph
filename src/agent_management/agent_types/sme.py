@@ -1034,21 +1034,92 @@ errors after re-spawn, you can speak JSON-RPC over HTTP/SSE
 directly with curl — initialize → keep `Mcp-Session-Id` header →
 tools/list → tools/call. Slower, works.
 
+== CORRECTIVE ACTIONS — DELETE WHEN YOU GET IT WRONG ==
+You will sometimes write something that turns out to be wrong-shape,
+stale, or based on misclassification. Cartograph gives you owner-
+scoped, idempotent deletes for the four row types you own:
+
+- WRONG ATTRIBUTION (e.g. you wrote `outbound_db_host` as own
+  attribution, but the DB hostname is actually an EDGE to a separate
+  component the DB SME owns):
+    delete_attribution(your_id, attr_id, reason='wrong shape')
+  Then write the correct edge (upsert_edge_outbound) +
+  insert_unresolved if the target isn't pinned yet.
+
+- STALE / DEPRECATED CATALOG (you declared an endpoint that's
+  deprecated; an unmatched-callers triage revealed it was never
+  exposed):
+    delete_catalog(your_id, cat_id, reason='deprecated since YYYY-MM')
+  Cascades flows automatically (FK CASCADE on
+  flows.incoming_catalog_id).
+
+- WRONG FLOW JOIN (you wired catalog_A → edge_X but the right
+  catalog→outgoing pair is catalog_A → edge_Y; upsert_flow is
+  set-based on the unique triple, so re-upserting a different triple
+  ADDS a flow rather than replacing the wrong one):
+    delete_flow(your_id, flow_id) then upsert_flow(...) the right one.
+
+- POST-MERGE DUPLICATE EDGE (companion to the IDENTIFIER
+  NORMALISATION rule + delete_edge from Phase 7.4.11): walk inherited
+  edges, pick canonical, merge metadata via upsert_edge_outbound,
+  then delete_edge / delete_edges_bulk on the duplicates.
+
+- TYPO / NOT-A-DEP UNRESOLVED (your grep flagged a string that
+  turned out to be a comment, a literal, or a non-dep):
+    delete_unresolved(your_id, unresolved_id, reason='typo')
+
+All five are owner-scoped (caller must own the component the row
+belongs to) and idempotent (missing id → reason='not_found', no raise).
+Optional `reason` param surfaces in mcp_audit.args_hash for forensic
+queries.
+
+For batch cleanup, prefer the bulk variants (per the BULK CALLS
+DECISION LADDER below): delete_attributions_bulk, delete_catalogs_bulk,
+delete_edges_bulk, delete_flows_bulk, delete_unresolved_bulk.
+
+DON'T:
+- Try to overwrite a wrong attribution by upserting with corrected
+  shape — UNIQUE on (plane, resource_type, identifier) blocks it.
+  Use delete_attribution then write fresh.
+- Delete and re-create a row when an upsert would update in place
+  (upserts on attributions / catalogs / edges / flows are idempotent
+  and accumulate metadata).
+
 == BULK CALLS — DECISION LADDER (TRY THESE IN ORDER) ==
 When you need to make N writes/reads of the same shape, use this
 priority ladder. Each rung saves more than the rung above.
 
 RUNG 1 — Bulk MCP variant (preferred when ≤500 rows + same shape):
-  upsert_attributions_bulk(component_id, [...11 attrs...])  ← ONE call
-  upsert_catalogs_bulk(component_id, [...13 catalogs...])
-  upsert_edges_outbound_bulk([...7 edges...])
-  upsert_resources_bulk(plane, [...100 resources...])
-  bulk_spawn_smes(plane, all_pending=True, ...)
-  decommission_agents_bulk(...)
-  reject_resources_bulk(...)
-  ack_chats(communication_ids=[...8 chat ids...])
+  WRITES:
+    upsert_attributions_bulk(component_id, [...11 attrs...])  ← ONE call
+    upsert_catalogs_bulk(component_id, [...13 catalogs...])
+    upsert_edges_outbound_bulk([...7 edges...])
+    upsert_flows_bulk(component_id, [...flow rows...])           ← Phase 8.4
+    insert_unresolved_bulk([...references...])                   ← Phase 8.4
+    upsert_resources_bulk(plane, [...100 resources...])
+  ACKS:
+    ack_chats(communication_ids=[...8 chat ids...])
+    ack_broadcasts_bulk(communication_ids=[...3 ids...])         ← Phase 8.4
+    ack_terminals_bulk([{{entity_type, entity_id}}, ...])        ← Phase 8.4
+  CORRECTIVE DELETES (Phase 8.3 — owner-scoped + idempotent):
+    delete_attributions_bulk(attribution_ids=[...wrong-shape attrs...])
+    delete_catalogs_bulk(catalog_ids=[...deprecated catalogs...])
+    delete_edges_bulk(edge_ids=[...post-merge dupes...])
+    delete_flows_bulk(flow_ids=[...wrong-join flows...])
+    delete_unresolved_bulk(unresolved_ids=[...typo refs...])
+  READS (multi-component triangulation, Phase 8.5):
+    get_components_bulk(component_ids=[...N candidates...])
+    get_attributions_bulk(component_ids=[...])
+    get_component_edges_bulk(component_ids=[...])
+    get_catalogs_bulk(component_ids=[...])
+    get_flows_bulk(component_ids=[...])
+  ORCH:
+    bulk_spawn_smes(plane, all_pending=True, ...)
+    decommission_agents_bulk(...)
+    reject_resources_bulk(...)
   Atomic — all-or-nothing per batch. Pre-validation errors come back
-  as a single per-row error map. Cost: 1 LLM round-trip out, 1 in.
+  as a single per-row error map. Missing ids on deletes are silently
+  skipped (idempotent). Cost: 1 LLM round-trip out, 1 in.
 
   Concrete WRITE example (11 attributions on YOUR component):
     upsert_attributions_bulk(your_id, [

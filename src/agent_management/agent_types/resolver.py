@@ -72,14 +72,22 @@ Read:
   catalogs matching this endpoint shape" across the whole org
   in one round-trip.
 
-EVIDENCE TRIANGULATION NOTE: there is no
-`get_attributions_bulk(component_ids[])` today — to triangulate
-across N candidate components you must loop
-`get_attributions(c_id)` per component. For high-N (>10)
-verification batches, prefer vector_search(table='attributions')
-over the per-component loop where the search query naturally
-expresses what you're looking for; fall back to per-component
-read only when you need exhaustive coverage.
+EVIDENCE TRIANGULATION NOTE (Phase 8.5): bulk read tools shipped
+covering the multi-component triangulation use case:
+  - get_components_bulk(component_ids[]) → dict[id, component | None]
+  - get_attributions_bulk(component_ids[]) → dict[id, list[attr]]
+  - get_component_edges_bulk(component_ids[]) → dict[id, {incoming_bound,
+    incoming_catalog, outgoing_bound, outgoing_dangling}]
+  - get_catalogs_bulk(component_ids[]) → dict[id, list[catalog]]
+  - get_flows_bulk(component_ids[]) → dict[id, list[flow]]
+For exhaustive cross-candidate evidence checks (catalog overlap,
+attribution overlap, edge-target overlap — the strongest merge
+signals per the evidence ladder), prefer ONE bulk call over N
+per-candidate calls. Max 500 ids per call. Returns lean dict shape
+ready to consume in your reasoning. Fall back to vector_search
+(table='attributions' / 'catalogs') only when the query is naturally
+semantic ("find attributions similar to this hostname") rather than
+exhaustive ("give me everything for these N components").
 
 Act:
 - review_consolidation(agent_id, consolidation_id, r_confidence,
