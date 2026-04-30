@@ -89,16 +89,32 @@ REPORT [DEMO9-FAIL] otherwise.
 
 Four contract checks. Each must produce the expected response/error.
 
-4a. **Per-call error collection.** sme-d9-pay calls:
+4a. **Partial failure — per-call error collection.** sme-d9-pay
+    calls a batch with one GUARANTEED-FAIL sub-call between two
+    legitimate ones. Use a cross-owner delete (owner-gate raises):
+
     mcp_call_batch(agent_id='sme-d9-pay', calls=[
       {tool: 'get_my_catalogs', args: {}},
-      {tool: 'get_component', args: {component_id: '00000000-0000-0000-0000-000000000000'}},
+      {tool: 'delete_attribution', args: {attribution_id: <ID OF AN
+        ATTRIBUTION OWNED BY sme-d9-auth, NOT sme-d9-pay>}},
       {tool: 'list_agents', args: {}},
     ])
-    Expect: results[0].ok=True, results[1] either ok=False with
-    error string OR ok=True with result=None (depends on get_component
-    contract for missing id), results[2].ok=True. Sibling success
-    must NOT be aborted.
+    Expect:
+      - results[0].ok = True (read of own catalogs)
+      - results[1].ok = False, results[1].error contains
+        "does not own" or similar owner-gate refusal
+      - results[2].ok = True (sibling did NOT abort)
+      - The batch tool itself returns normally — partial failure
+        is data, NOT an exception
+      - mcp_audit shows the failed sub-call with result_status='error'
+        + error_msg populated, alongside the two ok rows + the
+        outer mcp_call_batch row
+      - The `delete_attribution` did NOT execute server-side: query
+        the attribution via get_attributions(<auth_id>) post-batch
+        and confirm the row still exists. (Pre-flight validation
+        passed shape; the runtime failure was inside the sub-tool's
+        own owner check, AFTER dispatch — proves collect-all
+        semantics catch runtime failures, not just shape errors.)
 
 4b. **Nesting refused.** sme-d9-pay calls:
     mcp_call_batch(agent_id='sme-d9-pay', calls=[
