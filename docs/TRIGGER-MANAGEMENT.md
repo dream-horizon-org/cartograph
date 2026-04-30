@@ -418,7 +418,7 @@ cadence (e.g. drop to 60s during interactive demo runs).
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
 
-> **Implementation status.** 107 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 8). Phase 7.4.11 added `delete_edge`. Phase 7.4.12 added 3 bulk write variants. Phase 7.4.13 pre-injects action-items snapshot in invocation user message. Phase 7.4.14 introduces wake debouncing (5-min window, see §2.4). **Phase 8 (2026-04-29) added 18 tools: 4 corrective delete singletons (delete_attribution, delete_catalog, delete_flow, delete_unresolved); 5 corrective delete bulks (their bulks + delete_edges_bulk); 4 write bulks (upsert_flows_bulk, insert_unresolved_bulk, ack_broadcasts_bulk, ack_terminals_bulk) plus an ON CONFLICT idempotency upgrade to insert_unresolved with a UNIQUE migration; 5 multi-component read bulks (get_components/attributions/component_edges/catalogs/flows _bulk).** See AGENT-PROMPTS.md §0 for prompt rules.
+> **Implementation status.** 108 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 9). Phase 7.4.11 added `delete_edge`. Phase 7.4.12 added 3 bulk write variants. Phase 7.4.13 pre-injects action-items snapshot in invocation user message. Phase 7.4.14 introduces wake debouncing (5-min window, see §2.4). **Phase 8 (2026-04-29) added 18 tools: 4 corrective delete singletons (delete_attribution, delete_catalog, delete_flow, delete_unresolved); 5 corrective delete bulks (their bulks + delete_edges_bulk); 4 write bulks (upsert_flows_bulk, insert_unresolved_bulk, ack_broadcasts_bulk, ack_terminals_bulk) plus an ON CONFLICT idempotency upgrade to insert_unresolved with a UNIQUE migration; 5 multi-component read bulks (get_components/attributions/component_edges/catalogs/flows _bulk).** **Phase 9 (2026-04-30) added 1 tool: mcp_call_batch — server-side parallel dispatcher for heterogeneous batches (108th tool); see §3.4 below.** See AGENT-PROMPTS.md §0 for prompt rules.
 >
 > **Phase 7.4.4 + 7.4.5 wire-shape changes:**
 > - `vector_search` returns lean projection per row (id + identity columns + similarity) — no embedding vectors, no doc/slice/metadata blobs. Search-then-fetch pattern: callers follow up with `get_*(id)` for full detail.
@@ -1016,6 +1016,48 @@ decommission_component(agent_id, component_id, reason)
 
 decommission_components_bulk(agent_id, component_ids[], reason)
   Bulk variant; requires explicit id list (no "all components" filter).
+```
+
+### 3.4 Batch dispatcher (Phase 9.1)
+
+```
+mcp_call_batch(agent_id, calls[]) -> dict
+  Server-side parallel dispatcher for heterogeneous sub-calls. The
+  agent emits ONE mcp_call_batch tool_use carrying N sub-calls of
+  mixed shapes; server fans them out concurrently via a thread pool
+  (ThreadPoolExecutor, max 8 workers) and returns one bundled
+  response. The LLM pays 1 round-trip instead of N.
+
+  calls[i] = {"tool": str, "args": dict}
+    tool: name of any registered MCP tool (except mcp_call_batch).
+    args: kwargs for that tool. agent_id is auto-injected if absent;
+          preserved if present (proxy paths).
+
+  Returns:
+    {"results": [{"idx": int, "tool": str, "ok": bool,
+                  "result": ...} OR
+                 {"idx": int, "tool": str, "ok": False,
+                  "error": str}]}
+
+  Hard rules (server-enforced):
+    - No nesting. mcp_call_batch in calls[] → reject pre-flight.
+    - Cap 50 sub-calls per batch.
+    - Collect-all (never strict-mode). One sub-call failure does NOT
+      abort siblings.
+    - Each sub-call dispatches through its own @mcp.tool wrapper, so
+      auth + state-machine validation + mcp_audit fire normally per
+      sub-call. Outer batch also gets its own mcp_audit row.
+
+  Why this exists: Claude Code's `claude -p` subprocess disables
+  emission of >1 tool_use per assistant turn (DEMO8 verified
+  0/851). Native parallel tool_use blocks land as serialised
+  separate turns. mcp_call_batch is the only path on this runtime
+  to get one-round-trip-multiple-calls.
+
+  Use when N DIFFERENT tools in one logical step (wake-start
+  hygiene sweep, resolver triangulation, mid-investigation reads).
+  For N same-shape rows, prefer the matching bulk variant from §3.3
+  (which itself is callable inside mcp_call_batch).
 ```
 
 ---

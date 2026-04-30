@@ -1,4 +1,4 @@
-# Cartograph — Post-Compaction Recollection (2026-04-29 EOD)
+# Cartograph — Post-Compaction Recollection (2026-04-30 — Phase 9 shipped)
 
 > **Read this FIRST after compaction.** Then `git log --oneline -25`,
 > then the 7 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
@@ -10,11 +10,12 @@
 
 ---
 
-## 1. Branch + commit state (HEAD as of 2026-04-29 EOD)
+## 1. Branch + commit state (HEAD as of 2026-04-30, Phase 9 shipped)
 
 - **Working dir:** `/Users/venkata.manohar/release-agent/docs/service-dependency/cartograph`
 - **Active branch:** `feat/trigger-manager-cartograh-mcp`
-- **HEAD:** `27429fe` (docs sync — all 3 token-optimisation rounds shipped)
+- **HEAD:** `236e80a` (Phase 9.2: caveman output style + per-wake reminder).
+  Phase 9 sub-commits: `b587055` plan, `801c577` 9.1 mcp_call_batch, `236e80a` 9.2 caveman.
 - **Phase 6 (Globe) parked:** `feat/globe-experimental` HEAD `1dae0c7` — `docs/GLOBE-MERGE-BRIEF.md` has all decisions. **Do NOT recreate Globe on main; merge that branch when ready.**
 
 Last 18 commits, most recent first:
@@ -65,7 +66,7 @@ sleep 3
 /opt/homebrew/bin/python3.10 -u -m main                    > /tmp/cartograph-logs/agents.log  2>&1 &
 /opt/homebrew/bin/python3.10 -u -m admin_ui.server         > /tmp/cartograph-logs/admin_ui.log 2>&1 &
 sleep 4
-grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1   # expect: 107 tools
+grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1   # expect: 108 tools
 ```
 
 Check live: `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8200/api/agents` → 200.
@@ -76,7 +77,7 @@ Check live: `curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8200/api/
 
 The DB was **wiped + recreated** at 14:48 today in preparation for DEMO8 (the upcoming comprehensive test prompt). Current DB state:
 
-- 20 tables, 107 tools registered, only orch + resolver auto-spawned by main.py boot:
+- 20 tables, 108 tools registered, only orch + resolver auto-spawned by main.py boot:
   - `orch-2b7536c8` (orchestrator, idle)
   - `res-5b7f59d3` (resolver, idle)
 - Zero components, zero attributions, zero edges, zero catalogs, zero flows.
@@ -97,7 +98,7 @@ docker exec -i cartograph-postgres-1 psql -U cartograph -d cartograph < /tmp/car
 
 ---
 
-## 4. Phase status (all 0 → 7.4.14 ✅; Phase 6 PARKED; Phase 7.4.15 PROPOSED — see §11)
+## 4. Phase status (all 0 → 9 ✅; Phase 6 PARKED)
 
 | Phase | Status | Key contribution |
 |---|---|---|
@@ -113,22 +114,25 @@ docker exec -i cartograph-postgres-1 psql -U cartograph -d cartograph < /tmp/car
 | 7.4.13 | ✅ 2026-04-29 | Pre-injected action items in invocation user message — `agent_manager._build_action_items_snapshot()` runs ONE SQL aggregating pending counts (consolidations/tasks/clarifications/chats/broadcasts/terminal_pending/proxied), embeds in user message NOT system_prompt (cache-safety critical). Skips first-turn `get_action_items_summary` round-trip. |
 | 7.4.14 | ✅ 2026-04-29 | Wake debouncing 5-min — new `agent_runs.first_pending_at TIMESTAMPTZ` column. Trigger scanner refuses lock until window elapsed unless override (admin chat OR `mutation_assigned_to` on state=M consolidation). Cleared on yield. |
 | **8** | **✅ SHIPPED 2026-04-29** | **Token Optimisation + Gap Closings.** 18 new tools (89 → 107). Hard-delete chosen over soft-delete (see §11). 7 sub-batches across 7 commits. Closes the 4-row-type corrective surface, finishes Round-4 bulks, eliminates the notify.py PostToolUse race, makes insert_unresolved idempotent. |
+| **9** | **✅ SHIPPED 2026-04-30** | **Round 5 token-opt — mcp_call_batch + caveman.** Closes the two unrealised levers from DEMO8 §7.1 + §7.2. 9.1 (`801c577`): mcp_call_batch — 108th MCP tool, server-side `ThreadPoolExecutor` dispatch for heterogeneous sub-calls; cap 50; no nesting. 9.2 (`236e80a`): caveman output style at the TOP of MISSION_AND_VOCABULARY + per-wake reminder in `_GENERIC_INVOCATION_PROMPT_TEMPLATE`; scope expanded to consolidation bodies + blocker_detail + insights + admin replies (only `component_doc_md` stays normal english). §7.3 / §7.4 / §7.5 dropped or parked per user review. Tool count 107 → 108. |
 
 ---
 
-## 5. Token optimisation — ALL 3 ROUNDS SHIPPED 2026-04-29
+## 5. Token optimisation — ALL 4 ROUNDS SHIPPED (Rounds 1-3: 2026-04-29; Round 5: 2026-04-30)
 
 | # | Lever | Saving | Commit |
 |---|---|---:|---|
-| 0 | Parallel tool calls (BATCH block) | 20-30% | `5b3144d` |
-| 1 | Concise output rule | 8-10% | `c9bb733` |
+| 0 | Parallel tool calls (BATCH block — original) | 20-30% target / NOT realised | `5b3144d` |
+| 1 | Concise output rule (superseded by caveman §9.2) | 8-10% / NOT realised | `c9bb733` |
 | 2 | Orch → sonnet-4-6 (resolver STAYS opus-4-6) | 10-14% | `53a6ef1` |
 | 3 | Top-3 bulk MCP write tools | 6-9% | `716554d` |
 | 4 | BULK CALLS DECISION LADDER prompt | 3-5% | `135bc57` + `5e969a1` |
 | 5 | Pre-inject action items in user message | 3-5% | `08c58d1` |
 | 6 | Wake debouncing 5-min | 10-15% | `8d1a7d3` |
+| **7 (R5 §9.1)** | **mcp_call_batch — heterogeneous batch dispatcher** | **12-18%** | `801c577` |
+| **8 (R5 §9.2)** | **Caveman output style + per-wake reminder** | **12-18%** | `236e80a` |
 
-**Compound math (project lifetime $1,234.85):** ~$700 spend on equivalent workload, ~43% reduction, ~$535 saved. ~$1,500-1,800/month at sustained scale.
+**Compound math (project lifetime $1,234.85):** post-Round-3, ~43% reduction; post-Round-5 ceiling ~60-83% if both new levers bite. DEMO9 (Phase 9 verification run) measures actuals.
 
 **Levers explicitly DROPPED** (do NOT reintroduce):
 - Session reset at phase boundaries — loses context continuity.
@@ -141,7 +145,7 @@ docker exec -i cartograph-postgres-1 psql -U cartograph -d cartograph < /tmp/car
 
 ---
 
-## 6. Tool surface (89 total)
+## 6. Tool surface (108 total)
 
 ```
 action_items (2):     get_action_items_summary, get_action_items_detail
@@ -191,12 +195,15 @@ catalogs (8):         upsert_catalog, upsert_catalogs_bulk (7.4.12),
                       get_my_catalog_callers,
                       get_unmatched_callers, get_orphan_catalogs,
                       **delete_catalog** + **_bulk** (8.2/8.3)
+batch (1):            **mcp_call_batch** (9.1) — server-side parallel
+                      dispatcher for heterogeneous sub-calls; cap 50;
+                      no nesting
 
 Plus auto-wrapped: every @mcp.tool() registration wrapped by
 cartograph_mcp.audit.audited (Phase 5.10) → mcp_audit table.
 ```
 
-**Total: 107.** Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`.
+**Total: 108.** Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`.
 
 ---
 
@@ -350,7 +357,7 @@ Comprehensive superset of DEMO7 + everything since (Phase 7.4.7 → 8). Tag conv
 ## 16. Re-hydration checklist (do in order post-compaction)
 
 1. **`git log --oneline -25`** — confirm `27429fe` is HEAD on `feat/trigger-manager-cartograh-mcp`.
-2. **`grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`** — should show `107 tools`. If not, MCP server isn't running; restart per §2.
+2. **`grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`** — should show `108 tools`. If not, MCP server isn't running; restart per §2.
 3. **Read this doc fully.**
 4. **Read the 7 docs** (HLD / SCHEMA / TRIGGER-MANAGEMENT / AGENT-PROMPTS / IMPLEMENTATION-PHASES / ONE-PAGER / **PROMPT-ENHANCEMENTS**) — user will paste these.
 5. **Check the 3 memory files** at `~/.claude/projects/-Users-venkata-manohar-release-agent-docs-service-dependency/memory/` (auto-loaded).

@@ -48,7 +48,29 @@ Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULAR
 - **`get_action_items_summary` is uniform `dict[str, int]`.** Every value is a count: consolidations_pending, tasks_pending, clarifications_pending, unacked_chats, unacked_broadcasts, terminal_pending_ack, proxied_count. Rich per-proxy breakdown (proxy_agent_id, deactivation_reason, depth, item lists) lives on `get_action_items_detail.proxied`. Triage flow: call summary FIRST, then call detail when `proxied_count > 0`.
 - **`upsert_catalog`, NOT `upsert_edge_catalog`.** The latter is a deprecated back-compat wrapper one redirect away from removal. Use the noun-form `upsert_catalog(component_id, kind, identifier)` for all new declarations. The hygiene tool `get_unmatched_callers(your_agent_id)` directly surfaces missing catalogs without manual cross-referencing.
 
-**Concise output rule (2026-04-29, commit `c9bb733`):** new `== CONCISE OUTPUT — DON'T NARRATE, DON'T REGURGITATE ==` block in `MISSION_AND_VOCABULARY` shared with all 4 agent types. Default ≤2 sentences of explanation per turn (unless admin asked or filling a structured artifact); no preambles ("I'll start by...", "Let me first..."), no post-hoc summaries restating tool results, no methodology explanations, no rephrasing of admin's input.
+**Caveman output style (Phase 9.2, 2026-04-30, commit `236e80a`):** `== OUTPUT FORMAT — CAVEMAN ENGLISH ==` is now the FIRST block in `MISSION_AND_VOCABULARY` (above the "WHAT CARTOGRAPH DOES" intro). Frames default voice as telegraphic English: drop articles (a / the), drop conjunctions (and / then / but), drop most adverbs, drop ALL preambles. Keep nouns / verbs / identifiers / file paths / IDs / hashes verbatim.
+
+Scope (broad — replaces and supersedes the earlier concise rule from commit `c9bb733`):
+- CAVEMAN: status reports / mid-task narration / acks / tool-result reactions / final assistant turn before yield / consolidation message bodies / `blocker_detail` / `record_insight` body / admin chat REPLIES (caveman-light, since user is technical).
+- NORMAL ENGLISH (only path that stays prose): `component_doc_md` — renders in graph-viz hover popup for end-users browsing the graph; readable prose helps them.
+
+Hard caveat carried verbatim from the earlier concise rule: NEVER compromise on identifiers / file paths / hostnames / component ids / consolidation ids / line numbers / hashes / version strings / error messages / specific data. The caveman rule trims english only, not evidence.
+
+Three worked verbose-vs-caveman comparisons in the prompt with token counts so the model can self-anchor.
+
+Per-wake reminder added to `_GENERIC_INVOCATION_PROMPT_TEMPLATE` in `agent_manager.py` — two short blocks (`== OUTPUT STYLE ==` + `== BATCHING ==`) appearing before the ACTION ITEMS SNAPSHOT. The system prompt caches; the user message is fresh every turn — late instructions land hardest in the user message.
+
+Estimated saving: 12-18% on top of currently realised reductions (broader scope than the original 8-10% target — bodies of consolidation messages, blocker_detail, insights all caveman now).
+
+**mcp_call_batch (Phase 9.1, 2026-04-30, commit `801c577`):** new 108th MCP tool — server-side parallel dispatcher for heterogeneous sub-calls. The agent emits ONE `mcp_call_batch` tool_use carrying N sub-calls of mixed shapes; server fans them out concurrently via `ThreadPoolExecutor` and returns one bundled response. The LLM pays 1 round-trip instead of N.
+
+Agent-facing surface change: BULK CALLS DECISION LADDER refreshed in `MISSION_AND_VOCABULARY` (3 rungs):
+  RUNG 1 — direct single call (1 tool, 1 row).
+  RUNG 2 — bulk variant (atomic, same tool × N rows ≥ 3, cap 500/call).
+  RUNG 3 — mcp_call_batch (heterogeneous: N different tools in one turn, cap 50 sub-calls/batch).
+  DON'T do native parallel tool_use blocks — Claude Code's `claude -p` subprocess disables emission of multiple tool_use per turn (DEMO8 verified 0/851). mcp_call_batch is the only path on this runtime that gives one-round-trip-multiple-calls.
+
+The old "Python script via Bash for >500 rows" rung is dropped — moot now that 4 × 500-row bulk calls fit inside one `mcp_call_batch`.
 
 **CRITICAL caveat:** the rule trims English/jargon only — DO NOT compromise on identifiers, file paths, hostnames, IDs, line numbers, hashes, version strings, error messages, or specific data. Concrete data is what the next agent / admin / future-self needs.
 

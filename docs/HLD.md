@@ -1240,7 +1240,7 @@ READ-ONLY (one per plane, scoped per agent):
 WRITE TARGET (single, shared by all agents):
 
   cartograph-db  (FastMCP streamable-http on :8100/mcp)
-    LIVE groups (107 tools registered in src/cartograph_mcp/server.py;
+    LIVE groups (108 tools registered in src/cartograph_mcp/server.py;
     see TRIGGER-MANAGEMENT.md §3 for per-tool contracts):
       action_items    (2):  summary, detail
       chat            (4):  send, ack, unacked, history
@@ -1277,6 +1277,10 @@ WRITE TARGET (single, shared by all agents):
       search          (1):  vector_search (lean projection per Phase 7.4.4)
       terminal_acks   (1):  ack_terminal (Phase 7.1)
       insights        (1):  record_insight (Phase 5.9)
+      batch           (1):  mcp_call_batch (Phase 9.1) — server-side
+                            parallel dispatcher for heterogeneous
+                            sub-calls; one LLM round-trip per batch;
+                            cap 50 sub-calls; no nesting.
 
     Phase 4 — mutation + proxy (shipped):
       execute_mutation, complete_consolidation, absorb_agent,

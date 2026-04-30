@@ -4136,9 +4136,15 @@ No other schema changes.
 
 ---
 
-## Phase 9: Round 5 token-opt — mcp_call_batch + caveman output style 🚧 IN FLIGHT
+## Phase 9: Round 5 token-opt — mcp_call_batch + caveman output style ✅
 
-**Status (2026-04-30):** plan landed; implementation in progress. Closes the two unrealised levers from DEMO8 token-savings gap analysis (PROMPT-ENHANCEMENTS §7.1 + §7.2).
+**Status (2026-04-30):** SHIPPED. 4 commits on `feat/trigger-manager-cartograh-mcp`:
+- `b587055` — 9.0 plan
+- `801c577` — 9.1 mcp_call_batch implementation (108th tool, 18 new tests, all green)
+- `236e80a` — 9.2 caveman output style + per-wake reminder
+- (this commit) — 9.3 doc sync pass
+
+Tool count: 107 → 108. Closes the two unrealised levers from DEMO8 token-savings gap analysis (PROMPT-ENHANCEMENTS §7.1 + §7.2).
 
 DEMO8 measured 0/851 assistant messages emitted >1 tool_use block — Claude Code's agent loop disables parallel tool_use internally, no CLI/settings/env override exists. And the Round 1 #1 concise output rule barely shifted the text-only-message ratio (44.5% pre → 46.5% post). Phase 9 attacks both at the architecture layer rather than via further prompt nudges.
 
@@ -4291,20 +4297,18 @@ System prompt is cached + skimmed by the model after first wake; the user messag
 
 Above the original 43% target by a wide margin. DEMO9 (this branch's verification run) measures actuals.
 
-### 9.4 Sub-phase ordering + commit cadence
+### 9.4 Sub-phase ordering + commit cadence (SHIPPED)
 
 ```
-9.0 plan (this commit)                ← doc-only
-9.1 mcp_call_batch implementation     ← code + tests
-9.2 caveman + per-wake reminder       ← code (prompt files) + smoke
-9.3 doc sync pass                     ← HLD / SCHEMA / TRIGGER-MGMT /
-                                        AGENT-PROMPTS / POST-COMPACTION /
-                                        IMPLEMENTATION-PHASES /
-                                        PROMPT-ENHANCEMENTS
+9.0 plan                              ← b587055 doc-only
+9.1 mcp_call_batch implementation     ← 801c577 code + 18 tests, all green
+9.2 caveman + per-wake reminder       ← 236e80a base.py + agent_manager.py
+9.3 doc sync pass                     ← (this commit)
 9.4 DEMO9 prompt                      ← docs/oorch-test-prompt-demo9
+                                        (next commit)
 ```
 
-Each step = own commit + push. After 9.3 the user will run DEMO9 to verify in-the-wild behaviour.
+After 9.4 the user runs DEMO9 to verify in-the-wild behaviour: actual parallel-tool-call rate via mcp_call_batch usage in JSONL, text-only-message ratio shift, per-message output-token average shift.
 
 ### 9.5 What this is NOT solving
 
