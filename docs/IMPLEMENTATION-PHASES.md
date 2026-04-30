@@ -4136,21 +4136,199 @@ No other schema changes.
 
 ---
 
-## Phase 9+: Future phases (planned, not started)
+## Phase 9: Round 5 token-opt — mcp_call_batch + caveman output style 🚧 IN FLIGHT
 
-**Phase 9 — Phase-flow completion** (orchestrator-driven sweeps):
+**Status (2026-04-30):** plan landed; implementation in progress. Closes the two unrealised levers from DEMO8 token-savings gap analysis (PROMPT-ENHANCEMENTS §7.1 + §7.2).
+
+DEMO8 measured 0/851 assistant messages emitted >1 tool_use block — Claude Code's agent loop disables parallel tool_use internally, no CLI/settings/env override exists. And the Round 1 #1 concise output rule barely shifted the text-only-message ratio (44.5% pre → 46.5% post). Phase 9 attacks both at the architecture layer rather than via further prompt nudges.
+
+### 9.0 Scope
+
+Two levers:
+1. **mcp_call_batch (108th tool)** — server-side parallel dispatcher for heterogeneous batches. Recovers the 12-18% token saving lost to Claude Code's disabled native-parallel.
+2. **Caveman output style** — telegraphic English block at the TOP of `MISSION_AND_VOCABULARY` + per-wake user-message reminder. Recovers the 8-12% saving the buried concise rule didn't deliver.
+
+Out of scope for Phase 9 (parked):
+- §7.3 WD-owner-wake (existing 5-min debounce already bounds the cost — verified during user review).
+- §7.4 auto-handoff clarification on resolver M-transition (good-to-have, not urgent).
+- §7.5 pre-compute transfer ids before split nomination (drift risk on concurrent consolidations — premature optimisation).
+
+### 9.1 mcp_call_batch (108th tool)
+
+**Design.** The agent calls ONE `mcp_call_batch` tool with a list of sub-calls. Server-side, the wrapper validates → dispatches each sub-call concurrently via `concurrent.futures.ThreadPoolExecutor` → collects all results (success + per-call errors) → returns one structured response. The LLM sees ONE round-trip instead of N.
+
+**Signature:**
+```python
+mcp_call_batch(
+    agent_id: str,
+    calls: list[dict],   # [{tool: str, args: dict}, ...]
+) -> dict
+```
+
+Returns:
+```json
+{
+  "results": [
+    {"idx": 0, "tool": "get_my_catalogs", "ok": true, "result": {...}},
+    {"idx": 1, "tool": "get_unmatched_callers", "ok": false, "error": "..."}
+  ]
+}
+```
+
+**Rules (server-enforced):**
+- `agent_id` is the caller. If a sub-call's `args` doesn't carry its own `agent_id`, the wrapper injects the caller's id. If it carries a DIFFERENT id, the sub-call is allowed to keep it (proxy paths) — sub-call's own ownership/auth checks fire as normal.
+- **No nesting.** If any sub-call's `tool == 'mcp_call_batch'`, refuse the whole batch with a clear error. Recursive batches have no benefit (always flattenable to one outer batch) and risk pathological recursion.
+- **Cap:** 50 sub-calls per batch. Above that, the SME prompt directs use of bulk variants (`upsert_attributions_bulk` etc.) which take 500 rows each.
+- **Collect-all, never strict-mode.** Matches native parallel tool_use semantics: each sub-call succeeds or fails on its own; one failure does NOT abort siblings.
+- **Sub-call audit:** each sub-call still goes through its `@mcp.tool()`-registered wrapper, so the existing `audited` decorator records it in `mcp_audit`. The outer `mcp_call_batch` call is also audited as a single row.
+
+**Concurrency:** `ThreadPoolExecutor(max_workers=min(8, len(calls)))`. Cartograph's MCP tools are sync Python over a psycopg connection pool — true I/O parallelism on DB operations. Mutation paths that need ordering already have server-side state-machine validation, so concurrent dispatch is safe.
+
+**Decision Ladder (revised in SME prompt):**
+
+```
+RUNG 1 — Direct single call.        When: 1 tool, 1 row.
+RUNG 2 — Bulk variant (atomic).     When: same tool × N rows (≥3). Examples:
+                                          upsert_attributions_bulk, ack_terminals_bulk, ...
+RUNG 3 — mcp_call_batch.            When: N different tools in one logical step
+                                          (wake-start hygiene sweep, resolver triangulation,
+                                          mid-investigation reads).
+DON'T do native parallel tool_use blocks. Claude Code's agent loop serialises them today —
+emitting [tool_use_A, tool_use_B] in one assistant turn does NOT save round-trips. Use
+mcp_call_batch instead for mixed-tool batches.
+```
+
+(Explicit removal of the old "RUNG 2 — Native parallel tool_use blocks" + the "RUNG 3 / 4 — Python script via Bash" rungs. Native-parallel doesn't work; the Python-bash bypass is moot now that mcp_call_batch can chain `upsert_attributions_bulk` calls of 500 rows each through ONE batch.)
+
+**Files:**
+- `src/cartograph_mcp/tools/call_batch.py` — new (~80 LOC).
+- `src/cartograph_mcp/server.py` — register `mcp_call_batch` + `_BATCH_DISPATCH` table mapping each tool name → its decorated function.
+- `tests/mcp_tools/test_call_batch.py` — new tests.
+
+**Tests (~12 new):**
+- happy-path heterogeneous batch (3 different reads in one call).
+- per-call error collection (one bad arg → that call returns error, others succeed).
+- nesting refusal — `mcp_call_batch` inside calls[] rejects whole batch.
+- empty batch → `{results: []}` (no error).
+- max-50 cap.
+- unknown tool name → error before dispatch.
+- agent_id injection when sub-call omits it.
+- agent_id preservation when sub-call carries different id (proxy path).
+- audit: outer batch + every sub-call recorded in `mcp_audit`.
+- bulk + read mix in one batch (e.g. `upsert_attributions_bulk` + `get_my_catalogs` together).
+- exception during dispatch is caught and reported per-call (not raised to caller).
+- ThreadPoolExecutor concurrency (call 4 sleep tools in parallel; total time < 4× single).
+
+**Tool count:** 107 → 108.
+
+### 9.2 Caveman output style
+
+**Symptom (DEMO8):** 396/851 assistant messages were text-only (no tool_use), avg ~150-250 output tokens of pure English narration. Baseline 44.5% → post-fix 46.5% basically unchanged. The Round 1 #1 concise rule lives ~50% through the 76k-char system prompt and gets skimmed.
+
+**Fix.** New `== OUTPUT FORMAT — CAVEMAN ENGLISH ==` block at the TOP of `MISSION_AND_VOCABULARY` (above everything else, including current intro paragraph). Telegraphic English — drop articles, conjunctions, most adverbs, all preambles. Keep nouns, verbs, identifiers, numbers verbatim.
+
+**Scope (intentionally broad):**
+
+| Context | Format | Why |
+|---|---|---|
+| Status reports / mid-task narration / acks | CAVEMAN | low-info |
+| Tool-result reactions | CAVEMAN | low-info |
+| Final assistant turn before yield | CAVEMAN | low-info |
+| Consolidation message bodies (evidence) | CAVEMAN | other SMEs read it; trained on same prompt |
+| `blocker_detail` | CAVEMAN | orch reads it; trained on same prompt |
+| `record_insight.body` | CAVEMAN | admin scans Insights tab; tech-fluent reader |
+| Admin chat REPLIES to user | CAVEMAN-LIGHT | user is tech-fluent; terse > verbose |
+| `component_doc_md` | NORMAL ENGLISH | rendered in graph-viz hover popup for end-users browsing the graph |
+
+Only `component_doc_md` retains normal English — every other path goes caveman.
+
+**Hard caveat (carried verbatim from concise rule):** caveman trims English/preambles ONLY. NEVER compromise on identifiers, file paths, hostnames, IDs, numbers, hashes, version strings, error messages. The brevity comes from cutting prose, not data.
+
+**Worked examples** (in the prompt):
+```
+VERBOSE: "I'll start by checking my action items, then process each one in turn.
+          I just looked at task ee1ddfc7 and it's now in WD status."
+CAVEMAN: "checked items. task ee1ddfc7 → WD."
+
+VERBOSE: "Let me investigate the consolidation thread first. I'll read it,
+          then look at the evidence both SMEs cited, then form my own opinion."
+CAVEMAN: "reading thread. checking evidence A + B. forming view."
+
+VERBOSE: "I confirmed via vector_search that catalog POST /payments/charge
+          (1163c724) on payments-svc is a strong match for the caller's
+          identifier. Binding the edge now."
+CAVEMAN: "vector_search confirmed. catalog POST /payments/charge (1163c724)
+          on payments-svc strong match. binding edge."
+```
+
+**Per-wake reminder.** A single line injected into the per-wake user message (alongside the existing Phase 7.4.13 `ACTION ITEMS SNAPSHOT` block):
+
+```
+== OUTPUT STYLE ==
+Caveman English outside reserved long-text contexts (component_doc_md only).
+Identifiers / paths / IDs verbatim. No preambles.
+```
+
+System prompt is cached + skimmed by the model after first wake; the user message is fresh every turn — that's where late instructions land hardest.
+
+**Estimated saving:** 12-18% (broader scope than original 8-10% target — bodies of consolidation messages, blocker_detail, insights all caveman now).
+
+**Files:**
+- `src/agent_management/agent_types/base.py` — new CAVEMAN block at top of `MISSION_AND_VOCABULARY`.
+- `src/agent_management/agent_manager.py` — extend the per-wake user-message template to include the OUTPUT STYLE reminder.
+- Smoke test: `SYSTEM_PROMPT_TEMPLATE.format(plane='x', resource_id='y')` for SME + iterator (the templated ones); module import for orch + resolver.
+
+**Tests:** prompt-only edits — manual verification via DEMO9. No new pytest test file.
+
+### 9.3 Combined ceiling
+
+| Phase | Lever | Saving |
+|---|---|---:|
+| Already realised (Phases 1-8) | Rounds 1-3 + Phase 8 | ~35-50% |
+| **Phase 9.1** | mcp_call_batch | **+12-18%** |
+| **Phase 9.2** | Caveman output style | **+12-18%** |
+| **Phase 9 total** | | **~60-83% lifetime reduction** |
+
+Above the original 43% target by a wide margin. DEMO9 (this branch's verification run) measures actuals.
+
+### 9.4 Sub-phase ordering + commit cadence
+
+```
+9.0 plan (this commit)                ← doc-only
+9.1 mcp_call_batch implementation     ← code + tests
+9.2 caveman + per-wake reminder       ← code (prompt files) + smoke
+9.3 doc sync pass                     ← HLD / SCHEMA / TRIGGER-MGMT /
+                                        AGENT-PROMPTS / POST-COMPACTION /
+                                        IMPLEMENTATION-PHASES /
+                                        PROMPT-ENHANCEMENTS
+9.4 DEMO9 prompt                      ← docs/oorch-test-prompt-demo9
+```
+
+Each step = own commit + push. After 9.3 the user will run DEMO9 to verify in-the-wild behaviour.
+
+### 9.5 What this is NOT solving
+
+- Output volume on `component_doc_md` — those are intentionally human-facing and stay normal English.
+- Native parallel tool_use — confirmed unfixable from our side; mcp_call_batch is the workaround.
+- §7.3 / §7.4 / §7.5 — parked per user review.
+
+---
+
+## Phase 10+: Future phases (planned, not started)
+
+**Phase 10 — Phase-flow completion** (orchestrator-driven sweeps):
 - **Resolution phase orchestration** — wake config-SMEs to resolve `unresolved` table rows; re-run cosine ladder against now-consolidated component registry.
 - **Edge Discovery phase orchestration** — dedicated bidirectional-validation pass + telemetry trace edge injection.
 - **User Feedback phase** — admin UI workflows for "merge these two" / "missed this" / "this doesn't exist anymore" → orchestrator routes to the right SME(s).
 
-**Phase 10 — Observability + cost controls** (HLD §11):
+**Phase 11 — Observability + cost controls** (HLD §11):
 - Dashboard on `agent_runs`: token usage, phase progress, unresolved count, blocker count, B1/B2/R/M/MD/D/F counts.
 - `max_turns` per agent per phase, embedding budget caps, consolidation max-rounds.
 
-**Phase 11 — DM between agents** (HLD §11.2):
+**Phase 12 — DM between agents** (HLD §11.2):
 - Lighter-weight than consolidation for one-off SME↔SME clarifications.
 
-**Phase 12 — Knowledge pool** (HLD §11.3):
+**Phase 13 — Knowledge pool** (HLD §11.3):
 - Shared facts table any agent can read/write ("all dream11 services use `{service}.dream11.local`").
 
 **Phase 6 — Globe (sphere-constrained graph view)** is parked on `feat/globe-experimental` branch. Re-introduce by merging that branch when ready; doc sync brief lives at `docs/GLOBE-MERGE-BRIEF.md` on that branch.

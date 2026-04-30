@@ -1520,13 +1520,28 @@ captures intent.
 
 ---
 
-## 7. Round 5 backlog — DEMO8 token-savings gap analysis (2026-04-29)
+## 7. Round 5 backlog — DEMO8 token-savings gap analysis (2026-04-29) — RESOLVED via Phase 9
 
 DEMO8 ran end-to-end (22/23 phases PASS, 1 FAIL). Token-optimisation
 levers from Rounds 1-3 + Phase 8 shipped; ~35-50% of the 43% target
 realised. Two prompt-induced changes are NOT biting; three insights
-from agents flagged real follow-ups. Quantification + fix paths
-below.
+from agents flagged real follow-ups.
+
+**Resolution (2026-04-30):** after user review, two of the five §7 entries
+ship as Phase 9 (`docs/IMPLEMENTATION-PHASES.md` Phase 9 section),
+three are dropped. Summary:
+
+| Entry | Decision | Why |
+|---|---|---|
+| §7.1 Parallel tool calls | **→ Phase 9.1 mcp_call_batch** | Verified Claude Code disables native parallel internally (no CLI/settings/env override). Server-side parallel dispatcher is the workaround. |
+| §7.2 Concise output | **→ Phase 9.2 caveman style** | Concise rule was buried mid-prompt; caveman block goes to the TOP + per-wake reminder. Scope expanded — bodies of consolidation messages, blocker_detail, insights all caveman now. |
+| §7.3 WD-owner-wake | **DROPPED** | Existing 5-min wake debounce already bounds the cost of repeat-wakes on unchanged WD. Owner SHOULD wake on WD (responsible for WD→TC); debounce coalesces to 1 wake per 5 min when nothing changes — that's the design. |
+| §7.4 Auto-handoff at M | **PARKED (good-to-have)** | Server-enforcing the Phase 7.2 pre-merge handoff convention is a correctness improvement but not a token win. Defer until prompt-compliance proves insufficient in real runs. |
+| §7.5 Pre-compute transfer ids | **DROPPED** | Stashing transfer plan at nomination time risks staleness on the mutation wake (parent's slice may have changed). Re-grepping at mutation time is correct — the SME's "tactic_win" insight was a premature optimisation. |
+
+The Phase 9 §9.0 scope decisions, sub-phase ordering, and ceiling
+math live in `docs/IMPLEMENTATION-PHASES.md` Phase 9; this section
+preserves the original DEMO8 diagnostic context.
 
 ### 7.1 [HIGH] Parallel tool calls — 0/851 messages emitted >1 tool_use
 
