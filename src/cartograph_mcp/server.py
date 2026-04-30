@@ -35,6 +35,7 @@ from cartograph_mcp.tools import sleep as sleep_tool
 from cartograph_mcp.tools import insights as insights_tool
 from cartograph_mcp.tools import terminal_acks as terminal_acks_tool
 from cartograph_mcp.tools import catalogs as catalogs_tool
+from cartograph_mcp.tools import call_batch as call_batch_tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -2029,6 +2030,171 @@ def record_insight(
     every mild irritation.
     """
     return insights_tool.record_insight(agent_id, kind, target, body, evidence)
+
+
+# ============ BATCH DISPATCH (Phase 9.1) ============
+
+# Lazy build the dispatch map from this module's namespace. Each entry
+# points at the @mcp.tool()-decorated wrapper (which is the audited
+# version, since `cartograph_mcp.audit.install` patches mcp.tool to
+# wrap every registration). Sub-calls dispatched through mcp_call_batch
+# therefore each get their own row in mcp_audit AND their own
+# auth/state validation as if they had been called individually.
+#
+# Built lazily (first call) so all `def`s above have run by the time
+# we resolve them.
+_BATCH_DISPATCH: dict | None = None
+
+
+def _build_batch_dispatch() -> dict:
+    """Enumerate every @mcp.tool() function in this module by name.
+
+    Excludes mcp_call_batch itself (nesting is rejected at the call
+    site as well, but excluding here is belt-and-suspenders).
+    """
+    g = globals()
+    eligible = [
+        # action_items
+        "get_action_items_summary", "get_action_items_detail",
+        # chat
+        "send_chat", "ack_chats", "get_unacked_chats", "get_chat_history",
+        # broadcast
+        "send_broadcast", "ack_broadcast", "ack_broadcasts_bulk",
+        "get_unacked_broadcasts", "update_broadcast_persistence",
+        # secrets
+        "put_secret", "get_secret", "list_secrets_for_plane", "delete_secret",
+        # tasks
+        "create_task", "respond_task", "raise_blocker",
+        "get_my_tasks", "get_task_thread",
+        # resources
+        "upsert_resource", "upsert_resources_bulk",
+        "reject_resource", "reject_resources_bulk",
+        "mark_resource_done",
+        "get_resource", "list_resources_for_plane", "list_all_resources",
+        "get_resource_counts",
+        # agent_lifecycle
+        "create_agent", "bulk_spawn_smes", "list_agents", "reset_agent",
+        "decommission_agent", "decommission_agents_bulk",
+        "decommission_component", "decommission_components_bulk",
+        "sleep_self", "bulk_sleep_agents", "bulk_wake_agents",
+        # components — writes
+        "upsert_component", "upsert_attribution",
+        "upsert_attributions_bulk",
+        "create_edge",
+        "upsert_edge_outbound", "upsert_edges_outbound_bulk",
+        "bind_edge",
+        "delete_edge", "delete_edges_bulk",
+        "upsert_flow", "upsert_flows_bulk",
+        "delete_flow", "delete_flows_bulk",
+        "delete_attribution", "delete_attributions_bulk",
+        "insert_unresolved", "insert_unresolved_bulk",
+        "delete_unresolved", "delete_unresolved_bulk",
+        "resolve_reference",
+        # components — reads
+        "get_component", "get_components_bulk",
+        "get_attributions", "get_attributions_bulk",
+        "get_edges", "get_component_edges", "get_component_edges_bulk",
+        "get_flow", "get_flow_inverse", "get_flows_bulk",
+        "get_unresolved",
+        "get_stale_edges", "get_stale_flows",
+        "get_my_components",
+        # catalogs
+        "upsert_catalog", "upsert_catalogs_bulk", "upsert_edge_catalog",
+        "delete_catalog", "delete_catalogs_bulk",
+        "get_my_catalogs", "get_catalogs_bulk",
+        "get_my_catalog_callers", "get_unmatched_callers",
+        "get_orphan_catalogs",
+        # notifications
+        "get_agent_notifications",
+        # consolidation
+        "nominate_consolidation", "respond_consolidation",
+        "review_consolidation",
+        "get_my_consolidations", "get_consolidation_thread",
+        # clarification
+        "create_clarification", "respond_clarification",
+        "get_my_clarifications", "get_clarification_thread",
+        # search
+        "vector_search",
+        # mutation
+        "execute_mutation", "complete_consolidation",
+        "absorb_agent", "spawn_child_agent",
+        "transfer_attributions", "transfer_edges", "transfer_flows",
+        # proxy
+        "get_my_proxy_items", "act_on_proxy_item",
+        # terminal acks
+        "ack_terminal", "ack_terminals_bulk",
+        # insights
+        "record_insight",
+    ]
+    out = {}
+    missing = []
+    for name in eligible:
+        fn = g.get(name)
+        if fn is None or not callable(fn):
+            missing.append(name)
+            continue
+        out[name] = fn
+    if missing:
+        # Loud at startup so we catch enumeration drift quickly.
+        logger.warning(
+            "mcp_call_batch dispatch: %d missing tool(s): %s",
+            len(missing), ", ".join(missing),
+        )
+    return out
+
+
+@mcp.tool()
+def mcp_call_batch(agent_id: str, calls: list[dict]) -> dict:
+    """Dispatch a heterogeneous batch of MCP tool calls in parallel.
+
+    Phase 9.1. Use when you have N DIFFERENT tools to call in one
+    logical step (wake-start hygiene sweep, resolver triangulation,
+    mid-investigation reads). Server runs sub-calls concurrently in a
+    thread pool — the LLM sees ONE round-trip instead of N.
+
+    Args:
+      agent_id: your agent id. Injected into any sub-call whose
+        `args` doesn't carry its own.
+      calls: list of `{"tool": str, "args": dict}`. Up to 50 sub-calls
+        per batch. `args` may omit `agent_id` (auto-injected).
+
+    Returns:
+      `{"results": [{"idx": int, "tool": str, "ok": bool,
+                     "result": ...} OR
+                    {"idx": int, "tool": str, "ok": False,
+                     "error": str}]}`
+
+    Each sub-call succeeds or fails independently — one error does
+    NOT abort siblings. Both shapes carry `idx` so callers can
+    correlate results back to input order.
+
+    Rules:
+      - No nesting. `mcp_call_batch` inside calls[] is rejected.
+      - Cap 50 sub-calls. For >50 same-shape rows use a bulk variant
+        (e.g. upsert_attributions_bulk takes 500 rows; multiple bulk
+        calls can themselves be batched here).
+      - Each sub-call goes through its own auth/state validation +
+        is recorded in mcp_audit individually.
+
+    Use over native parallel tool_use blocks: Claude Code's agent
+    loop disables emission of multiple tool_use per turn (DEMO8
+    confirmed 0/851), so emitting [tool_use_A, tool_use_B] in one
+    assistant turn does NOT save round-trips. mcp_call_batch is the
+    only path to batch-with-one-round-trip on this runtime.
+
+    Example (5-tool wake-start hygiene sweep — heterogeneous reads):
+      mcp_call_batch(agent_id='sme-x', calls=[
+        {"tool": "get_my_catalogs", "args": {}},
+        {"tool": "get_unmatched_callers", "args": {}},
+        {"tool": "get_orphan_catalogs", "args": {}},
+        {"tool": "get_stale_edges", "args": {}},
+        {"tool": "get_stale_flows", "args": {}},
+      ])
+    """
+    global _BATCH_DISPATCH
+    if _BATCH_DISPATCH is None:
+        _BATCH_DISPATCH = _build_batch_dispatch()
+    return call_batch_tool.call_batch(agent_id, calls, _BATCH_DISPATCH)
 
 
 # ============ ENTRY POINT ============
