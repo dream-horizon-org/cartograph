@@ -25,7 +25,7 @@ PRIORITY_ORDER = {"orchestrator": 0, "resolver": 1, "sme": 2, "iterator": 3}
 # override applies (admin chat / mid-mutation). Coalesces drip-fed
 # events into one wake instead of N small ones, each re-paying the
 # 16k-token cached system-prompt read.
-WAKE_DEBOUNCE_SECONDS = 300  # 5 minutes
+WAKE_DEBOUNCE_SECONDS = 60  # 1 minute
 
 
 def get_idle_agents() -> list[dict]:
