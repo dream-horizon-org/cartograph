@@ -105,21 +105,32 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
     if not (0.0 <= confidence <= 1.0):
         raise ValueError("confidence must be in [0.0, 1.0]")
 
-    vec = emb.vector_literal(emb.embed_text(
-        emb.component_embed_text(canonical_name, display_name, component_type, metadata)
-    ))
-
     # Does this SME already own an active component? (any RCA row linked
     # to a non-decommissioned component). If yes → UPDATE path on that one.
     # If no → CREATE path requires a reserved RCA row (component_id IS NULL).
     owned = execute_one(
-        """SELECT c.id AS component_id
+        """SELECT c.id AS component_id, c.component_doc_md AS existing_doc_md
            FROM resource_component_agents rca
            JOIN components c ON c.id = rca.component_id
            WHERE rca.agent_id = %s AND c.status != 'decommissioned'
            LIMIT 1""",
         (agent_id,),
     )
+
+    # Phase 10.2: build embed text from the INTENDED FINAL doc_md value.
+    # On UPDATE with no doc_md provided, the SQL COALESCE preserves the
+    # existing doc_md — and we want the embedding to match. So pull
+    # existing doc_md from `owned` row and use it as the fallback.
+    effective_doc_md = component_doc_md
+    if effective_doc_md is None and owned is not None:
+        effective_doc_md = owned.get("existing_doc_md")
+    vec = emb.vector_literal(emb.embed_text(
+        emb.component_embed_text(
+            canonical_name, display_name, component_type, metadata,
+            effective_doc_md,
+        )
+    ))
+
     if owned is not None:
         # source_slice: wholesale REPLACE if provided, COALESCE-preserve
         # if omitted. Contract documented in SCHEMA.md — callers pass the

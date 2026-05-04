@@ -36,17 +36,26 @@ from shared.db import execute, execute_mutate
 log = logging.getLogger(__name__)
 
 
-def _backfill_components() -> tuple[int, int]:
+def _backfill_components(force: bool = False) -> tuple[int, int]:
+    """Re-embed components.
+
+    Default (force=False): only rows with embedding IS NULL — the
+    standard "Ollama was down at write time" backfill case.
+    force=True: re-embed every row regardless. Used after embed-text
+    shape changes (Phase 10.2: component_doc_md added).
+    """
+    where = "" if force else " WHERE embedding IS NULL"
     rows = execute(
-        """SELECT id, canonical_name, display_name, component_type, metadata
-           FROM components
-           WHERE embedding IS NULL"""
+        f"""SELECT id, canonical_name, display_name, component_type,
+                   metadata, component_doc_md
+           FROM components{where}"""
     )
     done = skipped = 0
     for r in rows:
         text = emb.component_embed_text(
             r["canonical_name"], r["display_name"],
             r["component_type"], r["metadata"],
+            r["component_doc_md"],
         )
         vec = emb.embed_text(text)
         lit = emb.vector_literal(vec)
@@ -125,7 +134,7 @@ def _backfill_unresolved() -> tuple[int, int]:
     return done, skipped
 
 
-_BACKFILLERS: list[tuple[str, Callable[[], tuple[int, int]]]] = [
+_BACKFILLERS: list[tuple[str, Callable[..., tuple[int, int]]]] = [
     ("components",   _backfill_components),
     ("attributions", _backfill_attributions),
     ("edges",        _backfill_edges),
@@ -133,8 +142,13 @@ _BACKFILLERS: list[tuple[str, Callable[[], tuple[int, int]]]] = [
 ]
 
 
-def backfill_all() -> dict:
-    """Re-embed all NULL-embedding rows across the four vector tables.
+def backfill_all(force_components: bool = False) -> dict:
+    """Re-embed NULL-embedding rows across the four vector tables.
+
+    `force_components=True` re-embeds EVERY component row regardless of
+    embedding state — used after Phase 10.2 changed `component_embed_text`
+    to include `component_doc_md`. Other tables stay NULL-only since
+    their embed-text shape is unchanged.
 
     Returns:
         {
@@ -146,7 +160,10 @@ def backfill_all() -> dict:
     out: dict = {}
     totals = {"done": 0, "skipped": 0}
     for name, fn in _BACKFILLERS:
-        done, skipped = fn()
+        if name == "components":
+            done, skipped = fn(force=force_components)
+        else:
+            done, skipped = fn()
         out[name] = {"done": done, "skipped": skipped}
         totals["done"] += done
         totals["skipped"] += skipped
@@ -162,12 +179,16 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         stream=sys.stdout,
     )
+    # CLI: `python -m shared.embedding_backfill` (NULL-only)
+    #   or `python -m shared.embedding_backfill --force-components`
+    #     (re-embed every component row; use after Phase 10.2 ships).
+    force_components = "--force-components" in sys.argv
     from shared.db import init_pool, close_pool
     init_pool()
     try:
         # Best-effort warmup so the first embed isn't cold-start-slow.
         emb.warmup()
-        result = backfill_all()
+        result = backfill_all(force_components=force_components)
         print(json.dumps(result, indent=2))
     finally:
         close_pool()

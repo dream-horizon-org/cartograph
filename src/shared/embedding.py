@@ -114,9 +114,23 @@ def vector_literal(vec: Optional[list[float]]) -> Optional[str]:
 # Embed-text builders — keep in sync with SCHEMA.md §Embedding Strategy.
 
 def component_embed_text(canonical_name: str, display_name: str,
-                         component_type: str, metadata: dict | None) -> str:
+                         component_type: str, metadata: dict | None,
+                         component_doc_md: str | None = None) -> str:
+    """Build the embed text for a component row.
+
+    Phase 10.2: includes `component_doc_md` (capped at 500 chars) so
+    vector_search can match on semantic intent ("auth service") not
+    just identity ("fav2-api"). Closes the recall gap where searches
+    for the conceptual purpose miss components whose canonical_name
+    is a code-name.
+
+    `source_slice` deliberately NOT included — paths/files are
+    structural references, not semantic content; would dilute the
+    embedding signal.
+    """
     meta = json.dumps(metadata or {}, sort_keys=True)
-    return f"{component_type}: {canonical_name} {display_name} {meta}"
+    doc = (component_doc_md or "")[:500]
+    return f"{component_type}: {canonical_name} {display_name} {doc} {meta}"
 
 
 def attribution_embed_text(resource_type: str, identifier: str) -> str:
