@@ -30,10 +30,6 @@ def _connect() -> psycopg2.extensions.connection:
     return conn
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -614,21 +610,6 @@ def get_attributions(component_id: str) -> list[dict]:
                 (component_id,),
             )
             return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
-
-
-def transfer_attributions(from_component_id: str, to_component_id: str) -> None:
-    """Re-point all attributions from absorbed to surviving component."""
-    conn = _connect()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE attributions SET component_id = %s"
-                " WHERE component_id = %s",
-                (to_component_id, from_component_id),
-            )
-        conn.commit()
     finally:
         conn.close()
 

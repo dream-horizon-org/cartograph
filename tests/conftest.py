@@ -16,12 +16,22 @@ TEST_DSN = {
 
 @pytest.fixture(scope="session", autouse=True)
 def bootstrap_schema():
-    """Ensure the V2 schema exists once before any test runs."""
-    os.environ["DB_NAME"] = TEST_DSN["dbname"]
-    os.environ["DB_HOST"] = TEST_DSN["host"]
-    os.environ["DB_PORT"] = str(TEST_DSN["port"])
-    os.environ["DB_USER"] = TEST_DSN["user"]
-    os.environ["DB_PASSWORD"] = TEST_DSN["password"]
+    """Ensure the V2 schema exists once before any test runs.
+
+    Uses os.environ directly (not monkeypatch) because monkeypatch is
+    function-scoped and unavailable at session scope. These env vars
+    are set permanently for the process lifetime, which is fine — the
+    test DB values are what every test wants, and function-scoped
+    set_test_db_env re-applies them via monkeypatch for isolation.
+    """
+    for key, val in [
+        ("DB_NAME",     TEST_DSN["dbname"]),
+        ("DB_HOST",     TEST_DSN["host"]),
+        ("DB_PORT",     str(TEST_DSN["port"])),
+        ("DB_USER",     TEST_DSN["user"]),
+        ("DB_PASSWORD", TEST_DSN["password"]),
+    ]:
+        os.environ[key] = val
     from agent_management.db import init_db
     init_db()
 
