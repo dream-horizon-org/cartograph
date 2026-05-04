@@ -124,6 +124,59 @@ def test_bad_confidence_rejected(agent_factory):
         )
 
 
+# ---------- Phase 10.1: symmetric-nomination race guard ----------
+
+def test_phase10_1_symmetric_nomination_refused(agent_factory):
+    """If A nominates B for merge, B's later nomination of A on the same
+    pair must refuse with 'already exists' — pre-INSERT guard catches the
+    human-visible 99% of races.
+    """
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+
+    # A → B succeeds
+    consolidation.nominate_consolidation("sme-a", ca, cb, "merge", 0.7, "first")
+
+    # B → A on same pair must refuse
+    with pytest.raises(ValueError, match="already exists"):
+        consolidation.nominate_consolidation("sme-b", cb, ca, "merge", 0.7, "second")
+
+
+def test_phase10_1_terminal_pair_does_not_block_re_nomination(agent_factory):
+    """If a prior consolidation between the pair landed at F (failed/rejected),
+    a fresh nomination should succeed — terminal status doesn't block.
+    """
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+
+    cons = consolidation.nominate_consolidation("sme-a", ca, cb, "merge", 0.7, "first")
+    # Force-terminal: simulate resolver rejection landing at F.
+    execute_mutate(
+        "UPDATE consolidations SET status = 'F' WHERE id = %s", (cons["id"],),
+    )
+
+    # A → B again: now allowed (prior is terminal).
+    second = consolidation.nominate_consolidation("sme-a", ca, cb, "merge", 0.7, "retry")
+    assert second["id"] != cons["id"]
+
+
+def test_phase10_1_split_does_not_block_merge(agent_factory):
+    """A's prior split nomination on its own component should NOT block a
+    later merge nomination between A and B (different nomination_type).
+    """
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+
+    # Split has component_b_id=NULL, so it can't shadow a future merge pair
+    # — but assert it doesn't accidentally either.
+    consolidation.nominate_consolidation("sme-a", ca, None, "split", 0.7, "split-first")
+    # Merge A↔B succeeds.
+    consolidation.nominate_consolidation("sme-a", ca, cb, "merge", 0.7, "merge-after")
+
+
 # ---------- respond ----------
 
 def test_agent_b_responds_B2_to_B1(agent_factory):

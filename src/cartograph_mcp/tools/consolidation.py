@@ -171,6 +171,36 @@ def nominate_consolidation(
                 "use upsert_component to update in place instead."
             )
 
+        # Phase 10.1: symmetric-nomination race guard. If A nominates B
+        # at T0 and B nominates A at T0+ε, both INSERTs would otherwise
+        # succeed → 2 consolidation rows for the same logical pair,
+        # double resolver review, occasional "second mutation silently
+        # fails post-decommission" if both reach M.
+        #
+        # Guard: refuse if an open (non-terminal) merge already exists
+        # between this pair in either direction. Splits skipped (no
+        # symmetry — split has only one party).
+        #
+        # Caveat: pure SELECT-then-INSERT has a microsecond race (two
+        # transactions can both see no row, both insert). Catches the
+        # human-visible 99% of races; partial UNIQUE on normalised pair
+        # deferred unless DEMO10 logs show real concurrent collisions.
+        existing = execute_one(
+            """SELECT id FROM consolidations
+                WHERE nomination_type = 'merge'
+                  AND status NOT IN ('D', 'F')
+                  AND ((component_a_id = %s AND component_b_id = %s)
+                    OR (component_a_id = %s AND component_b_id = %s))
+                LIMIT 1""",
+            (component_a_id, component_b_id, component_b_id, component_a_id),
+        )
+        if existing:
+            raise ValueError(
+                f"Open merge consolidation already exists between these "
+                f"components (id={existing['id']}). Respond on that "
+                f"thread instead of nominating again."
+            )
+
     # Splits have no agent_b → no B1/B2 negotiation to run. Insert
     # directly at 'R' so the resolver picks it up on the next scan.
     # Merges still enter at 'B2' (nominated agent's turn to respond).
