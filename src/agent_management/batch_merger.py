@@ -12,7 +12,6 @@ import logging
 from typing import Callable
 
 from agent_management import db
-from agent_management.union_find import UnionFind
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +74,11 @@ def _has_hard_block(component_a_id: str, component_b_id: str) -> bool:
     comp_a = db.get_component(component_a_id)
     comp_b = db.get_component(component_b_id)
     if not comp_a or not comp_b:
+        logger.debug(
+            "Hard block: component not found (%s or %s) — likely decommissioned"
+            " by an earlier merge in this pass",
+            component_a_id, component_b_id,
+        )
         return True
 
     if comp_a["component_type"] != comp_b["component_type"]:
@@ -134,7 +138,12 @@ def _pick_surviving(component_a_id: str, component_b_id: str) -> tuple[str, str]
 
 
 def _confidence_score(evidence: list[dict]) -> float:
-    """Heuristic confidence score based on evidence strength."""
+    """Heuristic confidence score based on evidence strength.
+
+    Strong attrs (entry_point, deploy_config) score 0.95.
+    Weak attrs accumulate additively in +0.20 steps, capped at 0.90.
+    Overall score capped at 0.99.
+    """
     if not evidence:
         return 0.0
     score = 0.0
