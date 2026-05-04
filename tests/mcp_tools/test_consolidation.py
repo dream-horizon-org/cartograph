@@ -162,6 +162,56 @@ def test_phase10_1_terminal_pair_does_not_block_re_nomination(agent_factory):
     assert second["id"] != cons["id"]
 
 
+def test_phase10_1_1_partial_unique_index_catches_race(agent_factory):
+    """Phase 10.1.1: even if the SELECT pre-check is bypassed (raw INSERT
+    simulating a microsecond race), the partial UNIQUE index rejects
+    the second row. Belt-and-suspenders verification.
+    """
+    import psycopg
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+
+    # First nomination via the normal path.
+    consolidation.nominate_consolidation("sme-a", ca, cb, "merge", 0.7, "first")
+
+    # Now simulate the race: bypass the SELECT pre-check by going straight
+    # to INSERT (mimics two transactions both seeing "no existing row").
+    # The partial UNIQUE index must reject this.
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        execute_mutate(
+            """INSERT INTO consolidations
+                (proposed_by, agent_a_id, agent_b_id, component_a_id, component_b_id,
+                 nomination_type, a_conf_score, status, metadata)
+               VALUES (%s, %s, %s, %s, %s, 'merge', 0.7, 'B2', '{}'::jsonb)""",
+            ("sme-b", "sme-b", "sme-a", cb, ca),
+        )
+
+
+def test_phase10_1_1_index_excludes_terminal_pairs(agent_factory):
+    """Phase 10.1.1: terminal (D/F) pairs are excluded from the partial
+    UNIQUE index — fresh nomination after a rejected merge succeeds at
+    the index layer too (matches application-level guard).
+    """
+    _iter(agent_factory, "i", "github")
+    ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
+    cb = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
+
+    cons = consolidation.nominate_consolidation("sme-a", ca, cb, "merge", 0.7, "first")
+    execute_mutate(
+        "UPDATE consolidations SET status = 'F' WHERE id = %s", (cons["id"],),
+    )
+    # Direct INSERT after terminal — should succeed (excluded by partial
+    # WHERE).
+    execute_mutate(
+        """INSERT INTO consolidations
+            (proposed_by, agent_a_id, agent_b_id, component_a_id, component_b_id,
+             nomination_type, a_conf_score, status, metadata)
+           VALUES (%s, %s, %s, %s, %s, 'merge', 0.7, 'B2', '{}'::jsonb)""",
+        ("sme-b", "sme-b", "sme-a", cb, ca),
+    )
+
+
 def test_phase10_1_split_does_not_block_merge(agent_factory):
     """A's prior split nomination on its own component should NOT block a
     later merge nomination between A and B (different nomination_type).

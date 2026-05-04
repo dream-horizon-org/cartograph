@@ -4370,7 +4370,18 @@ if existing:
 
 Skip for split nominations (no symmetry — split has only one party).
 
-**Caveat.** Pure SELECT-then-INSERT has a true microsecond race: two transactions can both see no existing row, both insert. To close that, a partial UNIQUE index on a normalised pair would be needed — `(LEAST(a,b), GREATEST(a,b)) WHERE status NOT IN ('D','F') AND nomination_type='merge'`. We're skipping the partial UNIQUE for now (functional unique indexes are slightly fiddly, and the SELECT guard catches the human-visible 99% of races); if real concurrent nominations show up in DEMO10 logs, escalate.
+**Atomic guard (Phase 10.1.1, shipped 2026-05-04).** The pure SELECT-then-INSERT pattern from 10.1 has a microsecond race window — two transactions can both see no existing row and both insert. Closed via a partial UNIQUE index on a normalised pair (commit lands as 10.1.1):
+
+```sql
+CREATE UNIQUE INDEX consolidations_pair_unique
+  ON consolidations (
+    LEAST(component_a_id, component_b_id),
+    GREATEST(component_a_id, component_b_id)
+  )
+  WHERE nomination_type = 'merge' AND status NOT IN ('D', 'F');
+```
+
+`LEAST`/`GREATEST` normalise the pair so A→B and B→A collide on the same key. Partial WHERE excludes terminal-status rows so re-nomination after rejection stays allowed. Restricted to merge (splits have no symmetry). Together with the 10.1 SELECT pre-check this is belt-and-suspenders — SELECT raises a clean error message in the common case, INDEX catches the microsecond race.
 
 **Tests (~3 new in `tests/mcp_tools/test_consolidation.py`):**
 - A→B nomination, then B→A → second raises with "already exists".
@@ -4633,7 +4644,20 @@ Verify after 10.3: `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail 
 
 ### 10.7 Schema delta
 
-None. All four sub-batches are pure additions on top of existing schema.
+One additive index (Phase 10.1.1):
+
+```sql
+CREATE UNIQUE INDEX consolidations_pair_unique
+    ON consolidations (
+      LEAST(component_a_id, component_b_id),
+      GREATEST(component_a_id, component_b_id)
+    )
+    WHERE nomination_type = 'merge' AND status NOT IN ('D', 'F');
+```
+
+Idempotent (`IF NOT EXISTS`) in `shared/migrations.py`. No table
+schema changes, no data migration. All other Phase 10 work is pure
+application-layer.
 
 ### 10.8 What this is NOT solving
 

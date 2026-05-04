@@ -516,6 +516,22 @@ CREATE INDEX idx_consol_pending ON consolidations(status) WHERE status IN ('B1',
 CREATE INDEX idx_consol_resolver ON consolidations(status) WHERE status = 'R';
 CREATE INDEX idx_consol_mutation ON consolidations(status) WHERE status IN ('M', 'MD');
 CREATE INDEX idx_consol_agents ON consolidations(agent_a_id, agent_b_id);
+
+-- Phase 10.1.1: atomic symmetric-nomination guard. Partial UNIQUE on
+-- the normalised (LEAST, GREATEST) pair so A→B and B→A collide on the
+-- same key. Excludes terminal-status rows (D/F) so re-nomination after
+-- a rejected merge stays allowed. Restricted to merge nominations
+-- (splits have no symmetry — component_b_id is NULL there).
+-- Combined with the SELECT pre-check in `nominate_consolidation`
+-- (Phase 10.1, commit 2a62836), this gives belt-and-suspenders:
+-- SELECT raises a clean "already exists" error in the common case;
+-- the index catches the microsecond race in the uncommon case.
+CREATE UNIQUE INDEX consolidations_pair_unique
+    ON consolidations (
+      LEAST(component_a_id, component_b_id),
+      GREATEST(component_a_id, component_b_id)
+    )
+    WHERE nomination_type = 'merge' AND status NOT IN ('D', 'F');
 ```
 
 ---

@@ -1024,6 +1024,24 @@ def _create_indexes(cur) -> None:
         "CREATE INDEX IF NOT EXISTS idx_consol_mutation ON consolidations(status) WHERE status IN ('M','MD')",
         "CREATE INDEX IF NOT EXISTS idx_consol_agents ON consolidations(agent_a_id, agent_b_id)",
 
+        # Phase 10.1.1: atomic symmetric-nomination guard. Partial UNIQUE
+        # index on the normalised (LEAST, GREATEST) pair so A→B and B→A
+        # collide on the same key. WHERE clause excludes terminal-status
+        # rows (D/F) — re-nomination after a rejected merge stays
+        # allowed. Also restricted to merge nominations (splits have no
+        # symmetry — component_b_id is NULL there).
+        # Together with the SELECT pre-check in nominate_consolidation
+        # (Phase 10.1, commit 2a62836), this gives belt-and-suspenders:
+        # SELECT raises a clean "already exists" error in the common
+        # case, the index catches the microsecond race in the
+        # uncommon case.
+        """CREATE UNIQUE INDEX IF NOT EXISTS consolidations_pair_unique
+            ON consolidations (
+              LEAST(component_a_id, component_b_id),
+              GREATEST(component_a_id, component_b_id)
+            )
+            WHERE nomination_type = 'merge' AND status NOT IN ('D', 'F')""",
+
         # Communications
         "CREATE INDEX IF NOT EXISTS idx_comm_to ON communications(to_agent) WHERE to_agent IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS idx_comm_to_type ON communications(to_agent_type) WHERE to_agent_type IS NOT NULL",
