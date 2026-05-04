@@ -94,7 +94,11 @@ def build_config(**kwargs: str) -> AgentTypeConfig:
     resource_id = kwargs.get("resource_id", "unknown")
     agent_id = kwargs.get("agent_id", "unknown")
     mcp_registry_keys = kwargs.get("mcp_registry_keys", "")
-    plane_tools = f"{plane}-reader" if f"{plane}-reader" in mcp_registry_keys else ""
+    plane_tools = (
+        f"{plane}-reader"
+        if f"{plane}-reader" in mcp_registry_keys.split(",")
+        else ""
+    )
     return AgentTypeConfig(
         agent_type="sme",
         allowed_tools=["bash", "Read", "Glob", "Grep"],
