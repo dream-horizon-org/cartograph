@@ -194,6 +194,77 @@ sub-calls per batch.
 - Split nominations on YOUR component — one at a time per the
   ONE-CHILD-PER-NOMINATION rule.
 
+== TEMP: PHASE-WISE LOCK-STEP PROGRESSION (Phase 10.4 doctrine) ==
+This block is TEMPORARY. May be removed once agent self-pacing
+proves reliable at higher scale.
+
+The system runs in 5 sequential phases. Orchestrator announces
+transitions via persistent broadcast:
+    [PHASE-END: <prev>] [PHASE-START: <next>]
+
+Stay within the announced phase. If you receive an action item that
+doesn't fit the current phase (e.g. a clarification asking you to
+bind during MATERIALISATION), respond per the phase contract — for
+binding-class work during MATERIALISATION, record as DANGLING +
+insert_unresolved and defer the bind to EDGE_DISCOVERY.
+
+PHASES:
+
+  1. USER_DISCUSSION
+     Admin↔orch onboarding, creds, scope. Iterators / SMEs idle.
+
+  2. ITERATION
+     Iterators enumerate resources via upsert_resource(_bulk).
+     SMEs idle waiting for spawn.
+
+  3. MATERIALISATION
+     SMEs hydrate OWN component (NO peer-binding yet):
+       - upsert_component + component_doc_md + source_slice
+       - exhaustive attributions
+       - own catalogs (what I expose)
+       - outbound edges DANGLING ONLY (to_component_id=NULL)
+         + insert_unresolved for the identifier
+       - flows tying own catalogs ↔ own danglings
+     DO NOT bind to peer components even if vector_search shows a
+     match — peer might merge / split / get renamed before
+     consolidation settles. Record dangling, defer.
+
+  4. CONSOLIDATION_MUTATION
+     SMEs nominate merges / splits, negotiate B1↔B2, resolver
+     reviews + approves to M, mutation POC executes
+     (absorb_agent / spawn_child_agent / cascades / pre-merge
+     handoff). After all consolidations land at D/F, the graph
+     is stable.
+
+  5. EDGE_DISCOVERY
+     Now safe to cross-reference peers:
+       - resolve_reference on unresolved rows against the
+         now-stable component registry
+       - bind_edge danglings via cosine ladder + bind_edge
+       - cross-SME hygiene: get_unmatched_callers triage,
+         post-merge edge dedup via delete_edge,
+         get_stale_edges + get_stale_flows re-bind
+
+PHASE-END HEURISTIC (orch's responsibility):
+Orch declares a phase complete when MOST (~80%+) of the phase's
+agents have finished their phase work AND remaining stragglers
+have either raised a blocker or are idle with no new work to pull.
+Stragglers carry over via per-agent BW tasks rather than blocking
+the whole storm.
+
+IF UNSURE WHICH PHASE IS ACTIVE:
+Check your most recent unacked broadcast. Orch's [PHASE-START] is
+the source of truth. If you can't find one, assume the phase that
+matches your action items: tasks from orch → ITERATION/MATERIALISATION;
+consolidation B1/B2 → CONSOLIDATION_MUTATION; danglings + unresolveds
+to fix on a stable graph → EDGE_DISCOVERY.
+
+WHY THIS EXISTS:
+At current scale (2-4 SMEs per demo), cross-phase work creates
+real waste — bind to a peer mid-storm, peer gets merged, edge is
+stale, re-bind work next wake. Voluntary phase coordination
+eliminates this without a hard state machine.
+
 == CHAT ADDRESSED TO YOU ==
 A chat row in your inbox (to_agent = your_agent_id) is FOR YOU.
 Sometimes admin or another agent sends a chat to the wrong
