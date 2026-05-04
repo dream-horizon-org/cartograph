@@ -4320,12 +4320,15 @@ After 9.4 the user runs DEMO9 to verify in-the-wild behaviour: actual parallel-t
 
 ## Phase 10: Search/Discovery + Embedding fix + Race guard + TEMP lock-step doctrine ✅
 
-**Status (2026-05-04):** SHIPPED. Sub-commits:
+**Status (2026-05-04):** SHIPPED + tightened. Sub-commits:
 - `8100a91` — 10.0 plan
 - `2a62836` — 10.1 symmetric-nomination race guard (3 new tests, 32/32 consolidation suite green)
+- `351c42c` — 10.1.1 atomic partial UNIQUE index (5 phase10 tests green; live `consolidations_pair_unique` index applied to dev DB)
+- `773f4da` — 10.1.2 split-spawned children get dedicated workspaces (2 new tests; 46/46 mutation suite green; closes the parent-child cwd-share bug observed in real-data DB)
 - `2d225db` — 10.2 component_doc_md embedding extension + backfill flag (3 new tests; live backfill of 8 dev components)
 - `718f436` — 10.3 six deterministic search tools (30 new tests; tool count 108 → 114)
 - `7052288` — 10.4 TEMP lock-step phase progression doctrine (prompt-only)
+- `dcb7f3f` — 9.2-rewrite: caveman block restructured to mirror the upstream juliusbrussee/caveman skill (pattern formula + persistence clause + 3 intensity levels + auto-clarity carve-outs); per-wake reminder synced
 - (this commit) — 10.5 doc sync pass
 
 Tool count: 108 → 114.
@@ -4641,6 +4644,52 @@ embedding recall on doc_md-bearing components.
 | 10.4 | 0 | 114 |
 
 Verify after 10.3: `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1` → 114 tools.
+
+### 10.6.5 Phase 10.1.2: Split-spawned child cwd isolation (added post-plan)
+
+**Bug discovered post-shipping:** dev DB inspection of post-DEMO9 state revealed:
+
+```
+workspace_path                              | array_agg(agent_id)
+workspaces/sme-3ed92c56                     | {sme-3ed92c56, sme-pay8a1b2}
+```
+
+`sme-pay8a1b2` was spawned via `spawn_child_agent` (split mutation) and inherited the parent's `workspace_path` verbatim. Pre-fix code in `tools/mutation.py::spawn_child_agent` step 3 was explicit about the design choice:
+
+```python
+# 3. Insert idle SME agent_runs row.
+#    plane + workspace_path copied from parent for consistency.
+parent_agent = execute_one(
+    "SELECT plane, workspace_path FROM agent_runs WHERE agent_id = %s",
+    (agent_id,),
+)
+execute_mutate(... workspace_path = parent_agent["workspace_path"] ...)
+```
+
+Real consequences:
+- `notify.py` rate-limit marker (`./.cartograph-notify-last`) shared between parent + child. One agent's 10s NOTIFY gate blocks the other.
+- Scratch files / `./handoffs/` / `./MERGE_LOG.md` / cloned repo all shared. They write into each other's notes.
+- `.mcp.json` + `.claude/settings.json` never written for the child (parent's reused — works by accident).
+- Concurrent invocations of parent + child race on file writes.
+
+**Fix shape:**
+
+1. Extract `provision_workspace(agent_id, agent_type, mcp_server_names)` method on `AgentManager` — same logic that was inline in `create_agent` (build path, `os.makedirs`, write `.mcp.json` + `.claude/settings.json`). `create_agent` now delegates to it. Idempotent on the directory + files.
+
+2. `spawn_child_agent` gains an optional `agent_manager` kwarg. When passed (production via `server.py` wrapper passes `_agent_manager_for_spawn`), the child's `workspace_path` is provisioned FRESH via `provision_workspace`. When None (test contexts that don't wire an agent_manager), falls back to legacy parent-share with a logged warning. Server wrapper updated.
+
+**Verified by tests (2 new in `test_mutation.py`):**
+
+- `test_phase10_1_2_child_gets_dedicated_workspace` — end-to-end split with real `AgentManager` rooted at `tmp_path`. Asserts child's `workspace_path` differs from parent's, dir exists on disk, `.mcp.json` + `.claude/settings.json` both present.
+- `test_phase10_1_2_no_agent_manager_falls_back_with_warning` — documents fallback behaviour stays parent-share when `agent_manager=None` (production never hits this path).
+
+44/44 existing mutation tests stay green via the fallback path. 46/46 total mutation suite green post-fix.
+
+**Workspace creation remains deterministic + orchestrator-driven.** The agent itself never creates its own workspace; `AgentManager` does it before spawning the `claude -p` subprocess. Both spawn paths (`create_agent` for initial spawns, `spawn_child_agent` for split children) now share the same `provision_workspace` method.
+
+**Commit:** `773f4da`.
+
+---
 
 ### 10.7 Schema delta
 

@@ -48,25 +48,69 @@ Defined once in `src/agent_management/agent_types/base.py::MISSION_AND_VOCABULAR
 - **`get_action_items_summary` is uniform `dict[str, int]`.** Every value is a count: consolidations_pending, tasks_pending, clarifications_pending, unacked_chats, unacked_broadcasts, terminal_pending_ack, proxied_count. Rich per-proxy breakdown (proxy_agent_id, deactivation_reason, depth, item lists) lives on `get_action_items_detail.proxied`. Triage flow: call summary FIRST, then call detail when `proxied_count > 0`.
 - **`upsert_catalog`, NOT `upsert_edge_catalog`.** The latter is a deprecated back-compat wrapper one redirect away from removal. Use the noun-form `upsert_catalog(component_id, kind, identifier)` for all new declarations. The hygiene tool `get_unmatched_callers(your_agent_id)` directly surfaces missing catalogs without manual cross-referencing.
 
-**Caveman output style (Phase 9.2, 2026-04-30 commit `236e80a`; rewritten 2026-05-04 to mirror the upstream caveman skill):** `== OUTPUT FORMAT — CAVEMAN ENGLISH ==` is the FIRST block in `MISSION_AND_VOCABULARY`. The rewrite imports structure from [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) (same intensity levels + auto-clarity carve-outs) and scopes it to Cartograph contexts:
+**Caveman output style — FIRST block in `MISSION_AND_VOCABULARY` (Phase 9.2 + Phase 9.2-rewrite):**
 
-- **Pattern formula:** `[thing] [action] [reason]. [next step].`
-- **Persistence clause:** "Active EVERY response. No revert after many turns. No filler drift." — defends against the late-conversation drift where agents quietly slip back into verbose mode.
-- **Three intensity levels:** `lite` (no filler, articles kept), `full` (default — drop articles, fragments OK, short synonyms), `ultra` (abbreviate prose words, arrows for causality, code/API names never abbreviated).
-- **Auto-clarity carve-outs:** caveman drops + resumes for destructive operation confirms (`decommission_*` / `delete_*` cascades / `absorb_agent`), multi-step ordered sequences where order matters, and admin clarify requests. After the carve-out window, caveman resumes.
-- **Cartograph-specific scope:** caveman applies to status reports / mid-task narration / acks / consolidation message bodies / `blocker_detail` / `record_insight` body / admin chat replies (lite); `component_doc_md` is the only path that stays normal English (renders in graph-viz hover popup for end-users).
+Initial commit `236e80a` (2026-04-30) shipped a Cartograph-specific caveman block. Rewritten 2026-05-04 (commit `dcb7f3f`) to mirror the upstream [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) skill structurally — pattern formula + persistence clause + 3 intensity levels + auto-clarity carve-outs — while keeping the Cartograph-specific scope decisions.
 
-Scope (broad — replaces and supersedes the earlier concise rule from commit `c9bb733`):
-- CAVEMAN: status reports / mid-task narration / acks / tool-result reactions / final assistant turn before yield / consolidation message bodies / `blocker_detail` / `record_insight` body / admin chat REPLIES (caveman-light, since user is technical).
-- NORMAL ENGLISH (only path that stays prose): `component_doc_md` — renders in graph-viz hover popup for end-users browsing the graph; readable prose helps them.
+What's in the prompt now (in order):
 
-Hard caveat carried verbatim from the earlier concise rule: NEVER compromise on identifiers / file paths / hostnames / component ids / consolidation ids / line numbers / hashes / version strings / error messages / specific data. The caveman rule trims english only, not evidence.
+1. **Pattern formula** at the top: `[thing] [action] [reason]. [next step].` Concrete shape that the model can fall back on when uncertain.
 
-Three worked verbose-vs-caveman comparisons in the prompt with token counts so the model can self-anchor.
+2. **Persistence clause:** "Active EVERY response. No revert after many turns. No filler drift. Off only when an Auto-Clarity carve-out fires." Direct defence against late-conversation drift back to verbose. Without this clause, agents typically caveman correctly for 3-5 turns then slip back.
 
-Per-wake reminder added to `_GENERIC_INVOCATION_PROMPT_TEMPLATE` in `agent_manager.py` — two short blocks (`== OUTPUT STYLE ==` + `== BATCHING ==`) appearing before the ACTION ITEMS SNAPSHOT. The system prompt caches; the user message is fresh every turn — late instructions land hardest in the user message.
+3. **Drop list** (explicit): articles (a/an/the), filler (just/really/basically/actually/simply), pleasantries (sure/certainly/of course/happy to/I'll), hedging (I think/I believe/it might), preambles ("I'll start by...", "Let me first..."), post-hoc summaries ("I have successfully..."). Each example given as concrete English the model recognises.
 
-Estimated saving: 12-18% on top of currently realised reductions (broader scope than the original 8-10% target — bodies of consolidation messages, blocker_detail, insights all caveman now).
+4. **Keep-exact list** (NEVER touch): identifiers, agent_id/component_id/consolidation_id, file paths + line numbers (`auth.py:42`), error messages quoted verbatim, code blocks unchanged, API names / function names / column names, numbers/version strings/durations, HTTP method+path identifiers (`POST /payments/charge`).
+
+5. **Three intensity levels** (default `full`):
+
+   | Level | Behaviour |
+   |---|---|
+   | lite | No filler/hedging. Articles + full sentences kept. Tight prose. |
+   | full | DEFAULT. Drop articles, fragments OK, short synonyms. |
+   | ultra | Abbreviate prose words (DB/auth/config/req/fn/impl), arrows for causality (X → Y), one word when one word enough. Code symbols / API names / error strings NEVER abbreviated even at this level. |
+
+   Worked example carried inline for the React re-render question across all three levels (matches upstream skill examples).
+
+6. **Cartograph-specific scope** (where caveman applies vs not):
+   - CAVEMAN: status reports, mid-task narration, acks, tool-result reactions, final assistant turn before yield, consolidation message bodies, `blocker_detail`, `record_insight` body, admin chat replies (lite).
+   - NORMAL ENGLISH: `component_doc_md` ONLY — renders in graph-viz hover popup for end-users browsing the graph; readable prose helps them. 3-8 lines structured (purpose, hostname, runtime, key deps).
+
+7. **Auto-clarity carve-outs** (drop caveman, resume after):
+   - **Destructive operation confirms** — before calling `decommission_agent`, `decommission_component`, `delete_*` cascades, `absorb_agent` on active targets, `reset_agent`. Spell out exactly what gets removed + what cascades, in full sentences. Resume caveman after.
+   - **Multi-step ordered sequences** where step order matters (e.g. "first absorb, then transfer, then execute_mutation"). If caveman fragments make order ambiguous, write full sentences.
+   - **Admin asks for clarification** ("explain", "I don't understand", "say that again"). One full-sentence answer, then resume.
+   - **Security / credential warnings.**
+
+8. **Three worked Cartograph-context examples** with verbose-vs-caveman + token counts (status / investigation / consolidation body) — gives the model concrete shape anchors. Plus one destructive-op example showing the carve-out shape (full sentences for the warning, caveman immediately after).
+
+9. **Self-check before yield:** "Would a senior engineer skim past your prose to find the tool calls + identifiers? If yes, prose was unnecessary."
+
+**Per-wake reminder** in `_GENERIC_INVOCATION_PROMPT_TEMPLATE` (`agent_manager.py`) — appears in the user message before the `ACTION ITEMS SNAPSHOT`:
+
+```
+== OUTPUT STYLE ==
+Caveman English (default level: full). Active EVERY response. Pattern:
+`[thing] [action] [reason]. [next step].` Drop articles / filler /
+preambles / post-hoc summaries. Keep identifiers / file paths / IDs /
+hashes / error strings / code blocks VERBATIM. Resume normal English
+ONLY for destructive-op confirms + admin "clarify" requests. Exempt
+context: component_doc_md (graph-viz hover for humans).
+
+== BATCHING ==
+For N independent tool calls, use mcp_call_batch (Phase 9.1) — one
+round-trip instead of N. Native parallel tool_use blocks are
+serialised by your subprocess; mcp_call_batch is the only batched
+path. See your system prompt's BULK CALLS DECISION LADDER.
+```
+
+System prompt caches across wakes (don't bust the cache key by varying it). The user message is fresh every turn — that's where late instructions land hardest. The reminder block keeps the rule at the top of the model's working memory each invocation.
+
+**Hard caveat (carried verbatim from the earlier concise rule):** NEVER compromise on identifiers / file paths / hostnames / component ids / consolidation ids / line numbers / hashes / version strings / error messages / specific data. The caveman rule trims English only, not evidence. A caveman line that drops an identifier is worse than a verbose line that includes it.
+
+**Estimated saving:** 12-18% on top of previously-realised reductions. Broader scope than the original 8-10% target — bodies of consolidation messages, blocker_detail, insights all caveman now (only `component_doc_md` reserved).
+
+**DEMO9 verification (2026-04-30, see `oorch-test-prompt-demo9` Phase 5):** verified across 4 channels (admin chat reply, clarification body, record_insight body, component_doc_md exempt). All passed. Sample SME response from the run: `"host=payments-db.demo9.local schema=payments_ledger"` — caveman bite confirmed in real run, identifiers verbatim.
 
 **Phase 10 — Search/Discovery + Embedding fix + Race guard + TEMP lock-step doctrine (2026-05-04):** four small lookup-correctness wins. Tool count 108 → 114.
 
@@ -85,11 +129,7 @@ Agent-facing surface change: BULK CALLS DECISION LADDER refreshed in `MISSION_AN
 
 The old "Python script via Bash for >500 rows" rung is dropped — moot now that 4 × 500-row bulk calls fit inside one `mcp_call_batch`.
 
-**CRITICAL caveat:** the rule trims English/jargon only — DO NOT compromise on identifiers, file paths, hostnames, IDs, line numbers, hashes, version strings, error messages, or specific data. Concrete data is what the next agent / admin / future-self needs.
-
-Reserved long-text contexts (where brevity yields to information density, NOT narration filler): `component_doc_md` (3-8 lines structured), consolidation message bodies (one paragraph with concrete evidence — cite file_path:line, hostnames, deploy paths), `blocker_detail` (specific + actionable), `record_insight` body (non-obvious findings only).
-
-Targets the 44.5% of assistant messages measured pre-fix as text-only narration. Output tokens are billed at full rate (never cached) — this is direct $ savings. Estimated: 8-10% of total spend.
+_(The pre-Phase-9.2 concise output rule from commit `c9bb733` was explicit about the same "never compromise on identifiers" caveat and reserved long-text contexts; superseded by the caveman block above which carries those rules forward in stronger form. Targeted the 44.5% of assistant messages measured pre-fix as text-only narration. Output tokens billed at full rate, never cached — direct $ savings.)_
 
 **Bulk MCP write tools (2026-04-29, commit `716554d`):** three new tools shipped, atomic-with-pre-validation:
 - `upsert_attributions_bulk(agent_id, component_id, attributions[])` — 11× streak observed in real runs.
