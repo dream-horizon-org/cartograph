@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import time
 from unittest.mock import patch
 
@@ -13,8 +12,7 @@ from agent_management.trigger_manager import TriggerManager
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    db_path = str(tmp_path / "cartograph.db")
-    db.init_db(db_path)
+    db.init_db()
     workspace_root = str(tmp_path / "workspaces")
     os.makedirs(workspace_root, exist_ok=True)
     mcp_config_path = str(tmp_path / "mcp_servers.yaml")
@@ -24,7 +22,6 @@ def tmp_project(tmp_path):
     with open(mcp_config_path, "w") as f:
         yaml.dump(mcp_config, f)
     return {
-        "db_path": db_path,
         "workspace_root": workspace_root,
         "mcp_config_path": mcp_config_path,
     }
@@ -103,17 +100,14 @@ def test_trigger_manager_skips_running_agents(trigger_mgr, manager):
     mock_invoke.assert_not_called()
 
 
-def test_trigger_manager_handles_stale_agents(tmp_project, manager):
+def test_trigger_manager_handles_stale_agents(pg_conn, manager):
     agent_id = manager.create_agent("orchestrator")
     db.update_agent_status(agent_id, "running")
-    # Set heartbeat to far past
-    conn = sqlite3.connect(tmp_project["db_path"])
-    conn.execute(
-        "UPDATE agent_runs SET heartbeat = '2020-01-01T00:00:00+00:00' WHERE agent_id = ?",
+    # Set heartbeat to far past using pg_conn
+    pg_conn.cursor().execute(
+        "UPDATE agent_runs SET heartbeat = '2020-01-01T00:00:00+00:00' WHERE agent_id = %s",
         (agent_id,),
     )
-    conn.commit()
-    conn.close()
 
     trigger_mgr = TriggerManager(
         agent_manager=manager,
@@ -128,3 +122,24 @@ def test_trigger_manager_handles_stale_agents(tmp_project, manager):
 
     agent = db.get_agent(agent_id)
     assert agent["status"] == "errored"
+
+
+from agent_management.trigger_manager import Phase
+
+
+def test_phase_enum_values():
+    assert Phase.ITERATION.value == "iteration"
+    assert Phase.MATERIALISATION.value == "materialisation"
+    assert Phase.BATCH_MERGE.value == "batch_merge"
+    assert Phase.RESOLUTION.value == "resolution"
+    assert Phase.EDGE_DISCOVERY.value == "edge_discovery"
+    assert Phase.USER_FEEDBACK.value == "user_feedback"
+
+
+def test_trigger_manager_has_current_phase(manager):
+    trigger_mgr = TriggerManager(
+        agent_manager=manager,
+        poll_interval=0.1,
+        heartbeat_timeout=300,
+    )
+    assert trigger_mgr.current_phase == Phase.ITERATION
