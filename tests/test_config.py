@@ -3,10 +3,10 @@ import pytest
 from agent_management.config import get_config
 
 
-def test_get_config_defaults():
+def test_get_config_defaults(monkeypatch):
     for key in ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD",
                 "OPENAI_API_KEY", "EMBEDDING_MODEL"):
-        os.environ.pop(key, None)
+        monkeypatch.delenv(key, raising=False)
 
     cfg = get_config()
     assert cfg.db_host == "localhost"
