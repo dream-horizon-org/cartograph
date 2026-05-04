@@ -420,7 +420,7 @@ background-only and per-event latency is acceptable.
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
 
-> **Implementation status.** 108 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 9). Phase 7.4.11 added `delete_edge`. Phase 7.4.12 added 3 bulk write variants. Phase 7.4.13 pre-injects action-items snapshot in invocation user message. Phase 7.4.14 introduces wake debouncing (5-min window, see §2.4). **Phase 8 (2026-04-29) added 18 tools: 4 corrective delete singletons (delete_attribution, delete_catalog, delete_flow, delete_unresolved); 5 corrective delete bulks (their bulks + delete_edges_bulk); 4 write bulks (upsert_flows_bulk, insert_unresolved_bulk, ack_broadcasts_bulk, ack_terminals_bulk) plus an ON CONFLICT idempotency upgrade to insert_unresolved with a UNIQUE migration; 5 multi-component read bulks (get_components/attributions/component_edges/catalogs/flows _bulk).** **Phase 9 (2026-04-30) added 1 tool: mcp_call_batch — server-side parallel dispatcher for heterogeneous batches (108th tool); see §3.4 below.** See AGENT-PROMPTS.md §0 for prompt rules.
+> **Implementation status.** 114 tools live in `src/cartograph_mcp/server.py` (Phase 0 → 10). Phase 7.4.11 added `delete_edge`. Phase 7.4.12 added 3 bulk write variants. Phase 7.4.13 pre-injects action-items snapshot in invocation user message. Phase 7.4.14 introduces wake debouncing (1-min window post-`bc72bd0`, was 5-min initially; see §2.4). **Phase 8 (2026-04-29) added 18 tools: 4 corrective delete singletons (delete_attribution, delete_catalog, delete_flow, delete_unresolved); 5 corrective delete bulks (their bulks + delete_edges_bulk); 4 write bulks (upsert_flows_bulk, insert_unresolved_bulk, ack_broadcasts_bulk, ack_terminals_bulk) plus an ON CONFLICT idempotency upgrade to insert_unresolved with a UNIQUE migration; 5 multi-component read bulks (get_components/attributions/component_edges/catalogs/flows _bulk).** **Phase 9 (2026-04-30) added 1 tool: mcp_call_batch — server-side parallel dispatcher for heterogeneous batches; see §3.4.** **Phase 10 (2026-05-04) added 6 tools: search_components / _attributions / _edges / _catalogs / _flows / _unresolved — deterministic SQL-LIKE search; see §3.5.** See AGENT-PROMPTS.md §0 for prompt rules.
 >
 > **Phase 7.4.4 + 7.4.5 wire-shape changes:**
 > - `vector_search` returns lean projection per row (id + identity columns + similarity) — no embedding vectors, no doc/slice/metadata blobs. Search-then-fetch pattern: callers follow up with `get_*(id)` for full detail.
@@ -1061,6 +1061,76 @@ mcp_call_batch(agent_id, calls[]) -> dict
   For N same-shape rows, prefer the matching bulk variant from §3.3
   (which itself is callable inside mcp_call_batch).
 ```
+
+### 3.5 Deterministic search tools (Phase 10.3)
+
+Six SQL-LIKE search tools that fill the "find rows without knowing
+the component_id first" gap. `vector_search` was the only fuzzy/
+cross-component reader; per-table `get_*` tools all needed a
+`component_id` input. The `search_*` family supports exact + fuzzy
+patterns and per-column AND filtering.
+
+Common semantics for all 6:
+- AND across columns; OR within column via list (e.g.
+  `component_type=['application', 'lambda']`).
+- Plain string → exact match (`column = %s`).
+- String containing `%` or `_` → ILIKE (case-insensitive pattern
+  match; `_` = single char, `%` = zero-or-more chars).
+- Cap 100 rows per call. Caller can narrow filters and re-call.
+- Refuse blank-filter calls (`BlankFilterError`) — no whole-table
+  dumps. At least one filter must be non-None.
+- Lean projections — same shape as `get_*_bulk` reads. No
+  embedding vectors, no JSONB blobs.
+
+```
+search_components(agent_id,
+    canonical_name_pattern? | display_name_pattern? | name_pattern?,
+    component_type? | list,
+    status? | list = 'active',
+    plane? | list,
+)
+  Returns: [{id, canonical_name, display_name, component_type,
+             status, planes[]}]
+  name_pattern is convenience — ILIKEs both canonical_name AND
+  display_name (admin-UI `q` parity). Pass at most ONE of
+  {name_pattern, canonical_name_pattern, display_name_pattern}.
+  plane filter via RCA → resources.plane.
+
+search_attributions(agent_id, identifier_pattern?,
+    plane? | list, resource_type? | list, component_id?)
+  Returns: [{id, component_id, plane, resource_type, identifier,
+             confidence}]
+
+search_edges(agent_id, identifier_pattern?,
+    edge_type? | list,
+    kind? | list  # 'bound' | 'catalog' | 'dangling',
+    from_component_id?, to_component_id?)
+  Returns: [{id, from_component_id, to_component_id, edge_type,
+             identifier, confidence, kind (computed)}]
+  Note: kind='catalog' matches no live rows post-Phase-7.4 (catalog
+  rows migrated to `catalogs` table); use search_catalogs.
+
+search_catalogs(agent_id, identifier_pattern?,
+    kind? | list, component_id?)
+  Returns: [{id, component_id, kind, identifier, confidence}]
+
+search_flows(agent_id, component_id?,
+    incoming_catalog_id?, outgoing_edge_id?)
+  Returns: [{id, component_id, incoming_catalog_id,
+             outgoing_edge_id, confidence}]
+  Flows have no human-readable identifier (only FKs), so this is
+  ID-based filtering only — no string pattern field.
+
+search_unresolved(agent_id, reference_value_pattern?,
+    reference_type? | list, found_in_component_id?,
+    only_unresolved=True)
+  Returns: [{id, found_in_component_id, reference_type,
+             reference_value, resolved, attempts}]
+  only_unresolved=True (default) excludes resolved=TRUE rows.
+```
+
+All 6 are also callable inside `mcp_call_batch` (registered in
+`_BATCH_DISPATCH`).
 
 ---
 

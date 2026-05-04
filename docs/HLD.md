@@ -1240,7 +1240,7 @@ READ-ONLY (one per plane, scoped per agent):
 WRITE TARGET (single, shared by all agents):
 
   cartograph-db  (FastMCP streamable-http on :8100/mcp)
-    LIVE groups (108 tools registered in src/cartograph_mcp/server.py;
+    LIVE groups (114 tools registered in src/cartograph_mcp/server.py;
     see TRIGGER-MANAGEMENT.md §3 for per-tool contracts):
       action_items    (2):  summary, detail
       chat            (4):  send, ack, unacked, history
@@ -1281,6 +1281,14 @@ WRITE TARGET (single, shared by all agents):
                             parallel dispatcher for heterogeneous
                             sub-calls; one LLM round-trip per batch;
                             cap 50 sub-calls; no nesting.
+      search_det      (6):  search_components, search_attributions,
+                            search_edges, search_catalogs,
+                            search_flows, search_unresolved
+                            (Phase 10.3) — SQL-LIKE deterministic
+                            search across the embedded tables; AND
+                            across columns / OR within column via
+                            list; auto exact-vs-ILIKE on patterns;
+                            cap 100 rows / refuse blank-filter.
 
     Phase 4 — mutation + proxy (shipped):
       execute_mutation, complete_consolidation, absorb_agent,

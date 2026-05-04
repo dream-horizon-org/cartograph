@@ -4318,9 +4318,17 @@ After 9.4 the user runs DEMO9 to verify in-the-wild behaviour: actual parallel-t
 
 ---
 
-## Phase 10: Search/Discovery + Embedding fix + Race guard + TEMP lock-step doctrine 🚧 IN FLIGHT
+## Phase 10: Search/Discovery + Embedding fix + Race guard + TEMP lock-step doctrine ✅
 
-**Status (2026-05-04):** plan landed; implementation in progress.
+**Status (2026-05-04):** SHIPPED. Sub-commits:
+- `8100a91` — 10.0 plan
+- `2a62836` — 10.1 symmetric-nomination race guard (3 new tests, 32/32 consolidation suite green)
+- `2d225db` — 10.2 component_doc_md embedding extension + backfill flag (3 new tests; live backfill of 8 dev components)
+- `718f436` — 10.3 six deterministic search tools (30 new tests; tool count 108 → 114)
+- `7052288` — 10.4 TEMP lock-step phase progression doctrine (prompt-only)
+- (this commit) — 10.5 doc sync pass
+
+Tool count: 108 → 114.
 
 Bundle of small lookup-correctness wins surfaced from DEMO9 review + post-DEMO8 architectural reflection. Four sub-batches; each is small enough to ship as one commit.
 
@@ -4595,25 +4603,22 @@ broadcast — orch's [PHASE-START] is the source of truth.
 
 ---
 
-### 10.5 Sub-phase ordering + commit cadence
+### 10.5 Sub-phase ordering + commit cadence (SHIPPED)
 
 ```
-10.0 plan (this commit)                     ← doc-only
-10.1 symmetric-nomination guard             ← code + 3 tests
-10.2 component_doc_md embedding             ← code + 2 tests + backfill run
-10.3 six search tools                       ← code (helper + 6 tools) +
-                                              ~40 tests; commit per tool
-                                              cluster (3+3 or 2+2+2)
-10.4 TEMP lock-step doctrine                ← prompt edits + smoke
-10.5 doc sync pass                          ← HLD / SCHEMA / TRIGGER-MGMT /
-                                              AGENT-PROMPTS / POST-COMPACTION /
-                                              IMPLEMENTATION-PHASES /
-                                              PROMPT-ENHANCEMENTS
+10.0 plan                                   ← 8100a91 doc-only
+10.1 symmetric-nomination guard             ← 2a62836 code + 3 tests
+10.2 component_doc_md embedding             ← 2d225db code + 3 tests + live backfill
+10.3 six search tools                       ← 718f436 helper + 6 tools + 30 tests
+10.4 TEMP lock-step doctrine                ← 7052288 prompt edits + smoke
+10.5 doc sync pass                          ← (this commit)
 10.6 DEMO10 prompt                          ← docs/oorch-test-prompt-demo10
                                               (next commit)
 ```
 
-After 10.6 the user runs DEMO10 to verify in-the-wild behaviour.
+After 10.6 the user runs DEMO10 to verify in-the-wild behaviour: phase
+broadcasts firing on transitions, search tool usage in JSONL,
+embedding recall on doc_md-bearing components.
 
 ### 10.6 Tool surface delta
 
