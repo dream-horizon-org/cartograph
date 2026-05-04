@@ -25,8 +25,5 @@ def get_config(agent_type: str, **kwargs: str) -> AgentTypeConfig:
     elif agent_type == "sme":
         from agent_management.agent_types.sme import build_config
         return build_config(**kwargs)
-    elif agent_type == "resolver":
-        from agent_management.agent_types.resolver import build_config
-        return build_config(**kwargs)
     else:
         raise ValueError(f"Unknown agent type: {agent_type}")

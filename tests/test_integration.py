@@ -1,8 +1,6 @@
-"""Integration test — full lifecycle without real Claude Code CLI."""
+"""Integration test -- V2 full lifecycle without real Claude CLI or OpenAI."""
 
 import os
-import time
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -13,66 +11,133 @@ from main import boot
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    db_path = str(tmp_path / "cartograph.db")
     workspace_root = str(tmp_path / "workspaces")
     os.makedirs(workspace_root, exist_ok=True)
     mcp_config_path = str(tmp_path / "mcp_servers.yaml")
-    mcp_config = {
-        "cartograph-db": {"url": "http://localhost:3002"},
-        "github-reader": {"url": "http://localhost:3001"},
-    }
+    mcp_config = {"cartograph-db": {"url": "http://localhost:3002"}}
     with open(mcp_config_path, "w") as f:
         yaml.dump(mcp_config, f)
-    return {
-        "db_path": db_path,
-        "workspace_root": workspace_root,
-        "mcp_config_path": mcp_config_path,
+    return {"workspace_root": workspace_root, "mcp_config_path": mcp_config_path}
+
+
+def test_boot_creates_only_orchestrator(tmp_project):
+    """V2 boot creates orchestrator only -- no Resolver."""
+    trigger_mgr = boot(
+        workspace_root=tmp_project["workspace_root"],
+        mcp_config_path=tmp_project["mcp_config_path"],
+        start_trigger_manager=False,
+    )
+    agent_types = {
+        db.get_agent(t["agent_id"])["agent_type"]
+        for t in db.get_pending_triggers()
     }
+    assert "orchestrator" in agent_types
+    assert "resolver" not in agent_types
 
 
-def test_full_lifecycle(tmp_project):
-    """Boot system, trigger manager processes orchestrator + resolver triggers."""
-    invocations = []
+def test_boot_is_idempotent(tmp_project):
+    boot(
+        workspace_root=tmp_project["workspace_root"],
+        mcp_config_path=tmp_project["mcp_config_path"],
+        start_trigger_manager=False,
+    )
+    boot(
+        workspace_root=tmp_project["workspace_root"],
+        mcp_config_path=tmp_project["mcp_config_path"],
+        start_trigger_manager=False,
+    )
+    triggers = db.get_pending_triggers()
+    agent_ids = {t["agent_id"] for t in triggers}
+    assert len(agent_ids) == 1  # only orchestrator
 
-    def mock_invoke(self, agent_id, prompt):
-        invocations.append({"agent_id": agent_id, "prompt": prompt})
-        # Simulate successful invocation
-        agent = db.get_agent(agent_id)
-        if agent["session_id"] is None:
-            db.update_agent_session(agent_id, f"session-{agent_id}")
-        db.update_agent_status(agent_id, "idle")
-        db.increment_invocation_count(agent_id)
-        db.update_agent_heartbeat(agent_id)
-        return '{"session_id": "session-' + agent_id + '"}'
 
-    with patch(
-        "agent_management.agent_manager.AgentManager.invoke_agent", mock_invoke
-    ):
-        trigger_mgr = boot(
-            db_path=tmp_project["db_path"],
-            workspace_root=tmp_project["workspace_root"],
-            mcp_config_path=tmp_project["mcp_config_path"],
-            start_trigger_manager=True,
-            poll_interval=0.1,
-        )
-        time.sleep(1.0)
-        trigger_mgr.stop()
+def test_batch_merge_auto_executes_exact_hostname_match(tmp_project):
+    """
+    Two components sharing an exact hostname + entry_point are auto-merged
+    by the batch merger without any LLM involvement.
 
-    # Both singleton agents should have been invoked
-    assert len(invocations) == 2
-    invoked_types = set()
-    for inv in invocations:
-        agent = db.get_agent(inv["agent_id"])
-        invoked_types.add(agent["agent_type"])
-    assert "orchestrator" in invoked_types
-    assert "resolver" in invoked_types
+    Planes are intentionally different (github vs cloud): the attributions
+    UNIQUE constraint is on (plane, resource_type, identifier), so both
+    comp_a and comp_b must use distinct planes for the same identifier to
+    produce two separate attribution rows that the JOIN can match.
+    """
+    comp_a = db.upsert_component(
+        canonical_name="feeds-aggregator-v2",
+        display_name="feeds-aggregator-v2",
+        component_type="application",
+    )
+    comp_b = db.upsert_component(
+        canonical_name="fav2-api-prod",
+        display_name="fav2-api-prod",
+        component_type="application",
+    )
+    # entry_point is a STRONG attribute — one match alone triggers TIER_AUTO
+    db.upsert_attribution(
+        comp_a, "github", "entry_point", "FeedsApplication.java",
+        discovered_by="sme-test-a",
+    )
+    db.upsert_attribution(
+        comp_b, "cloud", "entry_point", "FeedsApplication.java",
+        discovered_by="sme-test-b",
+    )
 
-    # No pending triggers should remain
-    assert len(db.get_pending_triggers()) == 0
+    from agent_management.batch_merger import run_batch_merge
 
-    # Both agents should be idle with session IDs
-    for inv in invocations:
-        agent = db.get_agent(inv["agent_id"])
-        assert agent["status"] == "idle"
-        assert agent["session_id"] is not None
-        assert agent["invocation_count"] == 1
+    summary = run_batch_merge(re_embed_fn=None)
+
+    assert summary["auto_executed"] >= 1
+    assert summary["pending_human"] == 0
+
+    # One component should now be decommissioned
+    a = db.get_component(comp_a)
+    b = db.get_component(comp_b)
+    statuses = {a["status"], b["status"]}
+    assert "decommissioned" in statuses
+    assert "active" in statuses
+
+
+def test_batch_merge_blocks_on_edge(tmp_project):
+    """Components with an edge between them are not merged (caller/callee)."""
+    comp_a = db.upsert_component(
+        canonical_name="service-alpha",
+        display_name="service-alpha",
+        component_type="application",
+    )
+    comp_b = db.upsert_component(
+        canonical_name="service-beta",
+        display_name="service-beta",
+        component_type="application",
+    )
+    # Different planes for the same reason as above (UNIQUE constraint)
+    db.upsert_attribution(
+        comp_a, "github", "hostname", "shared.dream11.local",
+        discovered_by="sme-a",
+    )
+    db.upsert_attribution(
+        comp_b, "cloud", "hostname", "shared.dream11.local",
+        discovered_by="sme-b",
+    )
+
+    # Create an edge: alpha calls beta — this is the hard block
+    conn = db._connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO edges
+                   (source_id, target_id, edge_type, identifier, discovered_by)
+                   VALUES (%s, %s, 'calls', 'GET /api/data', 'sme-a')""",
+                (comp_a, comp_b),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    from agent_management.batch_merger import run_batch_merge
+    summary = run_batch_merge(re_embed_fn=None)
+
+    assert summary["auto_executed"] == 0
+
+    a = db.get_component(comp_a)
+    b = db.get_component(comp_b)
+    assert a["status"] == "active"
+    assert b["status"] == "active"
