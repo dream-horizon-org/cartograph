@@ -1,8 +1,6 @@
 """Integration test -- V2 full lifecycle without real Claude CLI or OpenAI."""
 
 import os
-import time
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -24,7 +22,6 @@ def tmp_project(tmp_path):
 
 def test_boot_creates_only_orchestrator(tmp_project):
     """V2 boot creates orchestrator only -- no Resolver."""
-    db.init_db()
     trigger_mgr = boot(
         workspace_root=tmp_project["workspace_root"],
         mcp_config_path=tmp_project["mcp_config_path"],
@@ -39,7 +36,6 @@ def test_boot_creates_only_orchestrator(tmp_project):
 
 
 def test_boot_is_idempotent(tmp_project):
-    db.init_db()
     boot(
         workspace_root=tmp_project["workspace_root"],
         mcp_config_path=tmp_project["mcp_config_path"],
@@ -57,11 +53,14 @@ def test_boot_is_idempotent(tmp_project):
 
 def test_batch_merge_auto_executes_exact_hostname_match(tmp_project):
     """
-    Two components sharing an exact hostname attribution are auto-merged
+    Two components sharing an exact hostname + entry_point are auto-merged
     by the batch merger without any LLM involvement.
-    """
-    db.init_db()
 
+    Planes are intentionally different (github vs cloud): the attributions
+    UNIQUE constraint is on (plane, resource_type, identifier), so both
+    comp_a and comp_b must use distinct planes for the same identifier to
+    produce two separate attribution rows that the JOIN can match.
+    """
     comp_a = db.upsert_component(
         canonical_name="feeds-aggregator-v2",
         display_name="feeds-aggregator-v2",
@@ -72,14 +71,7 @@ def test_batch_merge_auto_executes_exact_hostname_match(tmp_project):
         display_name="fav2-api-prod",
         component_type="application",
     )
-    db.upsert_attribution(
-        comp_a, "github", "hostname", "feeds-agg.dream11.local",
-        discovered_by="sme-test-a",
-    )
-    db.upsert_attribution(
-        comp_b, "cloud", "hostname", "feeds-agg.dream11.local",
-        discovered_by="sme-test-b",
-    )
+    # entry_point is a STRONG attribute — one match alone triggers TIER_AUTO
     db.upsert_attribution(
         comp_a, "github", "entry_point", "FeedsApplication.java",
         discovered_by="sme-test-a",
@@ -106,8 +98,6 @@ def test_batch_merge_auto_executes_exact_hostname_match(tmp_project):
 
 def test_batch_merge_blocks_on_edge(tmp_project):
     """Components with an edge between them are not merged (caller/callee)."""
-    db.init_db()
-
     comp_a = db.upsert_component(
         canonical_name="service-alpha",
         display_name="service-alpha",
@@ -118,6 +108,7 @@ def test_batch_merge_blocks_on_edge(tmp_project):
         display_name="service-beta",
         component_type="application",
     )
+    # Different planes for the same reason as above (UNIQUE constraint)
     db.upsert_attribution(
         comp_a, "github", "hostname", "shared.dream11.local",
         discovered_by="sme-a",
@@ -127,7 +118,7 @@ def test_batch_merge_blocks_on_edge(tmp_project):
         discovered_by="sme-b",
     )
 
-    # Create an edge: alpha calls beta
+    # Create an edge: alpha calls beta — this is the hard block
     conn = db._connect()
     try:
         with conn.cursor() as cur:
