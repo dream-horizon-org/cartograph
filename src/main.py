@@ -1,4 +1,4 @@
-"""Cartograph Agent Runtime — entry point."""
+"""Cartograph Agent Runtime V2 -- entry point."""
 
 from __future__ import annotations
 
@@ -13,15 +13,13 @@ from agent_management.trigger_manager import TriggerManager
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DB_PATH = "cartograph.db"
 _DEFAULT_WORKSPACE_ROOT = "workspaces"
 _DEFAULT_MCP_CONFIG = os.path.join(
-    os.path.dirname(__file__), "mcp_servers.yaml"
+    os.path.dirname(__file__), "agent_management", "mcp_servers.yaml"
 )
 
 
 def boot(
-    db_path: str = _DEFAULT_DB_PATH,
     workspace_root: str = _DEFAULT_WORKSPACE_ROOT,
     mcp_config_path: str = _DEFAULT_MCP_CONFIG,
     start_trigger_manager: bool = True,
@@ -33,7 +31,7 @@ def boot(
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    db.init_db(db_path)
+    db.init_db()
 
     os.makedirs(workspace_root, exist_ok=True)
 
@@ -46,10 +44,6 @@ def boot(
         manager.create_agent("orchestrator")
         logger.info("Created orchestrator agent")
 
-    if not db.agent_type_exists("resolver"):
-        manager.create_agent("resolver")
-        logger.info("Created resolver agent")
-
     trigger_mgr = TriggerManager(
         agent_manager=manager,
         poll_interval=poll_interval,
@@ -58,7 +52,7 @@ def boot(
 
     if start_trigger_manager:
         trigger_mgr.start()
-        logger.info("Cartograph Agent Runtime is running")
+        logger.info("Cartograph V2 Agent Runtime is running")
 
     return trigger_mgr
 

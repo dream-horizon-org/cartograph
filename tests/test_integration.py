@@ -13,7 +13,6 @@ from main import boot
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    db_path = str(tmp_path / "cartograph.db")
     workspace_root = str(tmp_path / "workspaces")
     os.makedirs(workspace_root, exist_ok=True)
     mcp_config_path = str(tmp_path / "mcp_servers.yaml")
@@ -24,14 +23,13 @@ def tmp_project(tmp_path):
     with open(mcp_config_path, "w") as f:
         yaml.dump(mcp_config, f)
     return {
-        "db_path": db_path,
         "workspace_root": workspace_root,
         "mcp_config_path": mcp_config_path,
     }
 
 
 def test_full_lifecycle(tmp_project):
-    """Boot system, trigger manager processes orchestrator + resolver triggers."""
+    """Boot system, trigger manager processes orchestrator trigger."""
     invocations = []
 
     def mock_invoke(self, agent_id, prompt):
@@ -49,7 +47,6 @@ def test_full_lifecycle(tmp_project):
         "agent_management.agent_manager.AgentManager.invoke_agent", mock_invoke
     ):
         trigger_mgr = boot(
-            db_path=tmp_project["db_path"],
             workspace_root=tmp_project["workspace_root"],
             mcp_config_path=tmp_project["mcp_config_path"],
             start_trigger_manager=True,
@@ -58,19 +55,19 @@ def test_full_lifecycle(tmp_project):
         time.sleep(1.0)
         trigger_mgr.stop()
 
-    # Both singleton agents should have been invoked
-    assert len(invocations) == 2
+    # Only the orchestrator singleton should have been invoked
+    assert len(invocations) == 1
     invoked_types = set()
     for inv in invocations:
         agent = db.get_agent(inv["agent_id"])
         invoked_types.add(agent["agent_type"])
     assert "orchestrator" in invoked_types
-    assert "resolver" in invoked_types
+    assert "resolver" not in invoked_types
 
     # No pending triggers should remain
     assert len(db.get_pending_triggers()) == 0
 
-    # Both agents should be idle with session IDs
+    # Orchestrator should be idle with session ID
     for inv in invocations:
         agent = db.get_agent(inv["agent_id"])
         assert agent["status"] == "idle"

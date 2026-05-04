@@ -1,5 +1,4 @@
 import pytest
-
 from agent_management.agent_types.base import AgentTypeConfig, get_config
 
 
@@ -18,22 +17,13 @@ def test_agent_type_config_dataclass():
 
 
 def test_get_config_orchestrator():
-    config = get_config("orchestrator")
+    config = get_config("orchestrator", agent_id="orch-test")
     assert config.agent_type == "orchestrator"
     assert config.priority == 100
     assert config.can_install is False
     assert "bash" in config.allowed_tools
     assert "cartograph-db" in config.mcp_servers
     assert "Orchestrator" in config.system_prompt
-
-
-def test_get_config_orchestrator_includes_plane_mcps():
-    config = get_config("orchestrator", mcp_registry_keys="cartograph-db,github-mcp,aws-mcp")
-    assert "cartograph-db" in config.mcp_servers
-    assert "github-mcp" in config.mcp_servers
-    assert "aws-mcp" in config.mcp_servers
-    # No duplicates for cartograph-db
-    assert config.mcp_servers.count("cartograph-db") == 1
 
 
 def test_get_config_iterator_with_plane():
@@ -45,7 +35,9 @@ def test_get_config_iterator_with_plane():
 
 
 def test_get_config_sme_with_resource():
-    config = get_config("sme", plane="github", resource_id="repo-xyz")
+    config = get_config(
+        "sme", plane="github", resource_id="repo-xyz", agent_id="sme-test"
+    )
     assert config.agent_type == "sme"
     assert config.priority == 40
     assert config.can_install is False
@@ -53,12 +45,9 @@ def test_get_config_sme_with_resource():
     assert "github" in config.system_prompt
 
 
-def test_get_config_resolver():
-    config = get_config("resolver")
-    assert config.agent_type == "resolver"
-    assert config.priority == 80
-    assert config.can_install is False
-    assert "Resolver" in config.system_prompt
+def test_get_config_resolver_raises():
+    with pytest.raises(ValueError, match="Unknown agent type"):
+        get_config("resolver")
 
 
 def test_get_config_unknown_type_raises():

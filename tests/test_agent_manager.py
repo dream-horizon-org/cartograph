@@ -10,9 +10,7 @@ from agent_management.agent_manager import AgentManager
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    """Set up a temporary project with DB and MCP config."""
-    db_path = str(tmp_path / "cartograph.db")
-    db.init_db(db_path)
+    """Set up a temporary project with MCP config."""
     workspace_root = str(tmp_path / "workspaces")
     os.makedirs(workspace_root, exist_ok=True)
     mcp_config_path = str(tmp_path / "mcp_servers.yaml")
@@ -24,7 +22,6 @@ def tmp_project(tmp_path):
     with open(mcp_config_path, "w") as f:
         yaml.dump(mcp_config, f)
     return {
-        "db_path": db_path,
         "workspace_root": workspace_root,
         "mcp_config_path": mcp_config_path,
     }

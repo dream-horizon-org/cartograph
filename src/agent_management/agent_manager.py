@@ -1,4 +1,4 @@
-"""Agent Manager — create, invoke, and deactivate agents."""
+"""Agent Manager -- create, invoke, and deactivate agents."""
 
 from __future__ import annotations
 
@@ -17,9 +17,8 @@ logger = logging.getLogger(__name__)
 
 _TYPE_PREFIXES = {
     "orchestrator": "orch",
-    "iterator": "iter",
-    "sme": "sme",
-    "resolver": "res",
+    "iterator":     "iter",
+    "sme":          "sme",
 }
 
 
@@ -46,6 +45,7 @@ class AgentManager:
             agent_type,
             plane=plane or "",
             resource_id=resource_id or "",
+            agent_id=agent_id,
             mcp_registry_keys=",".join(self.mcp_registry.keys()),
         )
 
@@ -76,6 +76,7 @@ class AgentManager:
             agent["agent_type"],
             plane=agent.get("plane") or "",
             resource_id=agent.get("resource_id") or "",
+            agent_id=agent_id,
             mcp_registry_keys=",".join(self.mcp_registry.keys()),
         )
 
@@ -103,9 +104,7 @@ class AgentManager:
             )
 
             if result.returncode != 0:
-                logger.error(
-                    "Agent %s failed: %s", agent_id, result.stderr
-                )
+                logger.error("Agent %s failed: %s", agent_id, result.stderr)
                 db.update_agent_status(agent_id, "errored")
                 return result.stderr
 
@@ -130,7 +129,9 @@ class AgentManager:
         db.update_agent_status(agent_id, "decommissioned")
         db.cancel_pending_triggers(agent_id)
 
-    def _write_mcp_json(self, workspace_path: str, mcp_server_names: list[str]) -> None:
+    def _write_mcp_json(
+        self, workspace_path: str, mcp_server_names: list[str]
+    ) -> None:
         servers = {}
         for name in mcp_server_names:
             if name in self.mcp_registry:
@@ -141,18 +142,29 @@ class AgentManager:
             json.dump(mcp_json, f, indent=2)
 
     def _initial_prompt(
-        self, agent_type: str, plane: str | None, resource_id: str | None
+        self,
+        agent_type: str,
+        plane: str | None,
+        resource_id: str | None,
     ) -> str:
         if agent_type == "orchestrator":
-            return "System boot. You are the orchestrator. Review the current state of agent_runs and begin coordination."
+            return (
+                "System boot. You are the orchestrator. "
+                "Review the current state of agent_runs and begin coordination."
+            )
         elif agent_type == "iterator":
-            return f"Begin iteration for the {plane} plane. List all accessible resources and insert them into the resources table."
+            return (
+                f"Begin iteration for the {plane} plane. "
+                "List all accessible resources and insert them into the resources table."
+            )
         elif agent_type == "sme":
-            return f"You have been assigned resource {resource_id} from the {plane} plane. Begin materialisation — analyze the resource and build components."
-        elif agent_type == "resolver":
-            return "System boot. You are the resolver. Wait for consolidation nominations to process."
-        else:
-            return "Begin work."
+            return (
+                f"You have been assigned resource {resource_id} from the {plane} plane. "
+                "Begin materialisation -- analyse the resource and write all components "
+                "and attributions. Re-embed after every attribution write. "
+                "Yield when complete."
+            )
+        return "Begin work."
 
     def _extract_session_id(self, output: str) -> str | None:
         try:
