@@ -639,8 +639,11 @@ def create_edge(agent_id: str, edge_data: dict[str, Any]) -> dict[str, Any]:
     """[Phase 3.9 backward-compat shim] Record a bound edge from this
     SME's component. Prefer upsert_edge_outbound for new code.
 
-    Equivalent to upsert_edge_outbound with both endpoints set. Refuses
-    self-loops. Idempotent on (from, to, type, identifier).
+    Equivalent to upsert_edge_outbound with both endpoints set.
+    Self-loops permitted (Phase 7.3 dropped the DB CHECK; Phase 7.4.4
+    dropped the Python guard) — cron self-trigger / recursive
+    component-level calls / service publish+consume on the same topic
+    all model directly. Idempotent on (from, to, type, identifier).
 
     edge_data keys:
       source_id (your component — accepted as from_component_id alias),

@@ -29,10 +29,18 @@ Hard rules:
 - Cap 50 sub-calls. Above that, the SME prompt directs use of bulk
   variants which take 500 rows each (and those bulk variants are
   themselves callable inside mcp_call_batch).
-- Caller's `agent_id` is injected into a sub-call's args if the
+- Caller's identity is injected into a sub-call's args if the
   sub-call doesn't carry its own. If it carries a different one
   (e.g. proxy paths via act_on_proxy_item), that's preserved — the
   sub-call's own ownership/auth checks fire normally.
+
+  Phase 10.1.3: most tools accept the caller's identity under the
+  kwarg `agent_id`, but a handful of older tools use semantically
+  meaningful names (`from_agent_id` for chat/broadcast, `owner_agent_id`
+  for create_task, `survivor_id` for act_on_proxy_item, `asker_agent_id`
+  for create_clarification). Rather than rename those public params
+  (which would lose role semantics), the auto-inject consults
+  `_CALLER_KWARG_BY_TOOL` to choose the right kwarg name per tool.
 """
 
 import concurrent.futures
@@ -43,6 +51,30 @@ logger = logging.getLogger(__name__)
 
 MAX_BATCH_SIZE = 50
 MAX_CONCURRENCY = 8
+
+
+# Phase 10.1.3: tools whose caller-identity kwarg is NOT named `agent_id`.
+# Auto-inject in `_run_one` consults this map to decide which kwarg to
+# inject the outer batch's caller_id under. Tools not listed here use
+# the default `agent_id` kwarg.
+#
+# Keep this map in sync with the public signatures in cartograph_mcp/server.py
+# (the @mcp.tool wrappers). When a new tool is added with a non-standard
+# caller-id param name, add it here so it stays batchable.
+_CALLER_KWARG_BY_TOOL: dict[str, str] = {
+    "send_chat":            "from_agent_id",
+    "send_broadcast":       "from_agent_id",
+    "create_task":          "owner_agent_id",
+    "act_on_proxy_item":    "survivor_id",
+    "create_clarification": "asker_agent_id",
+}
+
+
+def _caller_kwarg_for(tool_name: str) -> str:
+    """Return the kwarg name under which to inject the caller's id for
+    `tool_name`. Defaults to 'agent_id'.
+    """
+    return _CALLER_KWARG_BY_TOOL.get(tool_name, "agent_id")
 
 
 def call_batch(
@@ -110,11 +142,17 @@ def call_batch(
         idx, c = item
         tool_name = c["tool"]
         args = dict(c.get("args", {}))
-        # Inject caller's agent_id ONLY if the sub-call didn't carry its own.
-        # Proxy paths (act_on_proxy_item) and admin paths legitimately need
-        # to specify a different agent_id — we don't override.
-        if "agent_id" not in args:
-            args["agent_id"] = agent_id
+        # Inject caller's identity under the right kwarg name for this
+        # tool (Phase 10.1.3 name-map — most tools use 'agent_id', but
+        # send_chat/send_broadcast use 'from_agent_id', create_task uses
+        # 'owner_agent_id', act_on_proxy_item uses 'survivor_id', and
+        # create_clarification uses 'asker_agent_id').
+        #
+        # Skip injection if the sub-call already carries the right kwarg
+        # — proxy paths legitimately need to specify a different identity.
+        kwarg = _caller_kwarg_for(tool_name)
+        if kwarg not in args:
+            args[kwarg] = agent_id
         try:
             result = dispatch[tool_name](**args)
             return {"idx": idx, "tool": tool_name, "ok": True, "result": result}

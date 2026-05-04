@@ -4691,6 +4691,63 @@ Real consequences:
 
 ---
 
+### 10.6.6 Phase 10.1.3: per-tool caller-id kwarg name-map in mcp_call_batch + create_edge docstring fix
+
+**Bugs filed by agents during DEMO-MEGA (2026-05-04):**
+
+`mcp_call_batch` (Phase 9.1) auto-injects the caller's identity into every sub-call's args dict so agents don't have to re-type their own id N times per batch. Pre-Phase-10.1.3 the inject was hard-coded to push under `agent_id`. Most tools accept `agent_id` as their caller-id kwarg, but 4 use semantically-meaningful role names — `from_agent_id` (chat / broadcast — caller is the sender), `owner_agent_id` (create_task — caller is the task owner), `survivor_id` (act_on_proxy_item — caller is the survivor of a merge). Inject pushed `agent_id=...` → tool TypeError'd on the unexpected kwarg → those 4 tools were uncallable inside batches.
+
+5 separate insights filed by SMEs hitting the bug: `7ce4622c` (send_broadcast), `7c0bae81` (create_task), `4a220f29` (act_on_proxy_item), `f41f310e` (send_chat), `5e58b07d` (send_chat — same class as act_on_proxy_item).
+
+Plus 1 docstring lie: `create_edge` MCP wrapper claimed "Refuses self-loops" — wrong since Phase 7.3 (DB CHECK dropped) + Phase 7.4.4 (Python guards dropped). Insight `192d84c4`.
+
+**Two design options considered:**
+
+1. **Rename the 4 tool params to `agent_id`.** Uniform but loses role semantics; would also need to chase prompt + doc references for every tool whose param appears in a worked example. Tested via working-tree changes; reverted.
+
+2. **Per-tool caller-id kwarg name-map in `mcp_call_batch`** ✅ **shipped.** Tools keep their semantically-meaningful param names; the dispatcher consults a one-tool-per-line dict to choose which kwarg to inject under. Less invasive, preserves role names, and the same map can absorb future tools with non-standard caller-id params.
+
+**Implementation:**
+
+`src/cartograph_mcp/tools/call_batch.py` — new module-level dict + helper:
+
+```python
+_CALLER_KWARG_BY_TOOL: dict[str, str] = {
+    "send_chat":            "from_agent_id",
+    "send_broadcast":       "from_agent_id",
+    "create_task":          "owner_agent_id",
+    "act_on_proxy_item":    "survivor_id",
+    "create_clarification": "asker_agent_id",  # same class as the 4 above; closed proactively
+}
+
+def _caller_kwarg_for(tool_name: str) -> str:
+    return _CALLER_KWARG_BY_TOOL.get(tool_name, "agent_id")
+```
+
+The `_run_one` dispatcher inside `call_batch` now consults `_caller_kwarg_for(tool_name)` to choose the inject target instead of hard-coding `agent_id`. Idempotency / override semantics unchanged: if the sub-call already carries the right kwarg, no inject — proxy paths can still override.
+
+**Includes `create_clarification`** — that's a 5th tool with the same shape (param `asker_agent_id`) that no DEMO-MEGA agent happened to batch during the run. Closed proactively; same map entry covers it.
+
+**`create_edge` docstring fix** (independent of name-map): single-line edit in `src/cartograph_mcp/server.py:642-643`. Replace the false "Refuses self-loops" line with the truth ("Self-loops permitted (Phase 7.3 dropped DB CHECK; Phase 7.4.4 dropped Python guard)").
+
+**Tests added (`tests/mcp_tools/test_call_batch.py`):**
+
+11 new regression tests pinning the fix:
+
+- `test_phase10_1_3_unit_caller_kwarg_lookup` — direct unit test on the name-map (catches future drift if a tool's public signature changes without map update).
+- `test_phase10_1_3_unit_inject_pushes_to_right_kwarg` — synthetic dispatch test, no DB. Confirms inject reaches the right kwarg per tool.
+- `test_phase10_1_3_unit_does_not_inject_when_kwarg_already_present` — pinned override semantics.
+- 5 real-dispatch tests (one per affected tool) via the actual server registry: `send_chat`, `send_broadcast`, `create_task`, `act_on_proxy_item`, `create_clarification` all callable inside `mcp_call_batch`.
+- `test_phase10_1_3_all_5_renamed_tools_in_one_batch` — the big one: 3 in one orch batch + 2 in one survivor batch, all ok=True.
+- `test_phase10_1_3_create_edge_self_loop_succeeds_via_shim` — behavioural confirmation that the shim accepts a self-loop.
+- `test_phase10_1_3_create_edge_docstring_no_longer_lies` — docstring grep regression.
+
+29/29 tests in `test_call_batch.py` green.
+
+**Touched files:** `src/cartograph_mcp/tools/call_batch.py` (name-map + inject), `src/cartograph_mcp/server.py` (docstring fix only — no signature changes), `tests/mcp_tools/test_call_batch.py` (11 new tests). Tool count unchanged: 114. No prompt or doc-sync ripples — public tool signatures stay identical to what agents already learned.
+
+---
+
 ### 10.7 Schema delta
 
 One additive index (Phase 10.1.1):
