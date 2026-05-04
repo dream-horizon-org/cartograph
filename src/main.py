@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WORKSPACE_ROOT = "workspaces"
 _DEFAULT_MCP_CONFIG = os.path.join(
-    os.path.dirname(__file__), "agent_management", "mcp_servers.yaml"
+    os.path.dirname(__file__), "mcp_servers.yaml"
 )
 
 

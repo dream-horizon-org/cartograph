@@ -692,14 +692,41 @@ def execute_merge_in_db(surviving_id: str, absorbed_id: str) -> None:
     """
     Atomically re-point all absorbed component's data to the surviving
     component and decommission the absorbed component.
+
+    Duplicate edges/RCA rows (same key already exists on surviving) are
+    deleted before re-pointing to avoid UNIQUE/PK constraint violations.
     """
     conn = _connect()
     try:
         with conn.cursor() as cur:
+            # Re-point attributions (ON CONFLICT handled by upsert; plain
+            # UPDATE is safe here since attributions UNIQUE is on
+            # (plane, resource_type, identifier) not on component_id)
             cur.execute(
                 "UPDATE attributions SET component_id = %s"
                 " WHERE component_id = %s",
                 (surviving_id, absorbed_id),
+            )
+
+            # For edges: delete absorbed rows whose (surviving, target, type,
+            # identifier) combo already exists to avoid UNIQUE violation
+            cur.execute(
+                """DELETE FROM edges
+                   WHERE source_id = %s
+                     AND (target_id, edge_type, identifier) IN (
+                         SELECT target_id, edge_type, identifier
+                         FROM edges WHERE source_id = %s
+                     )""",
+                (absorbed_id, surviving_id),
+            )
+            cur.execute(
+                """DELETE FROM edges
+                   WHERE target_id = %s
+                     AND (source_id, edge_type, identifier) IN (
+                         SELECT source_id, edge_type, identifier
+                         FROM edges WHERE target_id = %s
+                     )""",
+                (absorbed_id, surviving_id),
             )
             cur.execute(
                 "UPDATE edges SET source_id = %s WHERE source_id = %s",
@@ -709,11 +736,24 @@ def execute_merge_in_db(surviving_id: str, absorbed_id: str) -> None:
                 "UPDATE edges SET target_id = %s WHERE target_id = %s",
                 (surviving_id, absorbed_id),
             )
+
+            # For RCA: delete absorbed rows whose resource_id already maps to
+            # surviving to avoid PK (resource_id, component_id) violation
+            cur.execute(
+                """DELETE FROM resource_component_agents
+                   WHERE component_id = %s
+                     AND resource_id IN (
+                         SELECT resource_id FROM resource_component_agents
+                         WHERE component_id = %s
+                     )""",
+                (absorbed_id, surviving_id),
+            )
             cur.execute(
                 "UPDATE resource_component_agents SET component_id = %s"
                 " WHERE component_id = %s",
                 (surviving_id, absorbed_id),
             )
+
             cur.execute(
                 "UPDATE components SET status = 'decommissioned',"
                 " updated_at = now() WHERE id = %s",
