@@ -4,6 +4,15 @@ from unittest.mock import MagicMock, patch
 from agent_management.embedding import synthesize_description, embed_text
 
 
+@pytest.fixture(autouse=True)
+def clear_openai_cache():
+    """Clear the lru_cache before and after each test for isolation."""
+    from agent_management import embedding
+    embedding._get_openai_client.cache_clear()
+    yield
+    embedding._get_openai_client.cache_clear()
+
+
 def test_synthesize_description_minimal():
     component = {"component_type": "application", "canonical_name": "feeds-api"}
     attributions = []

@@ -50,7 +50,12 @@ def synthesize_description(
     # Group attributions by resource_type
     by_type: dict[str, list[str]] = {}
     for attr in attributions:
-        by_type.setdefault(attr["resource_type"], []).append(attr["identifier"])
+        try:
+            by_type.setdefault(attr["resource_type"], []).append(attr["identifier"])
+        except KeyError as exc:
+            raise ValueError(
+                f"Attribution missing required key {exc}: {attr!r}"
+            ) from exc
 
     # Emit fields in priority order
     for field in _FIELD_PRIORITY:

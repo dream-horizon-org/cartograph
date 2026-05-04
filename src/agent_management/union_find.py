@@ -17,9 +17,13 @@ class UnionFind:
 
     def find(self, item: str) -> str:
         self.add(item)
-        if self._parent[item] != item:
-            self._parent[item] = self.find(self._parent[item])  # path compression
-        return self._parent[item]
+        # Iterative path compression — avoids Python's recursion limit on large sets
+        root = item
+        while self._parent[root] != root:
+            root = self._parent[root]
+        while self._parent[item] != root:
+            self._parent[item], item = root, self._parent[item]
+        return root
 
     def union(self, a: str, b: str) -> None:
         self.add(a)
