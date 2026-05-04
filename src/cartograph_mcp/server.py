@@ -1618,6 +1618,139 @@ def vector_search(
     return search_tool.vector_search(agent_id, query_text, table, limit)
 
 
+# ============ DETERMINISTIC SEARCH (Phase 10.3) ============
+# Six SQL-LIKE search tools that fill the "find rows without knowing
+# the component_id first" gap. AND across columns; OR within column
+# via list. Plain string → exact; %/_-bearing → ILIKE. Cap 100 rows.
+# Refuses blank-filter calls.
+
+
+@mcp.tool()
+def search_components(
+    agent_id: str,
+    canonical_name_pattern: str | None = None,
+    display_name_pattern: str | None = None,
+    name_pattern: str | None = None,
+    component_type: Any = None,
+    status: Any = "active",
+    plane: Any = None,
+) -> list[dict]:
+    """Phase 10.3. Find components by exact/ILIKE patterns + filters.
+
+    Args:
+      canonical_name_pattern: ILIKE if contains %/_, else exact match.
+      display_name_pattern: same.
+      name_pattern: convenience — ILIKE both canonical_name AND
+        display_name (admin-UI `q` parity). Pass at most ONE of
+        {name_pattern, canonical_name_pattern, display_name_pattern}.
+      component_type: scalar or list (OR within column).
+      status: defaults to 'active'. Pass None to include all statuses.
+      plane: filter via RCA → resources.plane. Scalar or list.
+
+    Returns: lean list[dict] with id + canonical_name + display_name +
+      component_type + status + planes[]. Capped at 100 rows.
+    """
+    return search_tool.search_components(
+        agent_id, canonical_name_pattern, display_name_pattern,
+        name_pattern, component_type, status, plane,
+    )
+
+
+@mcp.tool()
+def search_attributions(
+    agent_id: str,
+    identifier_pattern: str | None = None,
+    plane: Any = None,
+    resource_type: Any = None,
+    component_id: str | None = None,
+) -> list[dict]:
+    """Phase 10.3. Find attributions by identifier pattern + filters.
+
+    Returns lean rows: {id, component_id, plane, resource_type,
+    identifier, confidence}. Capped at 100.
+    """
+    return search_tool.search_attributions(
+        agent_id, identifier_pattern, plane, resource_type, component_id,
+    )
+
+
+@mcp.tool()
+def search_edges(
+    agent_id: str,
+    identifier_pattern: str | None = None,
+    edge_type: Any = None,
+    kind: Any = None,
+    from_component_id: str | None = None,
+    to_component_id: str | None = None,
+) -> list[dict]:
+    """Phase 10.3. Find edges by identifier + edge_type + kind + endpoints.
+
+    `kind` ∈ {'bound', 'catalog', 'dangling'} (scalar or list). Note
+    'catalog' kind is historical — post-Phase-7.4 catalog rows live
+    in the `catalogs` table; use search_catalogs for live catalogs.
+
+    Returns lean rows including the computed `kind` for each edge. Cap 100.
+    """
+    return search_tool.search_edges(
+        agent_id, identifier_pattern, edge_type, kind,
+        from_component_id, to_component_id,
+    )
+
+
+@mcp.tool()
+def search_catalogs(
+    agent_id: str,
+    identifier_pattern: str | None = None,
+    kind: Any = None,
+    component_id: str | None = None,
+) -> list[dict]:
+    """Phase 10.3. Find catalog rows by identifier + kind + owner.
+
+    Returns lean rows: {id, component_id, kind, identifier, confidence}.
+    Cap 100.
+    """
+    return search_tool.search_catalogs(
+        agent_id, identifier_pattern, kind, component_id,
+    )
+
+
+@mcp.tool()
+def search_flows(
+    agent_id: str,
+    component_id: str | None = None,
+    incoming_catalog_id: str | None = None,
+    outgoing_edge_id: str | None = None,
+) -> list[dict]:
+    """Phase 10.3. Find flows by component / catalog / edge id.
+
+    Flows have no human-readable identifier — only FK references. So
+    this is ID-based filtering only, no string pattern field.
+    Cap 100.
+    """
+    return search_tool.search_flows(
+        agent_id, component_id, incoming_catalog_id, outgoing_edge_id,
+    )
+
+
+@mcp.tool()
+def search_unresolved(
+    agent_id: str,
+    reference_value_pattern: str | None = None,
+    reference_type: Any = None,
+    found_in_component_id: str | None = None,
+    only_unresolved: bool = True,
+) -> list[dict]:
+    """Phase 10.3. Find unresolved refs by value pattern + filters.
+
+    `only_unresolved=True` (default) excludes resolved=TRUE rows.
+    Cap 100.
+    """
+    return search_tool.search_unresolved(
+        agent_id, reference_value_pattern, reference_type,
+        found_in_component_id, only_unresolved,
+    )
+
+
 @mcp.tool()
 def get_agent_notifications(
     agent_id: str,
@@ -2115,6 +2248,9 @@ def _build_batch_dispatch() -> dict:
         "get_my_clarifications", "get_clarification_thread",
         # search
         "vector_search",
+        # Phase 10.3 deterministic search
+        "search_components", "search_attributions", "search_edges",
+        "search_catalogs", "search_flows", "search_unresolved",
         # mutation
         "execute_mutation", "complete_consolidation",
         "absorb_agent", "spawn_child_agent",
