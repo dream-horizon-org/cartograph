@@ -12,7 +12,6 @@ from agent_management.trigger_manager import TriggerManager
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    db.init_db()
     workspace_root = str(tmp_path / "workspaces")
     os.makedirs(workspace_root, exist_ok=True)
     mcp_config_path = str(tmp_path / "mcp_servers.yaml")

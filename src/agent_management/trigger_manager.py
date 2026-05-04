@@ -38,6 +38,7 @@ class TriggerManager:
         self.current_phase = Phase.ITERATION
         self.running = False
         self._thread: threading.Thread | None = None
+        self._batch_merge_executed = False  # guard: run merge pass only once
 
     def start(self) -> None:
         self.running = True
@@ -114,24 +115,28 @@ class TriggerManager:
     def _run_batch_merge_phase(self) -> None:
         """
         Execute the batch merge phase as code — no LLM involved.
-        Runs once per loop iteration while phase == BATCH_MERGE,
-        then advances to RESOLUTION when no pending_human candidates remain.
-        Imported here to avoid circular imports at module load time.
+        The merge pass runs exactly once; subsequent loop iterations only
+        poll for pending_human confirmations. Advances to RESOLUTION when
+        no pending_human candidates remain.
+        Deferred imports to avoid circular imports at module load time.
         """
         from agent_management.batch_merger import run_batch_merge
         from agent_management.embedding import embed_component
 
-        logger.info("Starting batch merge phase")
-        summary = run_batch_merge(re_embed_fn=embed_component)
-        logger.info(
-            "Batch merge complete: auto_executed=%d pending_human=%d skipped=%d",
-            summary["auto_executed"],
-            summary["pending_human"],
-            summary["skipped"],
-        )
+        if not self._batch_merge_executed:
+            logger.info("Starting batch merge phase")
+            summary = run_batch_merge(re_embed_fn=embed_component)
+            logger.info(
+                "Batch merge complete: auto_executed=%d pending_human=%d skipped=%d",
+                summary["auto_executed"],
+                summary["pending_human"],
+                summary["skipped"],
+            )
+            self._batch_merge_executed = True
 
         pending = db.get_merge_candidates("pending_human")
         if not pending:
+            self._batch_merge_executed = False  # reset in case of re-entry
             self.advance_phase(Phase.RESOLUTION)
         else:
             logger.info(
