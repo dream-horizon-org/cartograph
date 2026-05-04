@@ -1395,6 +1395,7 @@ def spawn_child_agent(
         child_component_data, child_source_slice, split_briefing,
         transfer_edge_ids, transfer_flow_ids, transfer_attribution_ids,
         transfer_catalog_ids,
+        agent_manager=_agent_manager_for_spawn,
     )
 
 

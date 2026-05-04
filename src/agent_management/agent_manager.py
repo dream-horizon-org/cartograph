@@ -192,11 +192,9 @@ class AgentManager:
             mcp_registry_keys=",".join(self.mcp_registry.keys()),
         )
 
-        workspace_path = os.path.join(self.workspace_root, agent_id)
-        os.makedirs(workspace_path, exist_ok=True)
-
-        self._write_mcp_json(workspace_path, config.mcp_servers)
-        self._write_claude_settings(workspace_path, agent_id, agent_type)
+        workspace_path = self.provision_workspace(
+            agent_id, agent_type, config.mcp_servers,
+        )
 
         db.create_agent_run(
             agent_id=agent_id,
@@ -440,6 +438,28 @@ class AgentManager:
     def deactivate_agent(self, agent_id: str) -> None:
         db.update_agent_status(agent_id, "decommissioned")
         db.release_trigger_lock(agent_id)
+
+    def provision_workspace(
+        self, agent_id: str, agent_type: str, mcp_server_names: list[str],
+    ) -> str:
+        """Create a dedicated workspace for `agent_id` + write its MCP +
+        Claude Code settings files. Idempotent on the directory + files.
+
+        Phase 10.1.2: extracted from `create_agent` so the mutation
+        path (`spawn_child_agent`) can call this directly when carving
+        out a child SME — pre-10.1.2 it copied the parent's
+        workspace_path verbatim, which left two agents writing into one
+        cwd (notify.py marker race, scratch-file collisions, shared
+        handoff/MERGE_LOG, shared cloned repo). Now every agent gets
+        its own dedicated cwd regardless of how it was spawned.
+
+        Returns the absolute workspace_path.
+        """
+        workspace_path = os.path.join(self.workspace_root, agent_id)
+        os.makedirs(workspace_path, exist_ok=True)
+        self._write_mcp_json(workspace_path, mcp_server_names)
+        self._write_claude_settings(workspace_path, agent_id, agent_type)
+        return workspace_path
 
     def _write_mcp_json(self, workspace_path: str, mcp_server_names: list[str]) -> None:
         """Write .mcp.json for Claude Code to load MCP servers.

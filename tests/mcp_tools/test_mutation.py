@@ -456,6 +456,94 @@ def test_spawn_blocks_respawn(agent_factory):
         )
 
 
+def test_phase10_1_2_child_gets_dedicated_workspace(agent_factory, tmp_path):
+    """Phase 10.1.2: pre-fix the child copied parent's workspace_path verbatim
+    → two agents writing into one cwd. Now the mutation tool calls back into
+    agent_manager.provision_workspace so the child gets its own dedicated
+    workspace dir + .mcp.json + .claude/settings.json.
+    """
+    import os
+    import yaml
+    from agent_management.agent_manager import AgentManager
+
+    # Build a real AgentManager rooted at tmp_path.
+    mcp_yaml = tmp_path / "mcp_servers.yaml"
+    mcp_yaml.write_text(yaml.safe_dump({"cartograph-db": {"url": "http://localhost:8100"}}))
+    am = AgentManager(workspace_root=str(tmp_path / "workspaces"),
+                      mcp_config_path=str(mcp_yaml))
+
+    # Set up a split-state consolidation.
+    s = _m_state_split(agent_factory)
+    ra = s["res_a"]
+    execute_mutate(
+        "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
+        (json.dumps({ra: {"plane": "github", "paths": ["a/", "b/"]}}), s["comp_a"]),
+    )
+    # Set parent's workspace_path to a known value for comparison.
+    parent_ws = str(tmp_path / "workspaces" / "sme-a")
+    os.makedirs(parent_ws, exist_ok=True)
+    execute_mutate(
+        "UPDATE agent_runs SET workspace_path=%s WHERE agent_id='sme-a'",
+        (parent_ws,),
+    )
+
+    # Spawn child with agent_manager passed → should get its own ws.
+    result = mutation.spawn_child_agent(
+        "sme-a", s["cons_id"], "sme-child-iso",
+        {"canonical_name": "o/iso", "display_name": "iso",
+         "component_type": "application"},
+        {ra: {"plane": "github", "paths": ["b/"]}},
+        "split",
+        agent_manager=am,
+    )
+    assert result["child_agent_id"] == "sme-child-iso"
+
+    child = execute_one(
+        "SELECT workspace_path FROM agent_runs WHERE agent_id='sme-child-iso'"
+    )
+    # Child workspace must be DIFFERENT from parent.
+    assert child["workspace_path"] != parent_ws, (
+        "Phase 10.1.2 regression: child still shares parent's workspace_path"
+    )
+    # Child workspace must exist on disk.
+    assert os.path.isdir(child["workspace_path"])
+    # And carry .mcp.json + .claude/settings.json.
+    assert os.path.exists(os.path.join(child["workspace_path"], ".mcp.json"))
+    assert os.path.exists(
+        os.path.join(child["workspace_path"], ".claude", "settings.json")
+    )
+
+
+def test_phase10_1_2_no_agent_manager_falls_back_with_warning(agent_factory):
+    """Phase 10.1.2 fallback path: if no agent_manager passed (e.g.
+    test contexts that don't wire one), the legacy behavior of
+    parent-share is preserved with a warning. Documents the fallback;
+    production calls always pass agent_manager via server.py wrapper.
+    """
+    s = _m_state_split(agent_factory)
+    ra = s["res_a"]
+    execute_mutate(
+        "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
+        (json.dumps({ra: {"paths": ["a/", "b/"]}}), s["comp_a"]),
+    )
+    # No agent_manager arg → fallback to parent-copy.
+    mutation.spawn_child_agent(
+        "sme-a", s["cons_id"], "sme-child-fb",
+        {"canonical_name": "o/fb", "display_name": "fb",
+         "component_type": "application"},
+        {ra: {"paths": ["b/"]}},
+        "split",
+    )
+    parent = execute_one(
+        "SELECT workspace_path FROM agent_runs WHERE agent_id='sme-a'"
+    )
+    child = execute_one(
+        "SELECT workspace_path FROM agent_runs WHERE agent_id='sme-child-fb'"
+    )
+    # Without agent_manager, fallback re-shares parent's ws (legacy behaviour).
+    assert child["workspace_path"] == parent["workspace_path"]
+
+
 def test_spawn_requires_split_nomination(agent_factory):
     # Merge consolidation: spawn must refuse.
     s = _m_state_merge(agent_factory)

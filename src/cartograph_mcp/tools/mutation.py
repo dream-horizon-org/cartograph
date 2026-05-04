@@ -395,6 +395,7 @@ def spawn_child_agent(
     transfer_flow_ids: list[str] | None = None,
     transfer_attribution_ids: list[str] | None = None,
     transfer_catalog_ids: list[str] | None = None,
+    agent_manager=None,
 ) -> dict:
     """SPLIT: carve out a new component + new SME from the caller's scope.
 
@@ -522,11 +523,52 @@ def spawn_child_agent(
     )
 
     # 3. Insert idle SME agent_runs row.
-    #    plane + workspace_path copied from parent for consistency.
+    #    plane copied from parent. workspace_path is provisioned FRESH
+    #    via agent_manager.provision_workspace (Phase 10.1.2). Pre-10.1.2
+    #    the child copied the parent's workspace_path verbatim, which
+    #    left two agents writing into one cwd (notify.py marker race,
+    #    scratch-file collisions, shared handoff/MERGE_LOG, shared
+    #    cloned repo). Bug confirmed via DB: a single shared
+    #    workspace_path with array_agg(agent_id) showed parent + child
+    #    pair.
     parent_agent = execute_one(
         "SELECT plane, workspace_path FROM agent_runs WHERE agent_id = %s",
         (agent_id,),
     )
+
+    # Provision a dedicated workspace for the child if an agent_manager
+    # was passed through (server.py spawn_child_agent wrapper passes
+    # _agent_manager_for_spawn). Without it, fall back to the legacy
+    # parent-share behaviour with a logged warning — keeps the tool
+    # callable in test contexts that don't wire an agent_manager.
+    child_workspace_path = None
+    if agent_manager is not None:
+        # Determine which mcp servers the child needs. SMEs use the same
+        # registry the parent did; we resolve via the SME config builder
+        # so any future plane-specific MCP additions land here too.
+        from agent_management.agent_types.base import get_config
+        child_plane = parent_agent["plane"] if parent_agent else ""
+        child_config = get_config(
+            "sme",
+            plane=child_plane or "",
+            resource_id="",  # RCA rows wired in step 4 below
+            mcp_registry_keys=",".join(agent_manager.mcp_registry.keys()),
+        )
+        child_workspace_path = agent_manager.provision_workspace(
+            child_agent_id, "sme", child_config.mcp_servers,
+        )
+    else:
+        import logging as _lg
+        _lg.getLogger(__name__).warning(
+            "spawn_child_agent: no agent_manager passed; child "
+            "%s will share parent %s's workspace (Phase 10.1.2 "
+            "fallback, test path only).",
+            child_agent_id, agent_id,
+        )
+        child_workspace_path = (
+            parent_agent["workspace_path"] if parent_agent else None
+        )
+
     execute_mutate(
         """INSERT INTO agent_runs
            (agent_id, agent_type, status, plane, workspace_path)
@@ -535,7 +577,7 @@ def spawn_child_agent(
         (
             child_agent_id,
             parent_agent["plane"] if parent_agent else None,
-            parent_agent["workspace_path"] if parent_agent else None,
+            child_workspace_path,
         ),
     )
 
