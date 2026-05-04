@@ -370,7 +370,9 @@ TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
 
 To avoid the "drip-fed wakes" cost pattern (3 events arrive 30s apart →
 3 separate wakes each re-paying the 16k-token cached system-prompt
-read), the trigger scanner debounces wakes by a 5-minute window.
+read), the trigger scanner debounces wakes by a 1-minute window
+(was 5 minutes; tuned down via commit `bc72bd0` after demo runs
+showed 5 min added too much per-event latency).
 
 ```
 agent_runs gains:
@@ -394,7 +396,7 @@ agent_manager on yield → idle:
   clear first_pending_at  -- fresh window per cycle
 ```
 
-**Override conditions (bypass the 5-min window):**
+**Override conditions (bypass the 1-min window):**
 
 1. **Pending admin chat** — admin chat is the wake-from-sleep auto-wake
    signal; debouncing it would defeat the urgency contract.
@@ -402,14 +404,14 @@ agent_manager on yield → idle:
    mid-mutation must not be delayed; resolver is waiting for the
    M → MD transition.
 
-**Configurability:** the window is `WAKE_DEBOUNCE_SECONDS = 300` in
-`trigger_loop.py`. Adjust if 5 min proves too long for the work
-cadence (e.g. drop to 60s during interactive demo runs).
+**Configurability:** the window is `WAKE_DEBOUNCE_SECONDS = 60` in
+`trigger_loop.py`. Bump back up to 300 if the workload is
+background-only and per-event latency is acceptable.
 
 **Trade-off documented for the user:**
 - Routine work (peer consolidation responses, broadcasts, non-admin
   chats from orchestrator, terminal_pending_ack reminders) sees up
-  to 5-min latency between event arrival and agent wake.
+  to 1-min latency between event arrival and agent wake.
 - Mid-merge dance + admin chat stay responsive via the override.
 
 ---
