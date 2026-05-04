@@ -186,6 +186,8 @@ Embedding happens at write time — **contextual description, not identifier** (
 
 This phase is driven by the Trigger Manager as code — no LLM agents involved unless a human confirms a medium-confidence candidate.
 
+**Phase gate:** Batch merge does not start until ALL SMEs have finished materialisation (all resources status=`done`, all SME agent_runs status=`idle` or `done`). Running it earlier would produce incomplete matches because: (a) components mid-materialisation have partially enriched embeddings, (b) the SQL join across attributions needs all attributions written, and (c) union-find transitive grouping requires the full edge set to be known before any merge executes.
+
 ```
 All SMEs finish materialisation
   ↓
