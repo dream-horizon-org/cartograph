@@ -4318,21 +4318,342 @@ After 9.4 the user runs DEMO9 to verify in-the-wild behaviour: actual parallel-t
 
 ---
 
-## Phase 10+: Future phases (planned, not started)
+## Phase 10: Search/Discovery + Embedding fix + Race guard + TEMP lock-step doctrine 🚧 IN FLIGHT
 
-**Phase 10 — Phase-flow completion** (orchestrator-driven sweeps):
+**Status (2026-05-04):** plan landed; implementation in progress.
+
+Bundle of small lookup-correctness wins surfaced from DEMO9 review + post-DEMO8 architectural reflection. Four sub-batches; each is small enough to ship as one commit.
+
+### 10.0 Scope
+
+| Sub-batch | What | Effort | Tool count delta |
+|---|---|---|---|
+| **10.1** | Symmetric-nomination race guard in `nominate_consolidation` | XS | 0 |
+| **10.2** | Add `component_doc_md` to `component_embed_text` + backfill | XS | 0 |
+| **10.3** | 6 deterministic search tools (search_components / _attributions / _edges / _catalogs / _flows / _unresolved) | M | +6 (108 → 114) |
+| **10.4** | TEMP lock-step phase progression doctrine in prompts | XS | 0 |
+
+Out-of-scope (parked): full phase-state-machine enforcement at the DB layer (Phase 10.4 stays prompt-only — it's a coordination doctrine, not a hard contract). If the prompt doctrine proves insufficient, escalate to `agent_runs.phase` enforcement in a future phase.
+
+---
+
+### 10.1 Symmetric-nomination race guard
+
+**Symptom (architectural review, 2026-05-04):** if SME-A nominates SME-B for merge at T0 and SME-B nominates SME-A at T0+ε, both INSERTs into `consolidations` succeed. No DB UNIQUE constraint, no application-layer pre-check. Result: 2 consolidation rows for the same logical pair, double work, double resolver review, occasional "second mutation silently fails post-decommission" if both reach M.
+
+**Fix.** Add a pre-INSERT SELECT in `tools/consolidation.py::nominate_consolidation` (after the existing component-ownership checks, before the INSERT):
+
+```python
+existing = execute_one(
+    """SELECT id FROM consolidations
+        WHERE nomination_type = 'merge'
+          AND status NOT IN ('D','F')
+          AND ((component_a_id = %s AND component_b_id = %s)
+            OR (component_a_id = %s AND component_b_id = %s))""",
+    (component_a_id, component_b_id, component_b_id, component_a_id),
+)
+if existing:
+    raise ValueError(
+        f"Open consolidation between these components already exists "
+        f"(id={existing['id']}). Respond on that thread instead of "
+        f"nominating again."
+    )
+```
+
+Skip for split nominations (no symmetry — split has only one party).
+
+**Caveat.** Pure SELECT-then-INSERT has a true microsecond race: two transactions can both see no existing row, both insert. To close that, a partial UNIQUE index on a normalised pair would be needed — `(LEAST(a,b), GREATEST(a,b)) WHERE status NOT IN ('D','F') AND nomination_type='merge'`. We're skipping the partial UNIQUE for now (functional unique indexes are slightly fiddly, and the SELECT guard catches the human-visible 99% of races); if real concurrent nominations show up in DEMO10 logs, escalate.
+
+**Tests (~3 new in `tests/mcp_tools/test_consolidation.py`):**
+- A→B nomination, then B→A → second raises with "already exists".
+- A→B nomination → resolver rejects to F → B→A nomination now succeeds (terminal-status pair doesn't block).
+- A→B split nomination → A→B merge nomination should still succeed (different `nomination_type`).
+
+**Files:** `src/cartograph_mcp/tools/consolidation.py`, `tests/mcp_tools/test_consolidation.py`.
+
+---
+
+### 10.2 `component_doc_md` embedding extension
+
+**Symptom (DEMO9 review, 2026-05-04):** vector_search on components clusters on short identity strings only — `f"{component_type}: {canonical_name} {display_name} {meta_json}"`. Real recall gap: query "auth service handling user verify" misses `canonical_name=fav2-api` even when its `component_doc_md` says exactly that.
+
+**Fix.** Extend `shared/embedding.py::component_embed_text` to include `component_doc_md` (capped at 500 chars to keep embedding signal balanced):
+
+```python
+def component_embed_text(canonical_name, display_name, component_type,
+                         metadata, component_doc_md):
+    meta = json.dumps(metadata or {}, sort_keys=True)
+    doc = (component_doc_md or "")[:500]
+    return f"{component_type}: {canonical_name} {display_name} {doc} {meta}"
+```
+
+Update both call-sites in `tools/components.py::upsert_component` (line ~108 + the bulk variant if it embeds, though the bulk variant doesn't currently embed — components don't have a bulk write).
+
+**Backfill.** Run `shared/embedding_backfill.py::backfill_all()` once after the change ships. Re-embeds existing component rows with the new text shape. ~50ms × N components, single CLI invocation. Idempotent.
+
+**NOT changing:**
+- `source_slice` — paths/files = structural references, not semantic content. Would dilute embed signal.
+- Other tables (`attributions`, `edges`, `unresolved`, `catalogs`) — already identity-only by design. Short embed = better matching precision.
+
+**Threshold caveat.** Existing cosine threshold of 0.75 may need re-calibration to ~0.70 post-fix — doc_md adds recall but slightly hurts precision. Measure on DEMO10 data before adjusting.
+
+**Tests (~2 new in `tests/mcp_tools/test_component_doc_md.py`):**
+- After `upsert_component(... component_doc_md='auth service ...')`, the embedding row carries doc-influenced content. Hard to assert directly without comparing vectors; instead assert via integration: vector_search('auth service') returns the component when its doc_md says auth-service even when canonical_name is unrelated.
+- Cap test: 1500-char doc_md → embed-text built from first 500 chars only.
+
+**Files:** `src/shared/embedding.py`, `src/cartograph_mcp/tools/components.py`, `tests/mcp_tools/test_component_doc_md.py`.
+
+---
+
+### 10.3 Six deterministic search tools
+
+**Gap.** `vector_search` is currently the ONLY fuzzy/cross-component reader. Per-table read tools (`get_attributions`, `get_edges`, `get_my_catalogs`, etc.) all need a `component_id` first. There's no "find every component calling `GET /payments/charge`"-style query short of fanning out across all components or shelling to the admin UI's `/api/components?q=...`.
+
+**Design.** 6 SQL-LIKE-based search tools. AND across columns; OR within a column via list. Plain string → exact match; `%`/`_`-bearing string → ILIKE.
+
+```
+search_components(agent_id,
+    canonical_name_pattern? | display_name_pattern? | name_pattern?,
+    component_type? | list,
+    status?='active' | list,
+    plane? | list,
+) -> list[component_row]
+
+search_attributions(agent_id,
+    identifier_pattern?,
+    plane? | list,
+    resource_type? | list,
+    component_id?,
+) -> list[attribution_row]
+
+search_edges(agent_id,
+    identifier_pattern?,
+    edge_type? | list,
+    kind? in {'bound', 'catalog', 'dangling'} | list,
+    from_component_id?,
+    to_component_id?,
+) -> list[edge_row]
+# 'catalog' kind is historical (pre-Phase-7.4 from-NULL rows that
+# migrated to the catalogs table) — kept as a kind filter for
+# search completeness even though no live edge rows match.
+
+search_catalogs(agent_id,
+    identifier_pattern?,
+    kind? | list,
+    component_id?,
+) -> list[catalog_row]
+
+search_flows(agent_id,
+    component_id?,
+    incoming_catalog_id?,
+    outgoing_edge_id?,
+) -> list[flow_row]
+# No string pattern field — flow rows have no human-readable identifier,
+# only FK references. ID-based filtering only.
+
+search_unresolved(agent_id,
+    reference_value_pattern?,
+    reference_type? | list,
+    found_in_component_id?,
+    only_unresolved=True,    # default — exclude resolved=TRUE rows
+) -> list[unresolved_row]
+```
+
+**Shared SQL builder helper.** New `src/cartograph_mcp/tools/_search_helper.py`:
+- `_pattern_clause(column, value)` → returns `(sql_fragment, param)` or `(None, None)` when value is None.
+- Auto-detects exact vs LIKE: returns `f"{column} = %s"` for plain strings, `f"{column} ILIKE %s"` for `%`/`_`-bearing.
+- `_in_clause(column, values)` → returns `(f"{column} IN ({placeholders})", values)` for list-valued filters.
+- `assemble(filters: list[tuple[clause, params]]) -> (where_sql, params)` — joins with AND, drops Nones.
+- Hard cap helper: appends `LIMIT 100` to all search SQL.
+- Refusal helper: raise if every filter is None.
+
+**Validation rules (server-enforced):**
+- At least ONE filter must be non-None — else raise `ValueError("blank filter would dump entire table; narrow your filter")`.
+- Cap 100 rows per call. Hitting the cap doesn't error — caller sees 100 rows + can narrow + re-call.
+- `agent_id` validated against `agent_runs` (any active agent can call).
+- Lean projection — same shape as `get_*_bulk` reads (id + identity columns + similarity-irrelevant fields). No embedding vectors, no JSONB blobs.
+
+**For components specifically — name search ergonomics:**
+- `name_pattern` is a convenience field that ILIKEs both `canonical_name` AND `display_name` (admin UI parity with the `q` param).
+- `canonical_name_pattern` and `display_name_pattern` exist for explicit single-column targeting.
+- Pass at most ONE of {`name_pattern`, `canonical_name_pattern`, `display_name_pattern`}; raise if more than one.
+
+**Tool count:** 108 → 114.
+
+**Tests (~40 new in `tests/mcp_tools/test_search_tools.py`):**
+- Per-tool happy path with each filter dimension.
+- Exact vs LIKE auto-detection.
+- List-valued filter (OR within column).
+- Multi-filter AND.
+- Blank-filter refusal.
+- Cap-100 enforcement.
+- Cross-tool: a search returning a component_id can feed into bulk-reads on the other tables.
+
+**Files:**
+- `src/cartograph_mcp/tools/_search_helper.py` (new, shared SQL builder).
+- `src/cartograph_mcp/tools/search.py` (extend — currently holds vector_search).
+- `src/cartograph_mcp/server.py` (register 6 wrappers).
+- `tests/mcp_tools/test_search_tools.py` (new).
+
+**Effort:** M (~600 LOC across helper + 6 tool fns + 40 tests).
+
+---
+
+### 10.4 TEMP lock-step phase progression doctrine
+
+**Why this exists (current scale rationale).** With 2-4 SMEs in a typical demo run, the cost of cross-phase confusion is real:
+- SME-A binds an outbound edge to SME-B's component before consolidation has stabilised SME-B's identity → merge rewrites SME-B → SME-A's edge is stale → re-bind work on SME-A's next wake.
+- SME-A starts post-mutation hygiene before all peer SMEs have finished materialisation → finds half-built peers, dangling everything, no progress.
+
+The fix is voluntary phase coordination, not state-machine enforcement. Orchestrator broadcasts phase transitions; agents respect them by convention. If agents drift, orch nudges via chat. **TEMPORARY** — drop once self-pacing proves reliable at higher scale.
+
+**Five phases:**
+
+```
+1. USER_DISCUSSION       admin↔orch onboarding, creds, scope.
+2. ITERATION             iterators enumerate resources;
+                         orch dispatches per-plane.
+3. MATERIALISATION       SMEs hydrate own component:
+                           - upsert_component + doc_md + source_slice
+                           - exhaustive attributions
+                           - own catalogs (what I expose)
+                           - DANGLING-only outbound edges (to=NULL)
+                             + insert_unresolved for the identifier
+                           - flows tying own catalogs ↔ own danglings
+                         Do NOT bind edges to peer components yet.
+4. CONSOLIDATION_MUTATION  merge/split nominate, negotiate, resolver
+                           review, mutation execute (absorb_agent /
+                           spawn_child / cascades / handoff).
+5. EDGE_DISCOVERY        graph is now stable, so:
+                           - resolve unresolved refs against now-stable
+                             component registry
+                           - bind_edge danglings via cosine ladder
+                           - cross-SME hygiene: get_unmatched_callers,
+                             post-merge edge dedup via delete_edge,
+                             stale-edge / stale-flow re-bind
+```
+
+**Broadcast contract.** Orchestrator emits a single broadcast at each transition:
+
+```
+[PHASE-END: <prev>] [PHASE-START: <next>]
+
+Phase <next> begins. Stay within this phase's scope. See your
+system prompt's TEMP PHASE-WISE LOCK-STEP block for what's allowed
+and what's deferred.
+```
+
+Phase end heuristic — orch declares done when **most** (≥80%) of the phase's expected agents have finished their phase work + the remaining stragglers have either raised a blocker or are idle with no new work to pull. Stragglers carry over into the next phase if blocked — orch issues per-agent BW tasks to pull them along.
+
+**Prompt addition (TEMP block in `base.py::MISSION_AND_VOCABULARY`):**
+
+```
+== TEMP: PHASE-WISE LOCK-STEP PROGRESSION ==
+(May be removed once agent self-pacing proves reliable.)
+
+The system runs in 5 sequential phases. Orchestrator announces
+transitions via broadcast: [PHASE-END: <prev>] [PHASE-START: <next>].
+
+Stay within the announced phase. If you receive an action item that
+doesn't fit the current phase (e.g. a clarification asking you to
+bind during MATERIALISATION), respond per the phase contract — record
+as dangling, defer the binding to EDGE_DISCOVERY.
+
+Phases:
+  1. USER_DISCUSSION    admin↔orch only
+  2. ITERATION          iterators enumerate; SMEs idle
+  3. MATERIALISATION    SMEs hydrate OWN component
+                         - own catalogs, own attributions
+                         - outbound edges DANGLING ONLY (to=NULL)
+                         - insert_unresolved for outbound identifiers
+                         - flows on own catalogs ↔ own danglings
+                         DO NOT bind to peer components yet.
+  4. CONSOLIDATION_MUTATION  merges/splits negotiate + execute
+  5. EDGE_DISCOVERY     resolve unresolveds, bind danglings,
+                         cross-SME hygiene, post-merge edge dedup
+
+Why: prevents wasted work where you bind to a peer that gets
+merged/split mid-storm. By staying in your phase, you only do work
+that's safe at that timing.
+
+If unsure which phase is active, check your most recent unacked
+broadcast — orch's [PHASE-START] is the source of truth.
+```
+
+**Orchestrator prompt addition** (`agent_types/orchestrator.py`) — phase-coordinator section telling orch to:
+- monitor per-phase progress (count of agents idle with phase-work-done vs total)
+- emit `[PHASE-END / PHASE-START]` broadcast (persistent=True, so future-spawned SMEs see it on first wake)
+- keep stragglers via direct task dispatch rather than holding the whole storm
+
+**Files:**
+- `src/agent_management/agent_types/base.py` — TEMP block.
+- `src/agent_management/agent_types/orchestrator.py` — phase-coordinator section.
+
+**Effort:** XS (~80 LOC across two prompt files, smoke-test only).
+
+**Removal contract:** when removed (future phase), update both prompt files to drop the TEMP block + the orch coordinator section. Doc-sync the change.
+
+---
+
+### 10.5 Sub-phase ordering + commit cadence
+
+```
+10.0 plan (this commit)                     ← doc-only
+10.1 symmetric-nomination guard             ← code + 3 tests
+10.2 component_doc_md embedding             ← code + 2 tests + backfill run
+10.3 six search tools                       ← code (helper + 6 tools) +
+                                              ~40 tests; commit per tool
+                                              cluster (3+3 or 2+2+2)
+10.4 TEMP lock-step doctrine                ← prompt edits + smoke
+10.5 doc sync pass                          ← HLD / SCHEMA / TRIGGER-MGMT /
+                                              AGENT-PROMPTS / POST-COMPACTION /
+                                              IMPLEMENTATION-PHASES /
+                                              PROMPT-ENHANCEMENTS
+10.6 DEMO10 prompt                          ← docs/oorch-test-prompt-demo10
+                                              (next commit)
+```
+
+After 10.6 the user runs DEMO10 to verify in-the-wild behaviour.
+
+### 10.6 Tool surface delta
+
+| Phase | Tools added | Cumulative |
+|---|---|---|
+| 10.1 | 0 | 108 |
+| 10.2 | 0 | 108 |
+| 10.3 | 6 (search_components, _attributions, _edges, _catalogs, _flows, _unresolved) | 114 |
+| 10.4 | 0 | 114 |
+
+Verify after 10.3: `grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1` → 114 tools.
+
+### 10.7 Schema delta
+
+None. All four sub-batches are pure additions on top of existing schema.
+
+### 10.8 What this is NOT solving
+
+- True microsecond race on symmetric nominations (would need partial UNIQUE index on normalised pair).
+- Component-embedding precision drop after doc_md addition (caveat documented; measure post-DEMO10 + re-calibrate threshold if needed).
+- Phase-state-machine enforcement at the DB layer (10.4 stays prompt-only; escalate later if voluntary doctrine fails).
+- Per-phase cost analyzer (separate work, on the radar but not in Phase 10 scope).
+
+---
+
+## Phase 11+: Future phases (planned, not started)
+
+**Phase 11 — Phase-flow completion** (orchestrator-driven sweeps):
 - **Resolution phase orchestration** — wake config-SMEs to resolve `unresolved` table rows; re-run cosine ladder against now-consolidated component registry.
 - **Edge Discovery phase orchestration** — dedicated bidirectional-validation pass + telemetry trace edge injection.
 - **User Feedback phase** — admin UI workflows for "merge these two" / "missed this" / "this doesn't exist anymore" → orchestrator routes to the right SME(s).
 
-**Phase 11 — Observability + cost controls** (HLD §11):
+**Phase 12 — Observability + cost controls** (HLD §11):
 - Dashboard on `agent_runs`: token usage, phase progress, unresolved count, blocker count, B1/B2/R/M/MD/D/F counts.
 - `max_turns` per agent per phase, embedding budget caps, consolidation max-rounds.
 
-**Phase 12 — DM between agents** (HLD §11.2):
+**Phase 13 — DM between agents** (HLD §11.2):
 - Lighter-weight than consolidation for one-off SME↔SME clarifications.
 
-**Phase 13 — Knowledge pool** (HLD §11.3):
+**Phase 14 — Knowledge pool** (HLD §11.3):
 - Shared facts table any agent can read/write ("all dream11 services use `{service}.dream11.local`").
 
 **Phase 6 — Globe (sphere-constrained graph view)** is parked on `feat/globe-experimental` branch. Re-introduce by merging that branch when ready; doc sync brief lives at `docs/GLOBE-MERGE-BRIEF.md` on that branch.
