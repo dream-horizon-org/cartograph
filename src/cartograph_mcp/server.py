@@ -1591,11 +1591,13 @@ def vector_search(
     query_text: str,
     table: str,
     limit: int = 10,
+    filters: dict[str, Any] | None = None,
+    exclude_self: bool = True,
 ) -> dict[str, Any]:
     """Embed `query_text` and return top-N rows from `table` by cosine similarity.
 
     Open to all active agents. `table` must be one of:
-    components, attributions, unresolved, edges.
+    components, attributions, unresolved, edges, catalogs.
 
     Interpretation bands (calibrated for mxbai-embed-large, the model
     wired up in production — Phase 3.7):
@@ -1603,32 +1605,53 @@ def vector_search(
       0.60 to 0.75        → hint (candidate; verify before acting)
       <  0.60             → treat as no match
     Noise floor is ~0.40-0.50 on this model; scores below 0.60 are
-    cosine artefacts, not semantic matches. These bands replace the
-    earlier OpenAI-sized 0.85/0.70 ladder, which sat above even
-    verbatim-name hits on mxbai.
+    cosine artefacts, not semantic matches.
+
+    Phase 10.7 — components projection now includes `description` (the
+    new dense embed-target field). Plus two optional kwargs:
+
+    `filters: dict | None = None` — per-table filter dict. AND across
+    keys; OR within key via list. Allowed keys per table:
+      components:   component_type, status
+      attributions: plane, resource_type, component_id
+      edges:        edge_type, from_component_id, to_component_id
+      catalogs:     kind, component_id
+      unresolved:   reference_type, found_in_component_id, resolved
+    Plane filter on components is NOT supported — use
+    vector_search(table='attributions', filters={'plane': ...}) for
+    plane-scoped lookups (each component has at least one attribution).
+    Invalid key for table → ValueError listing allowed keys.
+
+    `exclude_self: bool = True` (DEFAULT ON) — excludes rows owned by
+    caller's component(s) via RCA. Non-SME callers (orch / iter /
+    resolver own zero components) → silent no-op. Set False to
+    include own rows (rare: self-loop sanity check, debugging).
 
     Typical SME usage — outbound reference resolution:
-      While hydrating your component during Materialisation, you'll find
-      refs to OTHER components (a DB hostname, an API URL in your
-      config, a Kafka topic). Search for the target:
+      While hydrating your component during Materialisation, find refs
+      to OTHER components (DB hostname, API URL, Kafka topic). Search:
         strong match → create_edge from your component to the target.
         hint        → insert_unresolved with candidate component_id.
         no match    → insert_unresolved with no candidate; Resolution
                       phase (config SMEs) links it later.
-    SMEs do NOT use this tool to decide whether to create their own
-    component — the 1-SME=1-component invariant means they always
-    write exactly one upsert_component regardless of search results.
-    Duplicates across SMEs are Consolidation's job, not Materialisation.
+      Default exclude_self=True keeps your own component out of results
+      where it would only confuse the triage.
 
-    Sibling-search during Consolidation is the other usage: SMEs call
-    vector_search on their own component's name to find candidates for
-    nominate_consolidation(type='merge').
+    Sibling-search during Consolidation:
+      vector_search(query=<my canonical_name>, table='components',
+                    limit=20)
+      → top-N candidates for nominate_consolidation(type='merge').
+      exclude_self=True (default) drops your own component (which would
+      cosine ≈ 1.0) so all returned rows are real candidates.
 
     If the query can't be embedded (Ollama unreachable, empty text),
     returns {"query_embedded": False, "results": []}. Callers must
     check this flag to distinguish "no hits" from "could not search".
     """
-    return search_tool.vector_search(agent_id, query_text, table, limit)
+    return search_tool.vector_search(
+        agent_id, query_text, table, limit,
+        filters=filters, exclude_self=exclude_self,
+    )
 
 
 # ============ DETERMINISTIC SEARCH (Phase 10.3) ============

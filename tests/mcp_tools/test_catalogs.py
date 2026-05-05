@@ -247,11 +247,19 @@ def test_upsert_edge_catalog_shim_forwards(agent_factory):
 
 
 def test_vector_search_includes_catalogs(agent_factory):
-    """Phase 7.4 follow-up: vector_search now scans the catalogs table."""
+    """Phase 7.4 follow-up: vector_search now scans the catalogs table.
+
+    Phase 10.7: this test sets up sme as the catalog OWNER, so default
+    exclude_self=True would filter the only catalog out. Pass
+    exclude_self=False to verify catalog rows are searchable.
+    """
     from cartograph_mcp.tools import search as search_tool
     sme, cid = _setup_sme(agent_factory, "vsc")
     cat.upsert_catalog(sme, cid, "endpoint", "GET /payments/charge")
-    out = search_tool.vector_search(sme, "payments charge endpoint", "catalogs", 5)
+    out = search_tool.vector_search(
+        sme, "payments charge endpoint", "catalogs", 5,
+        exclude_self=False,
+    )
     if out["query_embedded"]:
         idents = [r["identifier"] for r in out["results"]]
         assert "GET /payments/charge" in idents

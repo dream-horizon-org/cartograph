@@ -16,6 +16,8 @@ ILIKE. Hard cap 100 rows. Refuses blank-filter calls.
 
 from __future__ import annotations
 
+from typing import Any
+
 from shared import embedding as emb
 from shared.db import execute, execute_one
 from cartograph_mcp.tools._search_helper import (
@@ -32,58 +34,75 @@ from cartograph_mcp.tools._search_helper import (
 # workarounds. Search-then-fetch pattern: agents get just enough to
 # triage matches here, then call get_component(id) / get_attributions
 # (id) / etc. for full detail on hits they care about.
-_VALID_TABLES = {
-    "components": "SELECT c.id, c.canonical_name, c.display_name, "
-                  "       c.component_type, c.status, "
-                  "       1 - (c.embedding <=> %s::vector) AS similarity "
-                  "FROM components c "
-                  "WHERE c.embedding IS NOT NULL "
-                  "ORDER BY c.embedding <=> %s::vector ASC "
-                  "LIMIT %s",
-    "attributions": "SELECT a.id, a.component_id, a.plane, a.resource_type, "
-                    "       a.identifier, a.confidence, "
-                    "       1 - (a.embedding <=> %s::vector) AS similarity "
-                    "FROM attributions a "
-                    "WHERE a.embedding IS NOT NULL "
-                    "ORDER BY a.embedding <=> %s::vector ASC "
-                    "LIMIT %s",
-    "unresolved": "SELECT u.id, u.found_in_component_id, u.reference_type, "
-                  "       u.reference_value, u.resolved, "
-                  "       1 - (u.embedding <=> %s::vector) AS similarity "
-                  "FROM unresolved u "
-                  "WHERE u.embedding IS NOT NULL "
-                  "ORDER BY u.embedding <=> %s::vector ASC "
-                  "LIMIT %s",
-    "edges": "SELECT e.id, e.from_component_id, e.to_component_id, "
-             "       e.edge_type, e.identifier, e.confidence, "
-             "       1 - (e.embedding <=> %s::vector) AS similarity "
-             "FROM edges e "
-             "WHERE e.embedding IS NOT NULL "
-             "ORDER BY e.embedding <=> %s::vector ASC "
-             "LIMIT %s",
-    # Phase 7.4 follow-up: catalog rows live in their own table now,
-    # embedded at write time with "{kind}: {identifier}". Lets SMEs do
-    # "find an endpoint similar to /payments/charge" across the org
-    # without walking get_component_edges per component.
-    "catalogs": "SELECT c.id, c.component_id, c.kind, c.identifier, "
-                "       c.confidence, "
-                "       1 - (c.embedding <=> %s::vector) AS similarity "
-                "FROM catalogs c "
-                "WHERE c.embedding IS NOT NULL "
-                "ORDER BY c.embedding <=> %s::vector ASC "
-                "LIMIT %s",
+# Phase 7.4.4: lean projections per table. Pre-7.4.4 we did SELECT *
+# which inlined the 1024-d embedding vector + heavy JSONB blobs on every
+# result row. Phase 10.7: components projection adds `description` (the
+# new dense embed-target field, ≤400 chars soft cap — cheap to include
+# in results, saves a get_component round-trip on most hits).
+#
+# Map: table → (select_columns, alias). `from_clause` is built per-table
+# below in vector_search() since alias placement matters for filters.
+_TABLE_PROJECTIONS = {
+    "components": ("c.id, c.canonical_name, c.display_name, "
+                   "c.component_type, c.status, c.description", "c"),
+    "attributions": ("a.id, a.component_id, a.plane, a.resource_type, "
+                     "a.identifier, a.confidence", "a"),
+    "unresolved": ("u.id, u.found_in_component_id, u.reference_type, "
+                   "u.reference_value, u.resolved", "u"),
+    "edges": ("e.id, e.from_component_id, e.to_component_id, "
+              "e.edge_type, e.identifier, e.confidence", "e"),
+    "catalogs": ("c.id, c.component_id, c.kind, c.identifier, "
+                 "c.confidence", "c"),
+}
+
+_TABLE_FROM = {
+    "components":   "components c",
+    "attributions": "attributions a",
+    "unresolved":   "unresolved u",
+    "edges":        "edges e",
+    "catalogs":     "catalogs c",
 }
 
 
-def vector_search(agent_id: str, query_text: str, table: str, limit: int = 10) -> dict:
+# Backwards compat constant — referenced by name elsewhere in this module.
+_VALID_TABLES = set(_TABLE_PROJECTIONS.keys())
+
+
+def vector_search(
+    agent_id: str,
+    query_text: str,
+    table: str,
+    limit: int = 10,
+    filters: dict | None = None,
+    exclude_self: bool = True,
+) -> dict:
     """Return top-N rows from `table` by cosine similarity to `query_text`.
 
-    `table` must be one of components / attributions / unresolved / edges.
-    `limit` is clamped to [1, 50].
+    `table` must be one of components / attributions / unresolved / edges /
+    catalogs. `limit` is clamped to [1, 50].
 
-    If the query can't be embedded (missing API key, API error, empty text)
-    → returns {"query_embedded": False, "results": []}. Callers distinguish
+    If the query can't be embedded (Ollama unreachable, empty text) →
+    returns {"query_embedded": False, "results": []}. Callers distinguish
     "no hits" from "couldn't search" via that flag.
+
+    Phase 10.7 additions:
+    - `filters: dict | None = None` — optional per-table filter dict.
+      AND across keys; OR within key via list. Allowed keys per table:
+        components:   component_type, status
+        attributions: plane, resource_type, component_id
+        edges:        edge_type, from_component_id, to_component_id
+        catalogs:     kind, component_id
+        unresolved:   reference_type, found_in_component_id, resolved
+      Plane filter on components is NOT supported here (needs RCA→
+      resources JOIN); use `vector_search(table='attributions',
+      filters={'plane': ...})` for plane-scoped lookups.
+      Invalid key for table → ValueError listing legal keys.
+    - `exclude_self: bool = True` — DEFAULT ON. Excludes rows owned by
+      caller's component(s) via RCA (silent no-op for non-SME callers
+      with zero owned components). Set False to include own rows
+      (debug / self-loop sanity check).
+    - Components projection now includes `description` column (Phase
+      10.7 dense embed-target).
     """
     caller = execute_one(
         "SELECT agent_id FROM agent_runs WHERE agent_id = %s AND status != 'decommissioned'",
@@ -92,9 +111,9 @@ def vector_search(agent_id: str, query_text: str, table: str, limit: int = 10) -
     if caller is None:
         raise ValueError(f"Agent {agent_id} not found")
 
-    if table not in _VALID_TABLES:
+    if table not in _TABLE_PROJECTIONS:
         raise ValueError(
-            f"Invalid table '{table}'. Valid: {sorted(_VALID_TABLES)}"
+            f"Invalid table '{table}'. Valid: {sorted(_TABLE_PROJECTIONS)}"
         )
     try:
         limit_i = int(limit)
@@ -102,12 +121,60 @@ def vector_search(agent_id: str, query_text: str, table: str, limit: int = 10) -
         raise ValueError("limit must be an integer") from e
     limit_i = max(1, min(50, limit_i))
 
+    # Validate filter keys before any embed work — fail fast.
+    from cartograph_mcp.tools._search_helper import (
+        validate_filter_keys, build_filter_clauses, exclude_self_clause,
+        assemble,
+    )
+    validate_filter_keys(table, filters)
+
     vec = emb.vector_literal(emb.embed_text(query_text))
     if vec is None:
         return {"query_embedded": False, "results": []}
 
-    sql = _VALID_TABLES[table]
-    rows = execute(sql, (vec, vec, limit_i))
+    projection, alias = _TABLE_PROJECTIONS[table]
+    from_table = _TABLE_FROM[table]
+
+    # Base WHERE: embedding IS NOT NULL (rows that failed write-time embed
+    # don't participate in cosine ranking).
+    where_clauses: list[str] = [f"{alias}.embedding IS NOT NULL"]
+    extra_params: list[Any] = []
+
+    # Apply user-supplied filters via the helper.
+    if filters:
+        filter_clauses_raw, _ = build_filter_clauses(filters, table_alias=alias)
+        try:
+            filter_sql, filter_params = assemble(filter_clauses_raw)
+            where_clauses.append(filter_sql)
+            extra_params.extend(filter_params)
+        except Exception:
+            # All-None filter dict shouldn't happen here (validate_filter_keys
+            # caught unknown keys; empty/None already short-circuited above).
+            # If assemble's BlankFilterError fires anyway, treat as no-op.
+            pass
+
+    # exclude_self: skip caller's own rows.
+    if exclude_self:
+        excl_sql, excl_params = exclude_self_clause(table, alias, agent_id)
+        if excl_sql is not None:
+            where_clauses.append(excl_sql)
+            if isinstance(excl_params, list):
+                extra_params.extend(excl_params)
+            else:
+                extra_params.append(excl_params)
+
+    where_sql = " AND ".join(where_clauses)
+    sql = (
+        f"SELECT {projection}, "
+        f"       1 - ({alias}.embedding <=> %s::vector) AS similarity "
+        f"FROM {from_table} "
+        f"WHERE {where_sql} "
+        f"ORDER BY {alias}.embedding <=> %s::vector ASC "
+        f"LIMIT %s"
+    )
+    # Param order: (vec for similarity column, *extra_params, vec for ORDER BY, limit)
+    params = [vec, *extra_params, vec, limit_i]
+    rows = execute(sql, tuple(params))
     return {"query_embedded": True, "results": rows}
 
 
