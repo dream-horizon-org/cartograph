@@ -1266,8 +1266,25 @@ def resolve_reference(
 
 
 def get_component(agent_id: str, component_id: str) -> dict:
+    """Read a component by id. Open to all active agents.
+
+    Phase 10.7: explicit column list excluding the 1024-d `embedding`
+    vector (~8KB float array per call). Pre-10.7 used `SELECT *` which
+    returned the embedding to every caller — wasted ~8KB per
+    triangulation read. The vector is write-time signal only; agents
+    care about similarity scores (returned by vector_search), not raw
+    vectors.
+    """
     _caller(agent_id)
-    row = execute_one("SELECT * FROM components WHERE id = %s", (component_id,))
+    row = execute_one(
+        """SELECT id, canonical_name, display_name, component_type,
+                  status, confidence, metadata, description,
+                  component_doc_md, source_slice,
+                  split_from_component_id, split_briefing,
+                  scanned_at, created_at, updated_at
+           FROM components WHERE id = %s""",
+        (component_id,),
+    )
     if row is None:
         raise ValueError(f"Component {component_id} not found")
     return row
@@ -2102,11 +2119,19 @@ def get_components_bulk(
     `dict[component_id_str, component_row | None]`. Missing ids
     surface as None entries (not omitted) so the caller can tell
     "not found" from "skipped". Open to all active agents. Max 500.
+
+    Phase 10.7: explicit column list excluding `embedding` vector
+    (~8KB float array per row). Same projection as `get_component`.
     """
     _caller(agent_id)
     ids = _normalize_id_list(component_ids, "component_ids")
     rows = execute(
-        "SELECT * FROM components WHERE id = ANY(%s::uuid[])",
+        """SELECT id, canonical_name, display_name, component_type,
+                  status, confidence, metadata, description,
+                  component_doc_md, source_slice,
+                  split_from_component_id, split_briefing,
+                  scanned_at, created_at, updated_at
+           FROM components WHERE id = ANY(%s::uuid[])""",
         (ids,),
     )
     by_id = {str(r["id"]): r for r in rows}

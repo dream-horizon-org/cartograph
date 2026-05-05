@@ -190,6 +190,41 @@ def test_phase10_7_description_soft_400_warn(agent_factory, caplog):
     assert any("soft cap 400" in rec.message for rec in caplog.records)
 
 
+def test_phase10_7_get_component_strips_embedding(agent_factory):
+    """Phase 10.7 bonus: get_component must NOT return the 1024-d
+    embedding vector. Pre-fix used SELECT * which leaked ~8KB per call.
+    """
+    _iter(agent_factory, "i", "github")
+    r = resources.upsert_resource("i", "github", "repo", "o/r")
+    _sme(agent_factory, "s", r["id"])
+    c = components.upsert_component("s", {
+        "canonical_name": "o/r", "display_name": "R",
+        "component_type": "application",
+        "description": "test",
+    })
+    fetched = components.get_component("s", c["id"])
+    assert "embedding" not in fetched, \
+        "get_component must not return the embedding vector (Phase 10.7)"
+    # But should return the new description column
+    assert fetched["description"] == "test"
+
+
+def test_phase10_7_get_components_bulk_strips_embedding(agent_factory):
+    """Same strip on the bulk variant."""
+    _iter(agent_factory, "i", "github")
+    r = resources.upsert_resource("i", "github", "repo", "o/r")
+    _sme(agent_factory, "s", r["id"])
+    c = components.upsert_component("s", {
+        "canonical_name": "o/r", "display_name": "R",
+        "component_type": "application",
+    })
+    cid = str(c["id"])
+    out = components.get_components_bulk("s", [cid])
+    fetched = out[cid]
+    assert fetched is not None
+    assert "embedding" not in fetched
+
+
 def test_phase10_7_doc_md_no_longer_affects_embed_recall(agent_factory):
     """Pre-10.7, doc_md content drove vector_search recall. Post-10.7,
     doc_md changes do NOT change the embedding (only description does).

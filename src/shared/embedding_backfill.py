@@ -42,12 +42,33 @@ def _backfill_components(force: bool = False) -> tuple[int, int]:
     Default (force=False): only rows with embedding IS NULL — the
     standard "Ollama was down at write time" backfill case.
     force=True: re-embed every row regardless. Used after embed-text
-    shape changes (Phase 10.2: component_doc_md added).
+    shape changes:
+      - Phase 10.2 (now superseded): added component_doc_md.
+      - Phase 10.7: separated description (embed-target) from doc_md
+        (human-render). MANDATORY post-10.7 to seed description from
+        existing doc_md AND re-embed all rows. Without this, vectors
+        are mixed-vintage (some doc-based, some description-based)
+        and vector_search ranking is inconsistent.
     """
+    if force:
+        # Phase 10.7 seed: backfill empty description from LEFT(doc_md, 400)
+        # for any row where doc_md has content but description hasn't been
+        # set yet. Idempotent — second run is a no-op since description
+        # is no longer empty after the first.
+        seeded = execute_mutate(
+            """UPDATE components
+               SET description = LEFT(component_doc_md, 400)
+               WHERE description = ''
+                 AND component_doc_md IS NOT NULL
+                 AND component_doc_md <> ''""",
+        )
+        log.info("Backfill components: seeded description for %d rows from doc_md",
+                 seeded)
+
     where = "" if force else " WHERE embedding IS NULL"
     rows = execute(
         f"""SELECT id, canonical_name, display_name, component_type,
-                   metadata, component_doc_md
+                   metadata, description
            FROM components{where}"""
     )
     done = skipped = 0
@@ -55,7 +76,7 @@ def _backfill_components(force: bool = False) -> tuple[int, int]:
         text = emb.component_embed_text(
             r["canonical_name"], r["display_name"],
             r["component_type"], r["metadata"],
-            r["component_doc_md"],
+            r["description"],
         )
         vec = emb.embed_text(text)
         lit = emb.vector_literal(vec)
