@@ -191,6 +191,51 @@ def _check_caller(agent_id: str) -> None:
         raise ValueError(f"Agent {agent_id} not found")
 
 
+def _maybe_exclude_self(
+    table: str, alias: str, agent_id: str, exclude_self: bool,
+) -> tuple[str | None, list[Any]]:
+    """Phase 10.7: optional caller-self exclusion clause for search_*.
+
+    Returns (sql_fragment, params_list). If exclude_self=False or the
+    table has no ownership predicate, returns (None, []).
+
+    Non-SME callers (orch / iter / resolver own zero components) →
+    NOT IN (empty set) is silently TRUE in PostgreSQL → no exclusion
+    happens. Predicate fires on actual SME callers with at least one
+    owned component.
+
+    IMPORTANT: this clause is applied AFTER `assemble()` of user-supplied
+    filters so the BlankFilterError check still works correctly when the
+    user provides zero filters (exclude_self alone shouldn't bypass the
+    "no whole-table dumps" guard).
+    """
+    if not exclude_self:
+        return (None, [])
+    from cartograph_mcp.tools._search_helper import exclude_self_clause
+    sql, params = exclude_self_clause(table, alias, agent_id)
+    if sql is None:
+        return (None, [])
+    if isinstance(params, list):
+        return (sql, params)
+    return (sql, [params])
+
+
+def _apply_exclude_self(
+    where_sql: str, params: list, excl_sql: str | None, excl_params: list,
+) -> tuple[str, list]:
+    """Tack the exclude_self clause onto a finished WHERE expression.
+
+    where_sql comes from assemble() (already validated non-blank). We
+    string-concat the exclude_self predicate with AND. params is
+    extended in-place-style (returns new list).
+    """
+    if excl_sql is None:
+        return where_sql, params
+    new_where = f"{where_sql} AND {excl_sql}"
+    new_params = list(params) + list(excl_params)
+    return new_where, new_params
+
+
 # ---- search_components ----
 
 def search_components(
@@ -201,6 +246,7 @@ def search_components(
     component_type: str | list | None = None,
     status: str | list | None = "active",
     plane: str | list | None = None,
+    exclude_self: bool = True,
 ) -> list[dict]:
     """Phase 10.3. Find components by exact/ILIKE patterns + filters.
 
@@ -213,6 +259,9 @@ def search_components(
       component_type: scalar or list (OR within).
       status: defaults to 'active'. Pass None to include all statuses.
       plane: filter via RCA → resources.plane (scalar or list).
+      exclude_self: Phase 10.7. DEFAULT TRUE. Skip rows owned by the
+        caller's component(s) via RCA. Non-SME callers no-op. Set
+        False to include own rows.
 
     Returns:
       List of dicts: {id, canonical_name, display_name, component_type,
@@ -272,7 +321,12 @@ def search_components(
     if plane_filter is not None:
         filters.append(plane_filter)
 
+    # assemble() raises BlankFilterError if all user filters are None.
+    # exclude_self is applied AFTER so it doesn't bypass that guard.
     where_sql, params = assemble(filters)
+    excl_sql, excl_params = _maybe_exclude_self("components", "c", agent_id, exclude_self)
+    where_sql, params = _apply_exclude_self(where_sql, params, excl_sql, excl_params)
+
     sql = f"""
         SELECT c.id, c.canonical_name, c.display_name, c.component_type,
                c.status,
@@ -299,20 +353,26 @@ def search_attributions(
     plane: str | list | None = None,
     resource_type: str | list | None = None,
     component_id: str | None = None,
+    exclude_self: bool = True,
 ) -> list[dict]:
     """Phase 10.3. Find attributions by identifier pattern + filters.
 
     Returns lean rows: {id, component_id, plane, resource_type,
     identifier, confidence}.
+
+    Phase 10.7: exclude_self default TRUE — skip rows on caller's own
+    component. Non-SME callers no-op.
     """
     _check_caller(agent_id)
-    filters = [
+    filters: list[tuple[str | None, object]] = [
         pattern_clause("a.identifier", identifier_pattern),
         in_clause("a.plane", plane),
         in_clause("a.resource_type", resource_type),
         eq_clause("a.component_id", component_id),
     ]
     where_sql, params = assemble(filters)
+    excl_sql, excl_params = _maybe_exclude_self("attributions", "a", agent_id, exclude_self)
+    where_sql, params = _apply_exclude_self(where_sql, params, excl_sql, excl_params)
     sql = f"""
         SELECT a.id, a.component_id, a.plane, a.resource_type,
                a.identifier, a.confidence
@@ -336,6 +396,7 @@ def search_edges(
     kind: str | list | None = None,
     from_component_id: str | None = None,
     to_component_id: str | None = None,
+    exclude_self: bool = True,
 ) -> list[dict]:
     """Phase 10.3. Find edges by identifier + edge_type + kind + endpoints.
 
@@ -376,6 +437,10 @@ def search_edges(
         filters.append(("(" + " OR ".join(kind_parts) + ")", []))
 
     where_sql, params = assemble(filters)
+    # Phase 10.7: exclude_self for edges (either-side ownership check) —
+    # applied AFTER assemble so blank-filter check stays intact.
+    excl_sql, excl_params = _maybe_exclude_self("edges", "e", agent_id, exclude_self)
+    where_sql, params = _apply_exclude_self(where_sql, params, excl_sql, excl_params)
     sql = f"""
         SELECT e.id, e.from_component_id, e.to_component_id,
                e.edge_type, e.identifier, e.confidence,
@@ -399,15 +464,22 @@ def search_catalogs(
     identifier_pattern: str | None = None,
     kind: str | list | None = None,
     component_id: str | None = None,
+    exclude_self: bool = True,
 ) -> list[dict]:
-    """Phase 10.3. Find catalog rows by identifier + kind + owner."""
+    """Phase 10.3. Find catalog rows by identifier + kind + owner.
+
+    Phase 10.7: exclude_self default TRUE — skip catalogs owned by
+    caller's component. Non-SME callers no-op.
+    """
     _check_caller(agent_id)
-    filters = [
+    filters: list[tuple[str | None, object]] = [
         pattern_clause("c.identifier", identifier_pattern),
         in_clause("c.kind", kind),
         eq_clause("c.component_id", component_id),
     ]
     where_sql, params = assemble(filters)
+    excl_sql, excl_params = _maybe_exclude_self("catalogs", "c", agent_id, exclude_self)
+    where_sql, params = _apply_exclude_self(where_sql, params, excl_sql, excl_params)
     sql = f"""
         SELECT c.id, c.component_id, c.kind, c.identifier, c.confidence
         FROM catalogs c
@@ -457,11 +529,16 @@ def search_unresolved(
     reference_type: str | list | None = None,
     found_in_component_id: str | None = None,
     only_unresolved: bool = True,
+    exclude_self: bool = True,
 ) -> list[dict]:
     """Phase 10.3. Find unresolved refs by value pattern + filters.
 
     `only_unresolved=True` (default) excludes already-resolved rows.
     Pass False to include the full history.
+
+    Phase 10.7: exclude_self default TRUE — skip unresolved rows owned
+    by caller's component (found_in_component_id matches). Non-SME
+    callers no-op.
     """
     _check_caller(agent_id)
     filters: list[tuple[str | None, object]] = [
@@ -473,6 +550,8 @@ def search_unresolved(
         filters.append(("u.resolved = FALSE", []))
 
     where_sql, params = assemble(filters)
+    excl_sql, excl_params = _maybe_exclude_self("unresolved", "u", agent_id, exclude_self)
+    where_sql, params = _apply_exclude_self(where_sql, params, excl_sql, excl_params)
     sql = f"""
         SELECT u.id, u.found_in_component_id, u.reference_type,
                u.reference_value, u.resolved, u.attempts

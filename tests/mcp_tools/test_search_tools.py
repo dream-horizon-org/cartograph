@@ -147,7 +147,10 @@ def test_search_components_canonical_pattern_exact(agent_factory):
     _iter(agent_factory, "i")
     _sme_with_component(agent_factory, "i", "s1", "o/auth", "auth-svc")
     _sme_with_component(agent_factory, "i", "s2", "o/pay", "payments-svc")
-    rows = search.search_components("s1", canonical_name_pattern="auth-svc")
+    # Phase 10.7: pass exclude_self=False so s1 sees its own component
+    # in results (default is exclude_self=True). This test verifies
+    # the pattern-match logic, not exclusion semantics.
+    rows = search.search_components("s1", canonical_name_pattern="auth-svc", exclude_self=False)
     assert len(rows) == 1
     assert rows[0]["canonical_name"] == "auth-svc"
 
@@ -157,7 +160,7 @@ def test_search_components_ilike_pattern(agent_factory):
     _sme_with_component(agent_factory, "i", "s1", "o/a1", "auth-svc-v1")
     _sme_with_component(agent_factory, "i", "s2", "o/a2", "auth-svc-v2")
     _sme_with_component(agent_factory, "i", "s3", "o/p", "payments-svc")
-    rows = search.search_components("s1", canonical_name_pattern="auth-%")
+    rows = search.search_components("s1", canonical_name_pattern="auth-%", exclude_self=False)
     assert len(rows) == 2
     assert all(r["canonical_name"].startswith("auth-") for r in rows)
 
@@ -178,7 +181,7 @@ def test_search_components_name_pattern_matches_either_column(agent_factory):
         "display_name": "Auth Service",  # the human name
         "component_type": "application",
     })
-    rows = search.search_components("s1", name_pattern="auth")
+    rows = search.search_components("s1", name_pattern="auth", exclude_self=False)
     assert len(rows) == 1
     assert rows[0]["canonical_name"] == "fav2-api"
 
@@ -200,6 +203,7 @@ def test_search_components_type_list_or_within(agent_factory):
     rows = search.search_components(
         "s1", canonical_name_pattern="auth%",
         component_type=["application", "cron"],
+        exclude_self=False,
     )
     types = {r["component_type"] for r in rows}
     assert types == {"application", "cron"}
@@ -208,7 +212,9 @@ def test_search_components_type_list_or_within(agent_factory):
 def test_search_components_planes_array_in_response(agent_factory):
     _iter(agent_factory, "i")
     _sme_with_component(agent_factory, "i", "s1", "o/a", "a")
-    rows = search.search_components("s1", canonical_name_pattern="a")
+    rows = search.search_components(
+        "s1", canonical_name_pattern="a", exclude_self=False,
+    )
     assert len(rows) == 1
     assert "github" in rows[0]["planes"]
 
@@ -226,7 +232,9 @@ def test_search_attributions_by_identifier(agent_factory):
         "plane": "github", "resource_type": "env_var",
         "identifier": "API_KEY",
     })
-    rows = search.search_attributions("s1", identifier_pattern="DB_%")
+    rows = search.search_attributions(
+        "s1", identifier_pattern="DB_%", exclude_self=False,
+    )
     assert len(rows) == 1
     assert rows[0]["identifier"] == "DB_HOST"
 
@@ -243,7 +251,7 @@ def test_search_attributions_by_resource_type_list(agent_factory):
         "identifier": "auth-prod-asg",
     })
     rows = search.search_attributions(
-        "s1", resource_type=["asg", "hostname"],
+        "s1", resource_type=["asg", "hostname"], exclude_self=False,
     )
     assert len(rows) == 2
 
@@ -262,8 +270,8 @@ def test_search_edges_by_kind_bound(agent_factory):
         "from_component_id": a, "to_component_id": None,
         "edge_type": "calls", "identifier": "GET /unknown",
     })
-    bound = search.search_edges("s1", kind="bound")
-    dangling = search.search_edges("s1", kind="dangling")
+    bound = search.search_edges("s1", kind="bound", exclude_self=False)
+    dangling = search.search_edges("s1", kind="dangling", exclude_self=False)
     assert len(bound) == 1
     assert bound[0]["identifier"] == "GET /verify"
     assert len(dangling) == 1
@@ -289,7 +297,9 @@ def test_search_edges_identifier_pattern(agent_factory):
         "from_component_id": a, "to_component_id": b,
         "edge_type": "calls", "identifier": "POST /payments/refund",
     })
-    rows = search.search_edges("s1", identifier_pattern="%payments%")
+    rows = search.search_edges(
+        "s1", identifier_pattern="%payments%", exclude_self=False,
+    )
     assert len(rows) == 2
 
 
@@ -301,9 +311,11 @@ def test_search_catalogs_by_identifier_and_kind(agent_factory):
     catalogs.upsert_catalog("s1", cid, "endpoint", "POST /verify")
     catalogs.upsert_catalog("s1", cid, "endpoint", "GET /token")
     catalogs.upsert_catalog("s1", cid, "topic", "user.created")
-    rows = search.search_catalogs("s1", kind="endpoint")
+    rows = search.search_catalogs("s1", kind="endpoint", exclude_self=False)
     assert len(rows) == 2
-    rows = search.search_catalogs("s1", identifier_pattern="%verify%")
+    rows = search.search_catalogs(
+        "s1", identifier_pattern="%verify%", exclude_self=False,
+    )
     assert len(rows) == 1
     assert rows[0]["identifier"] == "POST /verify"
 
@@ -333,9 +345,9 @@ def test_search_unresolved_filters_resolved(agent_factory):
         "reference_type": "hostname",
         "reference_value": "mystery.host",
     })
-    # Default only_unresolved=True
+    # Default only_unresolved=True; pass exclude_self=False to see own row.
     rows = search.search_unresolved(
-        "s1", reference_value_pattern="%mystery%",
+        "s1", reference_value_pattern="%mystery%", exclude_self=False,
     )
     assert len(rows) == 1
 
@@ -352,7 +364,9 @@ def test_cap_at_max_results(agent_factory):
             "plane": "github", "resource_type": "env_var",
             "identifier": f"VAR_{i:03d}",
         })
-    rows = search.search_attributions("s1", identifier_pattern="VAR_%")
+    rows = search.search_attributions(
+        "s1", identifier_pattern="VAR_%", exclude_self=False,
+    )
     assert len(rows) == MAX_RESULTS
 
 
@@ -361,3 +375,81 @@ def test_cap_at_max_results(agent_factory):
 def test_unknown_agent_refused():
     with pytest.raises(ValueError, match="not found"):
         search.search_components("ghost-agent", canonical_name_pattern="x")
+
+
+# ============ Phase 10.7: exclude_self on search_* ============
+
+
+def test_phase10_7_search_components_default_exclude_self_skips_own(agent_factory):
+    """Default exclude_self=True. SME's own component must NOT appear."""
+    _iter(agent_factory, "i")
+    _sme_with_component(agent_factory, "i", "s1", "o/auth", "auth-svc")
+    _sme_with_component(agent_factory, "i", "s2", "o/pay", "payments-svc")
+    rows = search.search_components("s1", canonical_name_pattern="auth%")
+    canonicals = [r["canonical_name"] for r in rows]
+    assert "auth-svc" not in canonicals  # caller's own — excluded
+
+
+def test_phase10_7_search_components_explicit_false_includes_own(agent_factory):
+    _iter(agent_factory, "i")
+    _sme_with_component(agent_factory, "i", "s1", "o/auth", "auth-svc")
+    rows = search.search_components(
+        "s1", canonical_name_pattern="auth%", exclude_self=False,
+    )
+    canonicals = [r["canonical_name"] for r in rows]
+    assert "auth-svc" in canonicals
+
+
+def test_phase10_7_search_components_orch_no_exclusion(agent_factory):
+    """Orch owns no components — exclude_self=True must silent-no-op."""
+    _iter(agent_factory, "i")
+    _sme_with_component(agent_factory, "i", "s1", "o/auth", "auth-svc")
+    agent_factory("orch-search", "orchestrator")
+    rows = search.search_components(
+        "orch-search", canonical_name_pattern="auth%",
+    )  # default exclude_self=True
+    canonicals = [r["canonical_name"] for r in rows]
+    assert "auth-svc" in canonicals  # orch owns nothing → no exclusion fires
+
+
+def test_phase10_7_search_attributions_exclude_self(agent_factory):
+    _iter(agent_factory, "i")
+    cid_a = _sme_with_component(agent_factory, "i", "s1", "o/a", "auth-svc")
+    cid_b = _sme_with_component(agent_factory, "i", "s2", "o/b", "payments-svc")
+    components.upsert_attribution("s1", cid_a, {
+        "plane": "github", "resource_type": "endpoint",
+        "identifier": "POST /verify",
+    })
+    components.upsert_attribution("s2", cid_b, {
+        "plane": "github", "resource_type": "endpoint",
+        "identifier": "POST /charge",
+    })
+    rows = search.search_attributions("s1", resource_type="endpoint")
+    # s1 default exclude_self=True → only s2's attribution surfaces
+    idents = [r["identifier"] for r in rows]
+    assert "POST /verify" not in idents
+    assert "POST /charge" in idents
+
+
+def test_phase10_7_search_edges_exclude_self_either_side(agent_factory):
+    """edges row owned if EITHER endpoint is caller's component."""
+    _iter(agent_factory, "i")
+    cid_a = _sme_with_component(agent_factory, "i", "s1", "o/a", "auth-svc")
+    cid_b = _sme_with_component(agent_factory, "i", "s2", "o/b", "payments-svc")
+    cid_c = _sme_with_component(agent_factory, "i", "s3", "o/c", "feeds-svc")
+    # Edge from s1's component to s2's component (s1 owns from-side)
+    components.upsert_edge_outbound("s1", {
+        "from_component_id": cid_a, "to_component_id": cid_b,
+        "edge_type": "calls", "identifier": "POST /verify",
+    })
+    # Edge from s2's component to s3's component (s1 owns neither end)
+    components.upsert_edge_outbound("s2", {
+        "from_component_id": cid_b, "to_component_id": cid_c,
+        "edge_type": "calls", "identifier": "POST /credit",
+    })
+    rows = search.search_edges("s1", edge_type="calls")  # default exclude_self
+    idents = [r["identifier"] for r in rows]
+    # s1's edge (from-side ownership) → excluded
+    assert "POST /verify" not in idents
+    # s2→s3 edge — s1 owns neither end → included
+    assert "POST /credit" in idents

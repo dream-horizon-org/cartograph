@@ -1670,6 +1670,7 @@ def search_components(
     component_type: Any = None,
     status: Any = "active",
     plane: Any = None,
+    exclude_self: bool = True,
 ) -> list[dict]:
     """Phase 10.3. Find components by exact/ILIKE patterns + filters.
 
@@ -1682,6 +1683,8 @@ def search_components(
       component_type: scalar or list (OR within column).
       status: defaults to 'active'. Pass None to include all statuses.
       plane: filter via RCA → resources.plane. Scalar or list.
+      exclude_self: Phase 10.7. DEFAULT TRUE. Skip caller's own
+        component. Non-SME callers no-op silently.
 
     Returns: lean list[dict] with id + canonical_name + display_name +
       component_type + status + planes[]. Capped at 100 rows.
@@ -1689,6 +1692,7 @@ def search_components(
     return search_tool.search_components(
         agent_id, canonical_name_pattern, display_name_pattern,
         name_pattern, component_type, status, plane,
+        exclude_self=exclude_self,
     )
 
 
@@ -1699,14 +1703,19 @@ def search_attributions(
     plane: Any = None,
     resource_type: Any = None,
     component_id: str | None = None,
+    exclude_self: bool = True,
 ) -> list[dict]:
     """Phase 10.3. Find attributions by identifier pattern + filters.
 
     Returns lean rows: {id, component_id, plane, resource_type,
     identifier, confidence}. Capped at 100.
+
+    Phase 10.7: exclude_self default TRUE — skip rows on caller's own
+    component.
     """
     return search_tool.search_attributions(
         agent_id, identifier_pattern, plane, resource_type, component_id,
+        exclude_self=exclude_self,
     )
 
 
@@ -1718,6 +1727,7 @@ def search_edges(
     kind: Any = None,
     from_component_id: str | None = None,
     to_component_id: str | None = None,
+    exclude_self: bool = True,
 ) -> list[dict]:
     """Phase 10.3. Find edges by identifier + edge_type + kind + endpoints.
 
@@ -1725,11 +1735,15 @@ def search_edges(
     'catalog' kind is historical — post-Phase-7.4 catalog rows live
     in the `catalogs` table; use search_catalogs for live catalogs.
 
+    Phase 10.7: exclude_self default TRUE — excludes edges where
+    EITHER endpoint is caller's component.
+
     Returns lean rows including the computed `kind` for each edge. Cap 100.
     """
     return search_tool.search_edges(
         agent_id, identifier_pattern, edge_type, kind,
         from_component_id, to_component_id,
+        exclude_self=exclude_self,
     )
 
 
@@ -1739,14 +1753,19 @@ def search_catalogs(
     identifier_pattern: str | None = None,
     kind: Any = None,
     component_id: str | None = None,
+    exclude_self: bool = True,
 ) -> list[dict]:
     """Phase 10.3. Find catalog rows by identifier + kind + owner.
+
+    Phase 10.7: exclude_self default TRUE — skip catalogs owned by
+    caller's component.
 
     Returns lean rows: {id, component_id, kind, identifier, confidence}.
     Cap 100.
     """
     return search_tool.search_catalogs(
         agent_id, identifier_pattern, kind, component_id,
+        exclude_self=exclude_self,
     )
 
 
@@ -1761,6 +1780,10 @@ def search_flows(
 
     Flows have no human-readable identifier — only FK references. So
     this is ID-based filtering only, no string pattern field.
+
+    No `exclude_self` here — flows have no clear ownership predicate
+    independent of their FK targets. Filter by component_id directly
+    if you need owner-scoping.
     Cap 100.
     """
     return search_tool.search_flows(
@@ -1775,15 +1798,19 @@ def search_unresolved(
     reference_type: Any = None,
     found_in_component_id: str | None = None,
     only_unresolved: bool = True,
+    exclude_self: bool = True,
 ) -> list[dict]:
     """Phase 10.3. Find unresolved refs by value pattern + filters.
 
     `only_unresolved=True` (default) excludes resolved=TRUE rows.
+    Phase 10.7: exclude_self default TRUE — skip rows where
+    found_in_component_id matches caller's own component.
     Cap 100.
     """
     return search_tool.search_unresolved(
         agent_id, reference_value_pattern, reference_type,
         found_in_component_id, only_unresolved,
+        exclude_self=exclude_self,
     )
 
 
