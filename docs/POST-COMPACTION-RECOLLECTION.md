@@ -154,7 +154,7 @@ If Docker daemon is down: `open -a Docker`, wait ~20s, then `docker start cartog
 
 ---
 
-## 3. Phase status (all 0 → 10 ✅; Phase 6 PARKED)
+## 3. Phase status (all 0 → 10.7 ✅; Phase 6 PARKED)
 
 | Phase | Status | Key contribution |
 |---|---|---|
@@ -168,6 +168,8 @@ If Docker daemon is down: `open -a Docker`, wait ~20s, then `docker start cartog
 | **8** | **✅ SHIPPED 2026-04-29** | Token Optimisation + Gap Closings. 18 new tools (89 → 107). 4 corrective delete singletons + 5 delete bulks + 4 write bulks + 5 multi-component read bulks + insert_unresolved idempotency + notify.py flock fix. |
 | **9** | **✅ SHIPPED 2026-04-30** | Round 5 token-opt — mcp_call_batch (108th tool) + caveman output style. |
 | **10** | **✅ SHIPPED 2026-05-04** | Search/Discovery + Embedding fix + Race guard + TEMP lock-step + workspace fix + caveman rewrite. Tool count 108 → 114. Sub-commits: 10.1 / 10.1.1 / 10.1.2 / 10.2 / 10.3 / 10.4 / 10.5 / dcb7f3f. |
+| **10.1.3** | **✅ SHIPPED 2026-05-04** | per-tool caller-id kwarg name-map in mcp_call_batch (closes 5 BUG-2 insights from DEMO-MEGA: send_chat / send_broadcast / create_task / act_on_proxy_item / create_clarification batchable) + create_edge docstring fix (no longer claims "Refuses self-loops"). Commit `376b27a`. Verified by DEMO10 (`ad3830c`) — 8/8 PASS. |
+| **10.7** | **✅ SHIPPED 2026-05-05** | Lookup architecture clean-up. New `description` column (≤400 chars dense embed-target) separates from `component_doc_md` (multi-paragraph human-render only, no longer embedded). vector_search + 5/6 search_* tools gain `exclude_self: bool = True` (default ON) + `filters: dict | None = None` (default OFF). Workspace-local `./component_doc.md` rule for SMEs. `get_component` + `get_components_bulk` strip 1024-d embedding from return (~8KB savings/call). Sub-commits: ec5a318 / fb5f919 / 5c660d1 / faefad4 / f8380ec / 1d4750e / ba7acc3 / e7ce669. Tool count unchanged: 114. |
 
 ---
 
@@ -221,10 +223,14 @@ resources (9):        upsert_resource, upsert_resources_bulk, get_resource,
 agent_lifecycle (11): create_agent, bulk_spawn_smes, list_agents, reset_agent,
                       decommission_agent(_bulk), decommission_component(_bulk),
                       sleep_self, bulk_sleep_agents, bulk_wake_agents
-components (32):      upsert_component, upsert_attribution,
+components (32):      upsert_component (10.7: accepts `description` ≤400 chars
+                                          dense embed-target field;
+                                          component_doc_md is human-render only,
+                                          NOT embedded post-10.7),
+                      upsert_attribution,
                       upsert_attributions_bulk (7.4.12),
-                      create_edge (3.9 shim — DOCSTRING WRONG, says "Refuses self-loops"
-                                   but actually allows them, fix in 10.1.3),
+                      create_edge (3.9 shim; 10.1.3 docstring fixed —
+                                   self-loops correctly documented as permitted),
                       insert_unresolved (idempotent ON CONFLICT post-8.4),
                       resolve_reference,
                       upsert_edge_catalog (7.4 shim), upsert_edge_outbound,
@@ -235,7 +241,8 @@ components (32):      upsert_component, upsert_attribution,
                       delete_attribution + _bulk (8.2/8.3),
                       delete_flow + _bulk (8.2/8.3),
                       delete_unresolved + _bulk (8.2/8.3),
-                      get_component, get_components_bulk (8.5),
+                      get_component (10.7: strips embedding vector ~8KB savings),
+                      get_components_bulk (8.5; 10.7 same strip),
                       get_attributions, get_attributions_bulk (8.5),
                       get_edges, get_component_edges,
                       get_component_edges_bulk (8.5),
@@ -244,7 +251,12 @@ components (32):      upsert_component, upsert_attribution,
 notifications (1):    get_agent_notifications
 consolidation (5):    nominate, respond, review, get_my, get_thread
 clarification (4):    create, respond, get_my, get_thread
-search (1):           vector_search   (lean projection per 7.4.4)
+search (1):           vector_search (lean projection per 7.4.4; 10.7:
+                      adds `description` to components result; new optional
+                      kwargs `filters: dict | None = None` (per-table
+                      whitelist) + `exclude_self: bool = True` DEFAULT ON;
+                      plane filter on components NOT supported — use
+                      attributions filter for plane-scoped lookups)
 mutation (10):        execute_mutation, complete_consolidation, absorb_agent,
                       spawn_child_agent, transfer_attributions, transfer_edges,
                       transfer_flows, get_my_components, get_stale_edges, get_stale_flows
@@ -257,13 +269,18 @@ catalogs (8):         upsert_catalog, upsert_catalogs_bulk (7.4.12),
                       get_unmatched_callers, get_orphan_catalogs,
                       delete_catalog + _bulk (8.2/8.3)
 batch (1):            mcp_call_batch (9.1) — server-side parallel dispatcher;
-                      cap 50; no nesting; auto-injects agent_id but BUG: 5 tools
-                      use non-standard param names so injection fails
-                      (10.1.3 to fix)
+                      cap 50; no nesting; 10.1.3 per-tool name-map for
+                      caller-id auto-inject (send_chat→from_agent_id,
+                      send_broadcast→from_agent_id, create_task→
+                      owner_agent_id, act_on_proxy_item→survivor_id,
+                      create_clarification→asker_agent_id, default
+                      agent_id for everything else)
 search_det (6):       search_components, search_attributions, search_edges,
                       search_catalogs, search_flows, search_unresolved (10.3) —
                       SQL-LIKE deterministic search; AND across cols / OR
-                      within col via list; cap 100 / refuse blank
+                      within col via list; cap 100 / refuse blank;
+                      10.7: 5/6 (skip search_flows) gain
+                      `exclude_self: bool = True` DEFAULT ON
 
 Plus auto-wrapped: every @mcp.tool() registration wrapped by
 cartograph_mcp.audit.audited (Phase 5.10) → mcp_audit table.
@@ -335,11 +352,15 @@ NOT pgvector-native generation. NOT a background loop in normal operation. `embe
 
 Read path uses lean projection (Phase 7.4.4) — `vector_search` returns id + identity columns + similarity, NOT the embedding vector or doc/slice/metadata blobs.
 
-**Component embed text shape (Phase 10.2):**
+**Component embed text shape (Phase 10.7 — current):**
 ```python
-f"{component_type}: {canonical_name} {display_name} {doc_md[:500]} {meta_json}"
+f"{component_type}: {canonical_name} {display_name} {description} {meta_json}"
 ```
-doc_md capped at 500 chars; `source_slice` deliberately not included. This closes the recall gap where `vector_search('auth service')` missed `canonical_name=fav2-api` even when its doc_md said exactly that.
+Phase 10.7 introduced a separate `description` column (≤400 chars soft cap) as the dense embed-target. `component_doc_md` is human-render only post-10.7 — no longer in the embed text. `source_slice` deliberately not included.
+
+**Pre-Phase-10.7 shape (now reverted)** was `f"{type}: {name} {display} {doc_md[:500]} {meta}"` — Phase 10.2 added doc_md to fix a recall gap; Phase 10.7 separated embed signal (description, machine) from human render (doc_md) to prevent prose-length dilution of the identity ranking signal.
+
+Mandatory post-10.7 backfill: `python -m shared.embedding_backfill --force-components` re-embeds all rows + seeds `description = LEFT(component_doc_md, 400)` on any row where description is empty. Already run on dev DB.
 
 ---
 
@@ -354,8 +375,12 @@ doc_md capped at 500 chars; `source_slice` deliberately not included. This close
 7. **Pre-merge handoff:** mutation POC MUST raise clarification to target before `absorb_agent`.
 8. **No session reset for prompt changes** — `--system-prompt` rebuilt fresh on every spawn.
 9. **Mutation cascades (Phase 7.4.2):** `absorb_agent` runs catalog cascade BEFORE flow cascade.
-10. **Self-loops permitted (Phase 7.3 + 7.4.4):** DB CHECK + Python guards both gone. **BUT `create_edge` docstring lies about this — fix in 10.1.3.**
-11. **`vector_search` returns lean rows (Phase 7.4.4):** no embedding vectors, no doc/slice/metadata blobs.
+10. **Self-loops permitted (Phase 7.3 + 7.4.4):** DB CHECK + Python guards both gone. Phase 10.1.3 also corrected the `create_edge` docstring that previously claimed otherwise.
+11. **`vector_search` returns lean rows (Phase 7.4.4):** no embedding vectors, no doc/slice/metadata blobs. Phase 10.7: components projection adds `description` (cheap — ≤400 chars). Filters dict + `exclude_self=True` default ON.
+11a. **`get_component` strips embedding (Phase 10.7):** returned dict never contains the 1024-d vector column. Same for `get_components_bulk`. Saves ~8KB/call.
+11b. **`description` is THE embed-target (Phase 10.7):** `f"{type}: {name} {display} {description} {meta}"`. doc_md changes do NOT trigger re-embed; description changes do. Soft 400-char cap (warn-not-reject).
+11c. **Workspace-local doc_md rule (Phase 10.7):** SMEs maintain `./component_doc.md` in workspace as canonical source-of-truth. Pass file content on every upsert_component. Never reconstruct from chat memory.
+11d. **`exclude_self` default TRUE on vector_search + 5/6 search_*:** caller's own component(s) excluded from results unless caller passes `exclude_self=False`. Non-SME callers (orch/iter/resolver) silent-no-op (NOT IN empty set is TRUE).
 12. **`get_action_items_summary` is uniform `dict[str, int]` (Phase 7.4.5):** rich proxy breakdown lives on `get_action_items_detail`.
 13. **Component planes come from RCA→resources, not attributions.**
 14. **Per-type model:** orch=sonnet-4-6, resolver=opus-4-6+medium effort, sme/iter=sonnet-4-6.
@@ -370,6 +395,7 @@ doc_md capped at 500 chars; `source_slice` deliberately not included. This close
 23. **Lock-step phase doctrine (TEMP, Phase 10.4):** Orch broadcasts `[PHASE-END: <prev>] [PHASE-START: <next>]` for 5 phases. SMEs respect by convention. Marked TEMPORARY — drop once self-pacing proves reliable at higher scale.
 24. **Workspace isolation (Phase 10.1.2):** every agent gets unique `workspace_path`. `AgentManager.provision_workspace` is the helper; `create_agent` and `spawn_child_agent` both go through it.
 25. **Symmetric-nomination guard (Phase 10.1 + 10.1.1):** SELECT pre-check + partial UNIQUE index on normalised pair. Both belt-and-suspenders.
+26. **mcp_call_batch caller-id name-map (Phase 10.1.3):** dispatcher consults a per-tool dict to choose which kwarg to inject the caller's id under. Default `agent_id`; overrides for `send_chat`/`send_broadcast` (`from_agent_id`), `create_task` (`owner_agent_id`), `act_on_proxy_item` (`survivor_id`), `create_clarification` (`asker_agent_id`). Tools keep their semantic param names; dispatcher does the mapping.
 
 ---
 
@@ -380,7 +406,8 @@ doc_md capped at 500 chars; `source_slice` deliberately not included. This close
 1. **USER_DISCUSSION** — admin↔orch onboarding, creds, scope.
 2. **ITERATION** — iterators enumerate resources via `upsert_resource(s_bulk)`.
 3. **MATERIALISATION** — SMEs hydrate own components:
-   - upsert_component + doc_md (NORMAL ENGLISH for humans) + source_slice
+   - upsert_component with `description` (≤400 chars dense, embed-target) + `component_doc_md` (multi-paragraph human-render, NOT embedded post-10.7) + source_slice
+   - SMEs maintain `./component_doc.md` in workspace as the doc_md source-of-truth (Phase 10.7 workspace-local rule)
    - exhaustive attributions
    - own catalogs (what I expose)
    - outbound edges DANGLING ONLY (`to_component_id=NULL`) + paired insert_unresolved
