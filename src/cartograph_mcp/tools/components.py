@@ -204,12 +204,16 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
             "Spawn via bulk_spawn_smes or create_agent first."
         )
 
-    # Check canonical_name is not already taken by another SME's component.
+    # Check canonical_name is not already taken by another SME's ACTIVE
+    # component. Phase 10.8.1: scoped to status='active' so decom rows
+    # holding the same name don't block re-launch under the same
+    # canonical_name. Matches the partial UNIQUE index
+    # `components_canonical_name_active_unique`.
     conflict = execute_one(
         """SELECT c.id, rca.agent_id AS owner_agent
            FROM components c
            LEFT JOIN resource_component_agents rca ON rca.component_id = c.id
-           WHERE c.canonical_name = %s""",
+           WHERE c.canonical_name = %s AND c.status = 'active'""",
         (canonical_name,),
     )
     if conflict is not None and conflict["owner_agent"] != agent_id:

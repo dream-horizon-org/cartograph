@@ -150,6 +150,40 @@ def test_upsert_component_canonical_name_conflict_different_owner(agent_factory)
         )
 
 
+def test_upsert_component_canonical_name_active_vs_decom_allowed(agent_factory):
+    """Phase 10.8.1: a decommissioned component holding canonical_name 'X'
+    must not block a fresh SME from materialising a new component with
+    the same canonical_name. Validates the partial UNIQUE INDEX
+    (`components_canonical_name_active_unique`) + the `status='active'`
+    filter on the application-layer pre-check.
+    """
+    from shared.db import execute_mutate
+    _iterator(agent_factory, "iter-gh", "github")
+    r1 = resources.upsert_resource("iter-gh", "github", "repo", "old")
+    r2 = resources.upsert_resource("iter-gh", "github", "repo", "new")
+    _sme_with_resource(agent_factory, "sme-old", r1["id"])
+    _sme_with_resource(agent_factory, "sme-new", r2["id"])
+    # sme-old materialises the original 'feeds-api' v1
+    components.upsert_component(
+        "sme-old",
+        {"canonical_name": "feeds-api", "display_name": "feeds-api v1",
+         "component_type": "application"},
+    )
+    # Simulate post-merge decommission of v1 (skip the actual mutation
+    # path to keep the test scoped to canonical_name semantics).
+    execute_mutate(
+        "UPDATE components SET status='decommissioned' WHERE canonical_name='feeds-api'"
+    )
+    # sme-new can now claim the same canonical_name for v2.
+    new_comp = components.upsert_component(
+        "sme-new",
+        {"canonical_name": "feeds-api", "display_name": "feeds-api v2",
+         "component_type": "application"},
+    )
+    assert new_comp["canonical_name"] == "feeds-api"
+    assert new_comp["status"] == "active"
+
+
 def test_upsert_component_no_rca_row(agent_factory):
     agent_factory("sme-orphan", "sme")  # no RCA row
     with pytest.raises(ValueError, match="no assigned resource"):

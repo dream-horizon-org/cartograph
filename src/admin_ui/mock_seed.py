@@ -166,12 +166,17 @@ def seed_components() -> dict[str, str]:
         description = (c.get("doc") or "").strip().split("\n", 1)[0]
         description = description.lstrip("# ").strip()[:400]
         # Idempotent: UPDATE if canonical_name already exists with our mock tag.
+        # Phase 10.8.1: ON CONFLICT now targets the partial UNIQUE INDEX
+        # `components_canonical_name_active_unique` (the column-level
+        # UNIQUE was dropped). The INDEX predicate `WHERE status='active'`
+        # must match here. Mock-seed cleanup runs first so this only
+        # ever updates active mock rows.
         row = execute_returning(
             """INSERT INTO components
                (canonical_name, display_name, component_type, metadata,
                 component_doc_md, description, confidence)
                VALUES (%s, %s, %s, %s::jsonb, %s, %s, 1.0)
-               ON CONFLICT (canonical_name) DO UPDATE
+               ON CONFLICT (canonical_name) WHERE status = 'active' DO UPDATE
                  SET display_name = EXCLUDED.display_name,
                      component_type = EXCLUDED.component_type,
                      metadata = EXCLUDED.metadata,

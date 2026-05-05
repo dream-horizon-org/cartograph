@@ -612,6 +612,20 @@ def run_migrations() -> None:
                 "ALTER TABLE components ADD COLUMN IF NOT EXISTS source_slice JSONB"
             )
 
+            # Phase 10.8.1: canonical_name UNIQUE → partial UNIQUE on
+            # status='active'. Decom rows holding old names no longer
+            # block re-launch of services under the same canonical_name.
+            # Closes the forever-held gap flagged in DEMO11 insight
+            # 0c443555 (sme-da948bbe). Idempotent across both fresh
+            # DBs (where CREATE TABLE installed the inline UNIQUE) and
+            # already-migrated DBs (where this block already ran). The
+            # CREATE UNIQUE INDEX in the indexes list below installs the
+            # replacement; this DROP just retires the legacy constraint.
+            cur.execute(
+                "ALTER TABLE components DROP CONSTRAINT IF EXISTS "
+                "components_canonical_name_key"
+            )
+
             # Phase 3.9: asymmetric edge protocol.
             # Rename source_id → from_component_id, target_id → to_component_id,
             # both nullable. Catalog row: from IS NULL (callee owns).
@@ -979,6 +993,12 @@ def _create_indexes(cur) -> None:
         "CREATE INDEX IF NOT EXISTS idx_comp_embedding ON components USING hnsw (embedding vector_cosine_ops)",
         "CREATE INDEX IF NOT EXISTS idx_comp_type ON components(component_type)",
         "CREATE INDEX IF NOT EXISTS idx_comp_status ON components(status) WHERE status = 'active'",
+        # Phase 10.8.1: partial UNIQUE on canonical_name scoped to active
+        # rows. Replaces the legacy column-level UNIQUE (dropped in the
+        # post-creation ALTERs block). Decom rows hold their old names
+        # without blocking re-launch under the same canonical_name.
+        "CREATE UNIQUE INDEX IF NOT EXISTS components_canonical_name_active_unique "
+        "ON components (canonical_name) WHERE status = 'active'",
 
         # Attributions
         "CREATE INDEX IF NOT EXISTS idx_attr_component ON attributions(component_id)",
