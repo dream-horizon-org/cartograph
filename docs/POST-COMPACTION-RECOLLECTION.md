@@ -607,7 +607,25 @@ Black-box verified that active agents CANNOT do these to/with a decom (all REFUS
 - `act_on_proxy_item(task, create)` → "Unsupported proxy action"
 - `act_on_proxy_item(consolidation, nominate)` → "Unsupported proxy action"
 
+### Positive-path verification of proxy dispatch matrix (all 6 verbs)
+
+All 6 dispatch verbs in `act_on_proxy_item` now verified end-to-end (decom + survivor pair):
+- `(consolidation, respond)` — 4 rows during DEMO11 Phase 5 ✅
+- `(broadcast, ack)` — 20 rows during merge cascades ✅
+- `(chat, ack)` — 1 row (Phase 8c.1 close-out post-scorecard) ✅
+- `(task, respond)` — 1 row, task BW→WD via stub ✅ (post-DEMO11 backfill)
+- `(clarification, respond)` — 1 row, clar B2→QC via stub ✅ (post-DEMO11 backfill)
+- `(chat, send)` — 1 row, decom→admin chat via survivor ✅ (post-DEMO11 backfill)
+
+Decom + proxy + other × 5 paradigms × {read,respond} × {new,existing} matrix fully covered — no holes.
+
 **Defensive finding (not a runtime exploit):** `broadcast.get_unacked_broadcasts(decom_id)` returns rows — function does NOT call `require_active_agent`. Operationally safe (decom never wakes; agent_manager pickup filters status), but if ANY external caller (admin UI / debug script) hits this, it returns rows. 2-LOC fix: add `require_active_agent(agent_id)` at top + matching skip in `trigger_management/scanners/broadcasts.py::scan`. Belt-and-suspenders only. Filed as informal finding; not blocking.
+
+### 3 standing semantic questions (real-world tolerable, not blockers)
+
+1. **Post-decom broadcasts surface in proxy queue.** Survivor `get_my_proxy_items` walks decom's queue using `c.created_at > agent_runs.created_at` filter. For decoms, this includes broadcasts created AFTER the decom was decommissioned. No `deactivated_at` column to filter against. Wasted ack work, not a correctness bug. Could fix by adding `agent_runs.deactivated_at` + filter `c.created_at <= deactivated_at` on the proxy broadcast list.
+2. **`mutation_assigned_to` decom mid-execution.** If the SME assigned to execute a mutation gets decom'd mid-flight, no `(consolidation, execute_mutation)` proxy path exists. Consolidation sits at M forever. Mitigated by resolver pre-M conflict check (defers if participant in another M). Edge case, not exercised this run.
+3. **`broadcast.get_unacked_broadcasts` no decom gate.** See defensive finding above.
 
 ### 8 insights filed during DEMO11 + verdict
 
