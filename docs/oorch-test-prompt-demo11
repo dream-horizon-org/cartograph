@@ -1,0 +1,491 @@
+═══════════════════════════════════════════════════════════════════
+DEMO11 — Comprehensive end-to-end verification BEFORE real-data run
+Cover surface: Phase 0 → Phase 10.7. Build a small but realistic
+multi-plane topology, exercise every shipped capability, generate
+a per-phase per-agent-type cost report, emit a final scorecard.
+
+Paste THIS WHOLE BLOCK as a single admin chat to the orchestrator.
+═══════════════════════════════════════════════════════════════════
+
+[DEMO11-START]
+
+You are running the most comprehensive end-to-end Cartograph demo
+to date — a fully agent-driven dry-run before real-data onboarding.
+This is the master verification: every shipped capability gets
+exercised, the 5-phase lock-step demarcation is explicitly tested,
+and you produce a granular per-phase per-agent-type cost report at
+the end.
+
+Tag every status update with `[DEMO11-PHASE-N]` (or `[DEMO11-OK]` /
+`[DEMO11-FAIL]` / `[DEMO11-BUG]` / `[DEMO11-NOTE]`). End each phase
+with `[DEMO11-RESULT phase=N <PASS|FAIL|N/A> <brief reason>]`. The
+admin will grep these markers + paste the final scorecard.
+
+Caveman style remains active throughout. Identifiers / file paths /
+hostnames / IDs / hashes / error strings VERBATIM. Drop articles +
+filler + preambles in chat replies.
+
+═══════════════════════════════════════════════════════════════════
+== ARCHITECTURE UNDER TEST (recap of what's live) ==
+
+Phase 0-7 foundation, ITER + MAT + CONS + MUT + EDGE phases all
+shipped. Recently:
+- Phase 8 (2026-04-29): 18 corrective + bulk tools (+18 → 107).
+- Phase 9 (2026-04-30): mcp_call_batch (108th tool) + caveman.
+- Phase 10 (2026-05-04): symmetric-nomination guard (10.1 + 10.1.1),
+  split-spawned-child workspace isolation (10.1.2), per-tool name-map
+  in mcp_call_batch + create_edge docstring fix (10.1.3),
+  component_doc_md embedding (10.2 — REVERTED in 10.7), 6
+  deterministic search tools (10.3), TEMP lock-step doctrine (10.4).
+- Phase 10.7 (2026-05-05, JUST shipped pre-DEMO11): description
+  column + filtered vector_search + exclude_self defaults TRUE +
+  workspace-local doc_md rule + get_component embedding strip.
+
+Tool count: 114. Description column lives on components. Embed text
+shape uses description (not doc_md). vector_search + 5 of 6 search_*
+tools accept exclude_self (default ON) + filters dict (vector_search
+only).
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 1 — TOOL SURFACE + DAEMON HEALTH ==
+
+Verify the system is in fit shape before any topology-building work.
+
+1.1 Confirm 114 tools registered:
+    grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1
+    Expected: "114 tools registered". If different — [DEMO11-FAIL].
+
+1.2 Confirm 6 specific Phase 10.7 surfaces are present + correct:
+    a. components.description column exists:
+       PGPASSWORD=cartograph psql ... -tAc
+       "SELECT data_type FROM information_schema.columns
+        WHERE table_name='components' AND column_name='description';"
+       Expected: text
+    b. component_embed_text uses description not doc_md (grep
+       src/shared/embedding.py for "{description}" — present;
+       "doc[:500]" — absent).
+    c. vector_search wrapper accepts filters + exclude_self
+       (inspect signature).
+    d. search_components / _attributions / _edges / _catalogs /
+       _unresolved each accept exclude_self.
+    e. get_component returns NO embedding column (call once,
+       inspect keys).
+    f. /api/graph nodes carry description field
+       (curl http://localhost:8200/api/graph | jq '.nodes[0]'
+        — `description` key present).
+
+1.3 Daemon health: 4 processes running (mcp / triggers / agents /
+    admin_ui). Admin API responds 200 on /api/agents.
+
+[DEMO11-RESULT phase=1 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 2 — PHASE DEMARCATION DOCTRINE TEST ==
+
+Explicit verification that the 5-phase lock-step doctrine is
+working. YOU (orch) are the phase coordinator.
+
+2.1 Emit USER_DISCUSSION → ITERATION transition:
+    send_broadcast(to_agent_type='iterator',
+                   message='[PHASE-END: USER_DISCUSSION] [PHASE-START: ITERATION]\n\nIteration phase begins. Per-plane iterators enumerate resources. Materialisation deferred to Phase 3 of this demo.',
+                   persistent=True)
+
+2.2 Verify SMEs respect deferral. After Phase 4 spawns SMEs but
+    before broadcasting [PHASE-END: ITERATION] [PHASE-START:
+    MATERIALISATION], SMEs should NOT have materialised. Monitor
+    via SQL: 0 components written by SMEs while iteration is the
+    active phase.
+
+2.3 Repeat for every transition. Phases:
+    USER_DISCUSSION → ITERATION → MATERIALISATION →
+    CONSOLIDATION_MUTATION → EDGE_DISCOVERY.
+    Five [PHASE-END/START] broadcasts total (the first is implicit
+    on kickoff; emit only the 4 actual transitions).
+
+2.4 Phase straggler handling: if any agent fails to acknowledge
+    a phase transition within 10 wakes, dispatch a per-agent BW
+    task pulling them along. This is the documented Phase 10.4
+    doctrine — exercise it explicitly if it triggers.
+
+[DEMO11-RESULT phase=2 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 3 — ITERATION (3 PLANES) ==
+
+3.1 Create 3 iterators (github + cloud + telemetry):
+    create_agent for each plane.
+
+3.2 Hand each iterator a stub task to enumerate "5 fictional
+    resources" matching that plane's expected granularity:
+    - github: 5 repos (e.g. dream11/auth-svc, dream11/auth-db,
+      dream11/payments-svc, dream11/payments-db,
+      dream11/orders-svc).
+    - cloud: 5 cloud resources (mix: 2 ASGs, 2 RDS instances,
+      1 Lambda).
+    - telemetry: cover ALL 4 surfaces explicitly (per AGENT-PROMPTS
+      iterator §2.8):
+        Surface 1 (service catalog): 3 APM-instrumented apps
+          (auth-svc, payments-svc, orders-svc).
+        Surface 2 (infra inventory): 2 K8s workloads.
+        Surface 3a/b (DB+broker via dependency graph + integrations):
+          2 databases (auth-db.dream11.local Postgres,
+          payments-db.dream11.local Postgres) + 1 Kafka topic
+          (orders.events). MUST emit non-application resource_types
+          ('db', 'queue', 'topic'), NOT just 'service'.
+        Surface 4 (external): 1 third-party API (stripe.api).
+    Iterators use upsert_resources_bulk (1 transaction, ≤500 rows).
+
+3.3 Verify per-plane resource counts before phase-end:
+    github: 5 resources.
+    cloud: 5 resources.
+    telemetry: ≥9 resources spanning ≥3 distinct resource_types.
+    If telemetry only emitted resource_type='service' →
+    [DEMO11-FAIL] Phase 3 (iterator missed non-app surfaces).
+
+3.4 Broadcast [PHASE-END: ITERATION] [PHASE-START: MATERIALISATION].
+
+[DEMO11-RESULT phase=3 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 4 — MATERIALISATION (description + flows) ==
+
+4.1 bulk_spawn_smes for github + cloud + telemetry planes
+    (one SME per pending resource). Issue per-SME tasks
+    "Materialise your assigned resource per Phase 10.4 lock-step
+    rules — flows MUST happen now, edges to peers DANGLING only".
+
+4.2 Each SME executes the materialisation flow:
+    a. upsert_component ONCE per SME. Required fields:
+       canonical_name, display_name, component_type. Phase 10.7
+       NEW REQUIRED: description (≤400 chars, dense, role + key
+       deps). component_doc_md (multi-paragraph, free) is
+       OPTIONAL but recommended for graph-viz hover.
+       SMEs MUST maintain ./component_doc.md in workspace as the
+       source-of-truth for doc_md (Phase 10.7 workspace rule).
+       On every upsert call, pass file content. Don't reconstruct
+       from chat memory.
+    b. ≥3 attributions per SME (via upsert_attributions_bulk).
+    c. For applications/lambdas/external: upsert_catalog for each
+       exposed surface (≥1 catalog per app SME).
+    d. Outbound edges: DANGLING ONLY (to_component_id=NULL) +
+       paired insert_unresolved.
+       *** DO NOT bind to peers during materialisation. ***
+       Defer binding to Phase 6 EDGE_DISCOVERY per lock-step.
+    e. Flows: Phase 10.7 confirmed flows happen DURING materialisation.
+       For every (own catalog × own outgoing-edge) join, fire
+       upsert_flow. ≥1 flow per app SME with ≥1 catalog and
+       ≥1 outgoing edge.
+
+4.3 Verify post-materialisation invariants:
+    a. Every component has non-empty description.
+       SQL: SELECT count(*) FROM components WHERE description = '';
+       Expected: 0.
+    b. ≥1 flow exists in flows table.
+       SQL: SELECT count(*) FROM flows;
+       Expected: ≥3 (across multiple SMEs).
+    c. ZERO bound edges between SMEs at this point. All cross-
+       component edges must be dangling (to_component_id IS NULL).
+       SQL: SELECT count(*) FROM edges
+            WHERE from_component_id IS NOT NULL
+              AND to_component_id IS NOT NULL
+              AND from_component_id != to_component_id;
+       Expected: 0 (any bound peer edge during materialisation =
+       phase-doctrine violation).
+    d. ≥3 unresolved rows seeded (paired with danglings).
+
+4.4 Workspace-local doc_md rule check (Phase 10.7):
+    For 1 SME, verify ./component_doc.md exists in their workspace
+    directory and matches their component's component_doc_md
+    column in the DB. If mismatch — [DEMO11-NOTE workspace doc out
+    of sync].
+
+4.5 Broadcast [PHASE-END: MATERIALISATION] [PHASE-START:
+    CONSOLIDATION_MUTATION].
+
+[DEMO11-RESULT phase=4 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 5 — CONSOLIDATION + MUTATION (merge + split) ==
+
+Force at least one merge AND one split to exercise the full mutation
+surface.
+
+5.1 SETUP for the merge (intentionally seed a duplicate to consolidate):
+    Have the github SME for `dream11/auth-svc` and the telemetry SME
+    for `auth-svc` (catalog) BOTH write components for the same
+    logical service. This is realistic — multi-plane discovery
+    naturally produces apparent duplicates.
+
+5.2 SIBLING SEARCH (Phase 10.7 default exclude_self=True):
+    SMEs run vector_search on components with their own description
+    as query. Phase 10.7 default skips own row → top results are
+    real candidates. Verify in caveman chat: SME reports something
+    like:
+      "vector_search found peer auth-svc-tel (sim=0.91). nominate
+      merge." (not "found self at top-1, skip, then peer").
+
+5.3 NOMINATE MERGE: github SME nominates merge with telemetry SME's
+    auth-svc component. b_conf converges → auto-escalate to R.
+
+5.4 SYMMETRIC-NOMINATION RACE GUARD (Phase 10.1 + 10.1.1):
+    Have a different SME attempt the REVERSE nomination
+    (telemetry-side nominates github-side). Expected: blocked
+    with "Open consolidation between these components already
+    exists" (Phase 10.1 SELECT pre-check) OR PostgreSQL UNIQUE
+    violation (Phase 10.1.1 partial UNIQUE index, fallback for
+    microsecond race). Either is PASS.
+
+5.5 RESOLVER REVIEW: r_conf ≥0.85 → status=M, mutation_assigned_to
+    = pick richer side per the Absorber Pick (plane-coverage,
+    attribution count, catalog count, doc_md length).
+
+5.6 PRE-MERGE HANDOFF (mandatory):
+    Survivor raises a clarification to absorbed-target asking for
+    runtime knowledge NOT captured in component_doc_md / attributions
+    / edges. Wait for QC. Capture answers in survivor's
+    ./component_doc.md (workspace rule) THEN absorb.
+
+5.7 EXECUTE MUTATION: absorb_agent (with cascade=true defaults).
+    Verify: catalogs cascade BEFORE flows (Phase 7.4.2). Verify all
+    cascaded counts in the response.
+
+5.8 SPLIT NOMINATION: pick one SME (e.g. orders-svc) and have it
+    nominate a split — claim the resource is actually 2 components.
+    Resolver approves → M. mutation_assigned_to = self (always
+    for splits).
+
+5.9 SPAWN_CHILD_AGENT — Phase 10.1.2 ISOLATION CHECK:
+    Verify the child gets a NEW workspace path (not parent's):
+    SQL: SELECT workspace_path FROM agent_runs
+         WHERE agent_id IN (parent, child);
+    Two distinct paths. Child's workspace dir exists on disk.
+
+5.10 TERMINAL ACK: every participant of every closed (D/F)
+     consolidation calls ack_terminal. Confirm via:
+     SQL: SELECT count(*) FROM terminal_acks;
+
+[DEMO11-RESULT phase=5 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 6 — EDGE DISCOVERY ==
+
+Now that consolidation has stabilised the graph, SMEs bind their
+dangling outbound edges + resolve unresolved refs.
+
+6.1 Broadcast [PHASE-END: CONSOLIDATION_MUTATION]
+    [PHASE-START: EDGE_DISCOVERY].
+
+6.2 Each SME with dangling edges: bind via cosine ladder (Phase 3.7
+    bands, ≥0.75 strong / 0.60-0.75 hint / <0.60 unresolved).
+
+6.3 Phase 10.7 vector_search filter usage during edge discovery:
+    Pick at least ONE SME to demonstrate plane-scoped lookup:
+      vector_search(query='auth db hostname',
+                    table='attributions',
+                    filters={'plane': 'cloud'},
+                    limit=20)
+    Verify all returned rows have plane='cloud'. [DEMO11-OK
+    filtered vector_search works].
+
+6.4 RESOLVE unresolved rows where possible. resolve_reference for
+    each.
+
+6.5 CROSS-SME HYGIENE:
+    a. get_unmatched_callers — surface bound edges into your
+       component with no matching catalog. Triage each.
+    b. get_orphan_catalogs — catalogs nobody binds to. Note
+       which are dynamic (DB-like, ignore) vs missing-binding
+       opportunity.
+    c. POST-MERGE EDGE DEDUP via delete_edge — if survivor
+       inherited duplicate edges with mismatched-but-same-meaning
+       identifiers (e.g. bare hostname vs host/dbname), use
+       identifier-normalisation rule + delete_edge to collapse.
+
+6.6 Verify graph is now meaningfully connected:
+    SQL: SELECT count(*) FROM edges
+         WHERE from_component_id IS NOT NULL
+           AND to_component_id IS NOT NULL;
+    Expected: ≥3 bound peer edges by phase end.
+
+[DEMO11-RESULT phase=6 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 7 — Phase 10.7 SURFACE EXPLICIT TESTS ==
+
+Targeted verification of the lookup-architecture clean-up shipped
+in Phase 10.7 — not just incidental usage during Phases 4-6.
+
+7.1 DESCRIPTION vs DOC_MD distinction:
+    a. Pick 1 component. Confirm description is concise (≤400
+       chars). Confirm component_doc_md is multi-paragraph free
+       prose (longer is fine).
+    b. Update doc_md only (not description). Re-fetch the
+       component's embedding via SQL:
+       SELECT embedding::text FROM components
+       WHERE id = '<that_id>';
+       Run again after a doc-only update. Hashes must be IDENTICAL
+       (doc_md is no longer in the embed). [DEMO11-OK doc-only
+       changes don't trigger re-embed].
+    c. Update description only. Re-fetch embedding. Hashes must
+       DIFFER. [DEMO11-OK description IS the embed-target].
+
+7.2 vector_search exclude_self default:
+    SME calls vector_search(query=<own description>,
+                            table='components').
+    Default exclude_self=True. SME's own component MUST NOT appear
+    in results. [DEMO11-OK self excluded by default].
+    Same call with exclude_self=False → own component appears.
+
+7.3 vector_search filters:
+    a. Valid: filters={'component_type': ['database', 'cache']}
+       on components table. Returns only DBs + caches.
+    b. Valid: filters={'component_type': 'application',
+                       'status': 'active'} (AND).
+    c. Invalid: filters={'plane': 'github'} on components table
+       → ValueError "not allowed for table 'components'"
+       (plane on components is not supported — agents must
+       use vector_search on attributions for plane-scoped
+       lookups).
+
+7.4 search_* exclude_self default:
+    Pick 1 SME. Run search_attributions(identifier_pattern='%')
+    with default exclude_self=True. Verify own component's
+    attributions are NOT in results.
+
+7.5 get_component embedding strip:
+    Call get_component(any active component_id). Returned dict
+    keys MUST NOT include 'embedding'. Pre-Phase-10.7 it leaked
+    ~8KB float array per call. [DEMO11-OK embedding stripped].
+
+7.6 Workspace-local doc_md rule:
+    Audit one SME's workspace:
+    cat src/workspaces/<sme_id>/component_doc.md
+    Compare with DB:
+    SELECT component_doc_md FROM components WHERE ... ;
+    Should match. [DEMO11-OK workspace doc rule].
+
+[DEMO11-RESULT phase=7 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 8 — Phase 10.1.3 NAME-MAP REGRESSION ==
+
+Verify the per-tool caller-id name-map in mcp_call_batch (commit
+376b27a) still works alongside Phase 10.7 changes.
+
+Each of these batched sub-calls MUST return ok=True (auto-inject
+routes to the right kwarg per tool):
+
+8.1 mcp_call_batch with all 5 affected tools:
+    [send_chat (from_agent_id),
+     send_broadcast (from_agent_id),
+     create_task (owner_agent_id),
+     act_on_proxy_item (survivor_id),  # induce a decom first if needed
+     create_clarification (asker_agent_id)]
+    All ok=True.
+
+8.2 create_edge self-loop succeeds (Phase 7.3 + 7.4.4 dropped guards;
+    Phase 10.1.3 docstring corrected to match).
+
+8.3 grep src/cartograph_mcp/server.py for "Refuses self-loops" → 0.
+    grep for "Self-loops permitted" → ≥1.
+
+[DEMO11-RESULT phase=8 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 9 — REGRESSION SPOT-CHECKS ==
+
+9.1 mcp_call_batch nesting still rejected (ValueError "cannot be
+    nested").
+
+9.2 mcp_call_batch 50-cap still enforced.
+
+9.3 Caveman style still active (sample any chat reply you've
+    sent — short, identifiers verbatim, no preambles).
+
+9.4 BULK CALLS DECISION LADDER still in SME prompt (3 rungs:
+    direct → bulk variant → mcp_call_batch).
+
+9.5 Wake debouncing 1-min still active (check
+    `WAKE_DEBOUNCE_SECONDS = 60` in trigger_loop.py via Bash).
+
+9.6 Lock-step doctrine active (TEMP block in base.py
+    MISSION_AND_VOCABULARY).
+
+[DEMO11-RESULT phase=9 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 10 — GRANULAR COST + LLM CALL ANALYSIS ==
+
+This phase produces the per-phase per-agent-type cost report the
+admin asked for pre-real-data.
+
+Use the Bash tool to run an analysis script that walks each agent's
+JSONL transcripts (~/.claude/projects/.../<agent_id>/<session>.jsonl)
++ joins with mcp_audit timestamps + intersects with phase-broadcast
+timestamps from communications. Produce a TABLE:
+
+| Phase | Agent type | Total wakes | Total LLM turns | Total tool calls
+| Avg LLM/wake | Avg tools/turn | Output tokens | Cached input tokens |
+| Approx cost USD |
+
+Phase boundaries from your own broadcasts:
+  Phase 1 = before [PHASE-START: ITERATION] timestamp.
+  Phase 2 = ITERATION span.
+  ...etc.
+
+Output the table as a markdown block in the admin chat under
+header `[DEMO11-PHASE-10] COST REPORT`. Highlight:
+  - Total LLM calls per phase per agent type
+  - Average tools-per-turn (proxy for batching effectiveness)
+  - Spend distribution (which phase + agent type cost the most)
+
+If the analysis script is more than ~150 LOC, save to
+./analysis_demo11.py and run it. Capture stdout into the chat.
+
+[DEMO11-RESULT phase=10 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 11 — FINAL SCORECARD ==
+
+Emit ONE admin chat message:
+
+  ══════════════════════════════════════════════════
+  DEMO11 — FINAL SCORECARD
+  Run: <ISO timestamp> / <your orchestrator agent_id>
+  Branch: feat/trigger-manager-cartograh-mcp
+  Phase 10.7 commits verified: ec5a318 / fb5f919 / 5c660d1 /
+  faefad4 / f8380ec / 1d4750e / ba7acc3 / e7ce669
+  ══════════════════════════════════════════════════
+
+  ── PHASES (1 .. 10) ──
+  Phase 1 — TOOL SURFACE + DAEMON HEALTH       [PASS|FAIL]
+  Phase 2 — PHASE DEMARCATION                   [PASS|FAIL]
+  Phase 3 — ITERATION (3 PLANES)                [PASS|FAIL]
+  Phase 4 — MATERIALISATION                     [PASS|FAIL]
+  Phase 5 — CONSOLIDATION + MUTATION            [PASS|FAIL]
+  Phase 6 — EDGE DISCOVERY                      [PASS|FAIL]
+  Phase 7 — Phase 10.7 SURFACE EXPLICIT TESTS  [PASS|FAIL]
+  Phase 8 — Phase 10.1.3 NAME-MAP REGRESSION    [PASS|FAIL]
+  Phase 9 — REGRESSION SPOT-CHECKS              [PASS|FAIL]
+  Phase 10 — GRANULAR COST + LLM CALL ANALYSIS [PASS|FAIL]
+
+  ── BUGS FOUND ──
+  [DEMO11-BUG-N] markers from the run, each with severity.
+  None = clean.
+
+  ── INSIGHTS FILED ──
+  Count of record_insight calls during the run + their kinds.
+
+  ── COST + LLM CALL TOTALS ──
+  Total LLM calls across run: <N>
+  Total mcp_audit rows: <N>
+  Total mcp_call_batch invocations: <N>
+  (mcp_call_batch effectiveness: <bundled sub-calls> /
+   <if-serial-equivalent> = <ratio> savings)
+
+  ── NET VERDICT ──
+  PASS overall iff all 10 phases PASS + no [DEMO11-BUG] markers.
+  FAIL otherwise. State which phases failed.
+
+[DEMO11-END]
+═══════════════════════════════════════════════════════════════════
