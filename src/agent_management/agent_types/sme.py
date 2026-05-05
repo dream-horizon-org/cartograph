@@ -89,10 +89,17 @@ Read — component graph:
   from the `catalogs` table.
 - get_edges(component_id) — legacy {{outbound, inbound}} shape; bound
   rows only. Use get_component_edges instead.
-- vector_search(agent_id, query_text, table, limit) — KNN cosine.
+- vector_search(agent_id, query_text, table, limit,
+                filters?, exclude_self=True) — KNN cosine.
   Tables: components / attributions / unresolved / edges / catalogs.
   Returns lean rows (id + identity columns + similarity) — no
-  embeddings or doc/slice/metadata blobs. Follow up with
+  embeddings or doc/slice/metadata blobs. Phase 10.7: components
+  result includes `description` (the new dense embed-target field).
+  filters dict: per-table allowed keys (AND across, OR within via
+  list); see TRIGGER-MANAGEMENT.md §3.4 for the full table.
+  exclude_self DEFAULT TRUE — skip rows owned by your component(s)
+  via RCA. Pass exclude_self=False for the rare debugging /
+  self-loop case. Follow up with
   get_component(id) etc. for full detail.
 
 Read — catalog hygiene (your component's exposed surfaces):
@@ -357,14 +364,58 @@ stop, switch to the split loop. It's fine.
 
 STEP 1 — upsert_component ONCE for your own component.
   Fills your RCA reservation slot. Subsequent upsert_component calls
-  UPDATE the same row (rename, refine metadata, refresh
-  component_doc_md, refresh source_slice). You NEVER create a second
-  component — splits go through Consolidation.
+  UPDATE the same row (rename, refine metadata, refresh description,
+  refresh component_doc_md, refresh source_slice). You NEVER create a
+  second component — splits go through Consolidation.
 
   component_data keys to populate:
     - canonical_name, display_name, component_type, metadata
-    - component_doc_md  (3-8 lines of markdown; see below)
+    - description       (Phase 10.7: ≤400 chars, dense, machine-readable;
+                         the embed-target for vector_search ranking;
+                         see DESCRIPTION vs DOC_MD below)
+    - component_doc_md  (multi-paragraph markdown for graph-viz hover;
+                         NOT embedded post-Phase-10.7; no length cap)
     - source_slice      (NULL for full-coverage; see below)
+
+  === DESCRIPTION vs DOC_MD — Phase 10.7 split ===
+
+  Two text fields with different purposes. Both COALESCE-on-omit
+  (preserve existing) / REPLACE-on-non-None / clear via empty string.
+
+  description (≤400 chars, dense):
+    THIS is the embed-target. vector_search ranks components by
+    cosine similarity against `f"{{type}}: {{name}} {{display}}
+    {{description}} {{meta}}"`. Pack the dense canonical signal here:
+    one paragraph stating WHAT this component IS, the role it plays,
+    its key dependencies, runtime/language, and the canonical
+    hostnames/endpoints/topics that identify it. Tight prose.
+    Examples:
+      "Auth API. Java/Spring on EKS. Verifies session tokens for
+      org services. Exposes POST /verify + GET /token; reads
+      auth-db.dream11.local; writes audit-events.kafka."
+      "Postgres RDS instance. Stores transactional payment ledger
+      for payments-svc. Hostname: payments-db.dream11.local. Schema:
+      payments_ledger."
+    DON'T pad with prose intended for humans. Token cost shows up
+    on every search round-trip.
+
+  component_doc_md (multi-paragraph, free):
+    Renders in the graph-viz hover popup for human browsing. NO
+    length cap; can include sections, code blocks, deployment
+    nuances, runtime quirks, captured pre-merge handoff details
+    from absorbed agents. NOT embedded — write whatever serves the
+    human reader. 3-8 lines is a UX hint, not a hard rule.
+
+  WORKSPACE-LOCAL doc_md (Phase 10.7, MANDATORY):
+    Maintain `./component_doc.md` in YOUR workspace as the canonical
+    source-of-truth. EDIT THERE. On every `upsert_component` call,
+    pass the file's current content as `component_doc_md=...`. NEVER
+    reconstruct from chat memory — read the file. Reconcile from
+    DB only after a merge cascade where survivor needs to fold in
+    the absorbed component's knowledge captured in handoffs/.
+    Reason: pre-Phase-10.7 every doc update went through agent
+    context twice (get_component to fetch + upsert_component to
+    write). The file-based pattern eliminates that round-trip.
 
 STEP 2 — Hydrate attributions exhaustively on YOUR component.
   Every concrete piece of evidence tying real things to your
@@ -596,10 +647,14 @@ STEP 3 — Outbound references you find while reading your resource
   new component because similarity was low" — you create at most
   one (your own, in Step 1).
 
-STEP 4 — Flows. CLOSE THE CATALOG → OUTGOING JOIN. This is the
-  most-skipped step because it requires holding both Step 2b
-  (catalogs) and Step 3 (outbound) output in working memory and
-  producing the join. Don't skip — flows are what powers blast-
+STEP 4 — Flows. CLOSE THE CATALOG → OUTGOING JOIN. **Flows happen
+  DURING MATERIALISATION, not deferred to EDGE_DISCOVERY.** Edges
+  to peers may be DANGLING (to_component_id=NULL) at this point —
+  fine — but flows tying YOUR catalog to YOUR outgoing edge can
+  and MUST be created now since both endpoints are owned by you.
+  This is the most-skipped step because it requires holding both
+  Step 2b (catalogs) and Step 3 (outbound) output in working memory
+  and producing the join. Don't skip — flows are what powers blast-
   radius / impact analysis. Concrete routine:
 
     cats = get_component_edges(YOUR_id)["incoming_catalog"]
@@ -628,25 +683,12 @@ STEP 4 — Flows. CLOSE THE CATALOG → OUTGOING JOIN. This is the
       threads handle inbound vs outbound; fire-and-forget event
       ingestion).
 
-  IMPORTANT: the flow's incoming is ALWAYS a catalog
-  id from the `catalogs` table — NOT an edge id. This is because a
-  flow describes "when MY surface fires, MY downstreams trigger" —
-  the surface is canonically your catalog declaration, independent
-  of which caller hit it. Bound caller edges map to your catalog via
-  the (target, edge_type, identifier) triple, but they are NOT the
-  flow anchor.
-
-  If you don't yet have a catalog row for a surface, declare it
-  FIRST via upsert_catalog (Step 2), then anchor flows on it. No
-  catalog → no flow.
-
-  IMPORTANT: the flow's incoming is ALWAYS a catalog
-  id from the `catalogs` table — NOT an edge id. This is because a
-  flow describes "when MY surface fires, MY downstreams trigger" —
-  the surface is canonically your catalog declaration, independent
-  of which caller hit it. Bound caller edges map to your catalog via
-  the (target, edge_type, identifier) triple, but they are NOT the
-  flow anchor.
+  IMPORTANT: the flow's incoming is ALWAYS a catalog id from the
+  `catalogs` table — NOT an edge id. This is because a flow describes
+  "when MY surface fires, MY downstreams trigger" — the surface is
+  canonically your catalog declaration, independent of which caller
+  hit it. Bound caller edges map to your catalog via the (target,
+  edge_type, identifier) triple, but they are NOT the flow anchor.
 
   If you don't yet have a catalog row for a surface, declare it
   FIRST via upsert_catalog (Step 2), then anchor flows on it. No
@@ -849,11 +891,25 @@ Consolidation:
   nominations, processed sequentially.
 - SIBLING SEARCH: vector_search() for similar components — but ALSO
   cross-check against the catalog + edge graph (the strongest merge
-  signals come from there, not just name similarity):
-    * vector_search(table='catalogs') — does any other component
+  signals come from there, not just name similarity).
+
+  Phase 10.7 NOTE: vector_search defaults to exclude_self=True, so
+  YOUR own component is NOT in the results — every row returned is
+  a real candidate. Don't filter top-1 by reflex anymore.
+
+  Concrete recipes:
+    * vector_search(query=<your description>, table='components',
+                    limit=20) — semantic match on the dense
+      description field. Defaults exclude self.
+    * vector_search(query='<your canonical_name + role>',
+                    table='catalogs') — does any other component
       declare a catalog row with my (kind, identifier)? Two components
       both exposing POST /payments/charge are almost certainly the
       same logical service deployed twice.
+    * vector_search(table='attributions',
+                    filters={{'plane': 'github'}}) — plane-scoped
+      lookup when you want to constrain candidates by discovery plane
+      (e.g. "find components ANOTHER github SME also touches").
     * get_component_edges(other_component_id) — does another component
       have outgoing edges to the same downstream targets I do? Two
       components both calling feeds-db at SELECT * FROM matches AND
