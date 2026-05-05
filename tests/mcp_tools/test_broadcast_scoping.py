@@ -71,3 +71,37 @@ def test_send_broadcast_persistent_flag_stored(agent_factory):
     _orch(agent_factory)
     row = broadcast.send_broadcast("orch-1", "sme", "x", persistent=True)
     assert row["is_persistent"] is True
+
+
+# ===== Phase 10.8.2 — defensive gate: decom can't read its broadcast queue =====
+
+
+def test_get_unacked_broadcasts_rejects_decom(agent_factory):
+    """get_unacked_broadcasts must refuse a decommissioned caller. Closes
+    the SQ-1 defensive gap from negative-test verification — operationally
+    safe (agent_manager pickup filters decom out of wake list) but the
+    tool itself didn't enforce. Survivors see decom's queue via
+    get_my_proxy_items, never via this direct call."""
+    import pytest
+    agent_factory("sme-decom", "sme")
+    execute_mutate(
+        "UPDATE agent_runs SET status='decommissioned' WHERE agent_id='sme-decom'"
+    )
+    with pytest.raises(ValueError, match="not found"):
+        broadcast.get_unacked_broadcasts("sme-decom", "sme")
+
+
+def test_broadcast_scanner_skips_decom(agent_factory):
+    """trigger scanner must return 0 for a decommissioned agent regardless
+    of pending broadcasts. Belt-and-suspenders against any future code
+    path that consults the scanner directly."""
+    _orch(agent_factory)
+    agent_factory("sme-decom2", "sme")
+    broadcast.send_broadcast("orch-1", "sme", "policy", persistent=True)
+    # Active baseline: scanner sees 1
+    assert bcast_scanner.scan("sme-decom2", "sme") == 1
+    # Decommission → scanner returns 0
+    execute_mutate(
+        "UPDATE agent_runs SET status='decommissioned' WHERE agent_id='sme-decom2'"
+    )
+    assert bcast_scanner.scan("sme-decom2", "sme") == 0

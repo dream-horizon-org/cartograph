@@ -1,6 +1,7 @@
 """Broadcast tools — send_broadcast, ack_broadcast, get_unacked_broadcasts,
 update_broadcast_persistence (Phase 5.7)."""
 
+from shared.actor_auth import require_active_agent
 from shared.db import execute, execute_returning, execute_mutate, execute_one
 
 
@@ -45,7 +46,15 @@ def get_unacked_broadcasts(agent_id: str, agent_type: str) -> list[dict]:
 
     Forward-only: skips broadcasts that predate this agent's spawn UNLESS
     they were sent with is_persistent=TRUE (standing policy).
+
+    Phase 10.8.2: callers must be active. Decommissioned agents can't
+    invoke this directly — survivors see the proxied agent's broadcast
+    inbox via `get_my_proxy_items` instead. Belt-and-suspenders gate
+    matching every other tool's pattern; agent_manager pickup loop
+    already filters decom out of the wake list, this closes the
+    external-caller (admin UI / debug script) defensive gap.
     """
+    require_active_agent(agent_id)
     return execute(
         """SELECT c.* FROM communications c
            WHERE c.type = 'broadcast' AND c.to_agent_type = %s
