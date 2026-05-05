@@ -12,12 +12,28 @@
 
 ## 0. WHERE I AM RIGHT NOW (the most important section)
 
-**About to ship Phase 10.1.3 — `agent_id` rename + `create_edge` docstring fix — then run targeted DEMO10 to verify.**
+**Implementing Phase 10.7 — lookup architecture clean-up before real-data onboarding. Plan landed; sub-steps 10.7.1 → 10.7.8 in flight.**
 
 ### What's done (committed + pushed):
 
-- All Phase 0 → Phase 10 work shipped on `feat/trigger-manager-cartograh-mcp`. HEAD is `e1574bb` (DEMO-MEGA prompt commit).
-- DEMO-MEGA ran end-to-end this session: **29 PASS / 1 N/A / 1 VERIFY_PENDING / 0 FAIL** out of 31 phases.
+- All Phase 0 → Phase 10 work shipped on `feat/trigger-manager-cartograh-mcp`.
+- DEMO-MEGA ran end-to-end: **29 PASS / 1 N/A / 1 VERIFY_PENDING / 0 FAIL** out of 31 phases.
+- Phase 10.1.3 (per-tool name-map for mcp_call_batch + create_edge docstring fix) shipped as commit `376b27a`.
+- DEMO10 (targeted Phase 10.1.3 verification) ran: **8/8 PASS / 0 FAIL / 0 BUG** — commit `ad3830c`.
+- Phase 10.7 plan added to `docs/IMPLEMENTATION-PHASES.md` §10.7 + brief pointers in SCHEMA / HLD / TRIGGER-MGMT / AGENT-PROMPTS.
+
+### What's pending (Phase 10.7 sub-steps, in order):
+
+- **10.7.1** Schema (description column) + embed text shape + upsert_component description support.
+- **10.7.2** Backfill existing components + strip embedding from get_component return.
+- **10.7.3** vector_search filters + exclude_self + projection adds description.
+- **10.7.4** search_* family (5 of 6) gets same kwargs.
+- **10.7.5** Agent prompts (workspace-local doc_md, description distinction, filter usage).
+- **10.7.6** Admin UI: description rendering on graph hover + Catalog drill-down.
+- **10.7.7** Final doc sync (commit-hash fill-ins).
+- **10.7.8** Mega DEMO11 prompt + targeted smoke + push.
+
+After 10.7.8, user puts me on `/loop` to monitor real-data onboarding.
 
 ### What's pending (next session — pick up here):
 

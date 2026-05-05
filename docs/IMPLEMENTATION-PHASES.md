@@ -4774,6 +4774,268 @@ application-layer.
 
 ---
 
+## Phase 10.7: Lookup architecture clean-up — `description` column + filtered vector search + exclude_self + workspace-local doc_md (planned, pre-real-data run)
+
+**Status (2026-05-05):** PLANNED, in flight. Pre-real-data architecture clean-up identified during pre-onboarding review. Not blocking any existing fix; positions the system for cleaner cost data on the upcoming real-data run.
+
+### 10.7.0 Motivation
+
+Four concrete gaps surfaced during pre-onboarding review:
+
+1. **doc_md is doing two jobs and doing both poorly:** it's the human-readable graph-viz hover text AND (since Phase 10.2) the embed-target for `vector_search` precision. These goals are in tension — long human prose dilutes the identity signal in the vector; the 500-char `[:500]` slice is a cliff that loses semantic recall on the tail of any longer doc. Fix: separate the concerns. New `description` column = the embed target (terse, dense, ≤400 chars soft cap). `component_doc_md` keeps its human-render role with no length cap, no embed pollution.
+
+2. **Caller's own component rows pop into its own search results.** No auto-exclusion. SMEs running sibling search during consolidation see themselves at top-1 (cosine ≈ 1.0) — wasted slot. Same for hygiene sweeps. Fix: `exclude_self: bool = True` (default ON) on all 7 search tools; `False` for the rare debugging case.
+
+3. **`vector_search` has no filters at all** — query string + table + limit. Agents can't say "find a `database` similar to 'auth tokens'" — they have to over-fetch and client-side filter, lossy if the right hit isn't in the over-fetched set. Fix: optional `filters: dict | None = None` param mirroring the Phase 10.3 deterministic search API.
+
+4. **doc_md goes through agent context twice on every update** — `get_component(id)` to fetch current → concat → `upsert_component(full_new_doc)`. Bloat scales with doc size. Fix: workspace-local `./component_doc.md` rule (matches Phase 7.4.7 "workspace as private memory" doctrine). Agent edits the local file; on `upsert_component` passes file contents. Doc never enters DB-fetch round-trip unless reconciling post-merge cascade.
+
+Bonus fix while in the area:
+
+5. **`get_component(id)` may leak the 1024-d embedding vector** (~8KB float array) on every call. Lean projection in `vector_search` (Phase 7.4.4) was scoped to search; `get_component` was untouched. Strip embedding from the return shape.
+
+### 10.7.1 Schema + embed text + `upsert_component` description support
+
+**Schema migration** (idempotent in `src/shared/migrations.py`):
+```sql
+ALTER TABLE components ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+```
+
+**Embed text shape change** (`src/shared/embedding.py::component_embed_text`):
+
+Pre-10.7 (Phase 10.2 shape):
+```python
+f"{component_type}: {canonical_name} {display_name} {doc_md[:500]} {meta_json}"
+```
+
+Post-10.7:
+```python
+f"{component_type}: {canonical_name} {display_name} {description} {meta_json}"
+```
+
+Drop the `component_doc_md` parameter from the helper. `description` is the canonical embed-text contributor. Soft cap ~400 chars in prompt, no DB CHECK.
+
+**`upsert_component` accepts `description`** (`src/cartograph_mcp/tools/components.py`):
+- `component_data["description"]` — REPLACE-on-provide, COALESCE-on-omit (mirrors `component_doc_md` semantics).
+- Explicit `description=None` = same as omit (preserve existing).
+- Explicit `description=""` = explicit clear (sets to empty string).
+- Triggers re-embed on every change (description IS the embed target).
+- Soft 400-char warn via `log.warning` if longer; no reject.
+
+**Files touched:** `src/shared/migrations.py`, `src/shared/embedding.py`, `src/cartograph_mcp/tools/components.py`, `src/cartograph_mcp/server.py` (wrapper docstring).
+**Tests:** `tests/mcp_tools/test_components.py` — 4 new tests (description set, REPLACE, COALESCE-preserve on omit, None=preserve, ""=clear, soft-cap warning logged).
+**Effort:** S.
+
+### 10.7.2 Backfill + get_component embedding strip
+
+**Backfill existing components** (`src/shared/embedding_backfill.py`):
+- Extend the components branch to first run `UPDATE components SET description = LEFT(component_doc_md, 400) WHERE description = '' AND component_doc_md IS NOT NULL` (one-shot SQL seed).
+- Then re-embed all components with the new `component_embed_text` shape (re-uses existing re-embed loop).
+- CLI: `python -m shared.embedding_backfill --force-components` (existing flag handles re-embed; the SQL seed runs unconditionally as part of the components branch when `--force-components` set).
+- Idempotent: second run is a no-op (description already seeded; embedding already current-shape).
+- Mandatory operational step: existing rows have vectors from the OLD (doc-based) embed text shape. New writes use NEW (description-based) shape. Mixing causes inconsistent ranking. Backfill aligns all rows.
+
+**Strip embedding from `get_component`** (bonus, `src/cartograph_mcp/tools/components.py::get_component`):
+- Currently: `SELECT * FROM components WHERE id = %s` — returns the 1024-d `embedding` vector column (~8KB serialised per call).
+- Post-fix: explicit column list excluding `embedding`. Same shape otherwise.
+- Saves ~8KB per `get_component` call. Caller never wants the raw vector — vector_search exposes similarity scores; raw vectors are write-time signal only.
+
+**Files touched:** `src/shared/embedding_backfill.py`, `src/cartograph_mcp/tools/components.py`.
+**Tests:** `tests/mcp_tools/test_components.py` — 1 new test (get_component strips embedding); `tests/test_embedding_backfill.py` (or inline manual smoke) — backfill seeds description from doc_md when description empty.
+**Operational:** run `python -m shared.embedding_backfill --force-components` on dev DB after the migration commit lands.
+**Effort:** XS.
+
+### 10.7.3 vector_search projection + filters + exclude_self
+
+**Helper extension** (`src/cartograph_mcp/tools/_search_helper.py`):
+
+New module-level dict listing allowed filter keys per table:
+```python
+_VECTOR_FILTER_KEYS = {
+    "components":   {"component_type", "status"},
+    # NOTE: "plane" on components requires JOIN through RCA→resources;
+    # deferred. Use vector_search(table="attributions", filters={"plane": ...})
+    # for plane-scoped lookups.
+    "attributions": {"plane", "resource_type", "component_id"},
+    "edges":        {"edge_type", "from_component_id", "to_component_id"},
+    "catalogs":     {"kind", "component_id"},
+    "unresolved":   {"reference_type", "found_in_component_id", "resolved"},
+}
+```
+
+New per-table helper for the "row owned by caller" exclusion predicate (`exclude_self`):
+- `components` table: `WHERE c.id NOT IN (SELECT component_id FROM resource_component_agents WHERE agent_id = %s AND component_id IS NOT NULL)`
+- `attributions`, `catalogs`, `unresolved`: same shape via their `component_id` / `found_in_component_id` column.
+- `edges`: row excluded if EITHER `from_component_id` OR `to_component_id` is in caller's owned set.
+- Non-SME callers (orch / iter / resolver own no components) → predicate evaluates to no exclusion (silent no-op).
+
+**`vector_search` signature change** (`src/cartograph_mcp/tools/search.py`):
+```python
+def vector_search(
+    agent_id: str,
+    query_text: str,
+    table: str,
+    limit: int = 10,
+    filters: dict | None = None,    # default: no filter
+    exclude_self: bool = True,       # default: skip caller's own rows
+) -> dict:
+```
+
+**Behavior:**
+- `exclude_self=True` (default) — predicate appended to WHERE.
+- `exclude_self=False` — current behaviour (own rows included).
+- `filters=None` or `filters={}` — no filter, current behaviour.
+- `filters={"plane": "github"}` — append `AND a.plane = 'github'`.
+- `filters={"plane": ["github", "deploy"]}` — append `AND a.plane IN ('github', 'deploy')`.
+- Invalid key for table → `ValueError("filter key 'X' not allowed for table 'Y'; allowed: {...}")`.
+
+**Components result projection adds `description`** (Phase 7.4.4 lean projection updated):
+```sql
+SELECT c.id, c.canonical_name, c.display_name, c.component_type,
+       c.status, c.description,
+       1 - (c.embedding <=> %s::vector) AS similarity
+FROM components c
+WHERE c.embedding IS NOT NULL
+[ + filter clauses + exclude_self predicate ]
+ORDER BY c.embedding <=> %s::vector ASC
+LIMIT %s
+```
+
+description is small (≤400 chars, ~100 tokens) → cheap to include → saves a `get_component(id)` round-trip on most hits.
+
+**Other tables' projections unchanged** in 10.7 (no description on those tables).
+
+**Files touched:** `src/cartograph_mcp/tools/_search_helper.py`, `src/cartograph_mcp/tools/search.py`, `src/cartograph_mcp/server.py`.
+**Tests:** `tests/mcp_tools/test_vector_search.py` — 8+ new (description in components results; exclude_self per-table; filter dict per-table; AND-across-keys; OR-within-list; invalid key rejection; non-SME caller no-op; empty filter dict no-op; multi-component owner exclude_self covers all).
+**Effort:** M.
+
+### 10.7.4 search_* (Phase 10.3 deterministic family) gets same kwargs
+
+Same `exclude_self: bool = True` + `filters: dict | None = None` extended to:
+- `search_components`
+- `search_attributions`
+- `search_edges`
+- `search_catalogs`
+- `search_unresolved`
+
+Skipped: `search_flows` — flow rows have no direct component owner row (they reference catalog + edge by FK; "owned by caller" is ambiguous). Document the omission.
+
+For `search_*`, filters via the existing `pattern_clause()` / `eq_clause()` / `in_clause()` helpers — existing API stays; new params layer on top. No new validation needed beyond reusing `_VECTOR_FILTER_KEYS`.
+
+**Files touched:** `src/cartograph_mcp/tools/search.py`, `src/cartograph_mcp/server.py`.
+**Tests:** `tests/mcp_tools/test_search_tools.py` — 5 new (one per affected tool, exercising both new kwargs).
+**Effort:** S.
+
+### 10.7.5 Agent prompts
+
+**SME prompt** (`src/agent_management/agent_types/sme.py`):
+
+- New rule in materialisation STEP 1 / STEP 2 / wherever component creation lives: distinguish `description` (≤400 chars, dense, machine-readable, the embed target, **THIS is what `vector_search` ranks on**) from `component_doc_md` (free prose, multi-paragraph, human-readable, renders in graph-viz hover, **NOT embedded**).
+
+- Workspace-local doc_md rule (in WORKSPACE block): maintain `./component_doc.md` locally as the canonical source-of-truth. On `upsert_component` calls, pass file contents. **Never reconstruct doc_md from chat memory.** Reconcile from DB only after a merge cascade where survivor inherits target's content.
+
+- Search filter usage in sibling search (consolidation phase): explicit example `vector_search(query=<my canonical_name>, table="components", limit=20)` — `exclude_self=True` is now default, so caller's own component is NOT in the results. Document that explicitly so SMEs don't skip top-1 by reflex.
+
+- Search filter usage in evidence triangulation: example `vector_search(query="user_id", table="attributions", filters={"plane": "github"})` — plane-scoped lookup.
+
+- Edge discovery: cosine threshold language unchanged (≥0.75 strong / 0.60–0.75 hint / <0.60 unresolved); now operates on cleaner description-based vectors.
+
+**Other agent types** (`orchestrator.py`, `iterator.py`, `resolver.py`):
+- Brief note in the relevant section that components have a `description` field separate from `component_doc_md`. Resolver in particular needs to know `description` is the search-ranking target when verifying merge evidence.
+
+**Smoke test** (mandatory before commit, per project doctrine):
+```bash
+python3 -c "
+import sys; sys.path.insert(0, 'src')
+from agent_management.agent_types import sme, iterator, orchestrator, resolver
+print('sme:', len(sme.SYSTEM_PROMPT_TEMPLATE.format(plane='x', resource_id='y')))
+print('iter:', len(iterator.SYSTEM_PROMPT_TEMPLATE.format(plane='x', resource_id='y')))
+print('orch:', len(orchestrator.SYSTEM_PROMPT))
+print('res:', len(resolver.SYSTEM_PROMPT))
+"
+```
+Catches brace-escape bugs (`{id}` etc.) before SME spawn.
+
+**Files touched:** all 4 agent type prompts.
+**Tests:** prompt-only edits; manual smoke verification.
+**Effort:** S (most touchpoints in sme.py).
+
+### 10.7.6 Admin UI: description rendering
+
+**Backend** (`src/admin_ui/server.py`):
+- `/api/graph` per-node payload adds `description`.
+- `/api/components` list response adds `description` per row.
+- `/api/component/{id}/drilldown` adds `description` to the component object.
+- `/api/components` `q` param (full-text-style search) extends to ILIKE-match `description` in addition to `canonical_name` + `display_name` + metadata.
+
+**Frontend** (`src/admin_ui/static/app.js`):
+- Graph hover popup: render `description` as a header line (small, italic, monospace) above the marked-down `component_doc_md` prose.
+- Catalog drill-down: same — description shown as header next to canonical_name.
+- Cache-bust `?v=` bump in `index.html`.
+
+**Mock seed** (`src/admin_ui/mock_seed.py`):
+- All seeded demo components get a `description` field populated (terse role + key dep summary), distinct from their `component_doc_md` prose.
+
+**Tests:** `tests/admin_ui/test_graph_endpoint.py`, `tests/admin_ui/test_catalog_endpoint.py` — assert description present in payloads.
+**Effort:** S.
+
+### 10.7.7 Final doc sync
+
+After all code commits land, populate the canonical docs with the actual commit hashes + final shape (vs. the planning summary lines added in this same commit):
+
+- `docs/SCHEMA.md`: new `description` column in `components` table block; updated Embedding Strategy table (description is the embed-text contributor for components, not doc_md).
+- `docs/HLD.md`: §2.5 tool matrix updates for `vector_search` + `search_*` new signatures (exclude_self, filters); §10.2 graph-viz hover note (description rendered above doc_md).
+- `docs/TRIGGER-MANAGEMENT.md`: §3.3 `upsert_component` signature with description; §3.4 / §3.5 vector_search + search_* signature updates.
+- `docs/AGENT-PROMPTS.md`: new section on description vs doc_md; workspace-local doc_md rule; filter/exclude_self usage examples.
+- `docs/IMPLEMENTATION-PHASES.md`: this Phase 10.7 entry (in-place commit-hash fill-ins).
+- `docs/POST-COMPACTION-RECOLLECTION.md`: HEAD reference + §0 update for next session.
+
+**Effort:** S.
+
+### 10.7.8 Mega DEMO11 + targeted smoke
+
+Final verification before real-data onboarding:
+
+- Run full `tests/mcp_tools/` suite — expect ≥530 green (current 520 + ~15 new from 10.7).
+- Restart 4 daemons; confirm 114 tools registered.
+- Manual smoke: spawn 1 SME, hydrate component with both description + doc_md, run vector_search components with default exclude_self=True (verify own row excluded), with explicit exclude_self=False (verify own row at top), with filters (verify filter applied).
+- Write `docs/oorch-test-prompt-demo11` — comprehensive end-to-end covering: everything DEMO-MEGA verified (Phase 0-10) + DEMO10 verified (10.1.3 name-map) + Phase 10.7 surface (description column, doc_md vs description distinction, vector_search + search_* with both new kwargs, workspace-local doc_md, get_component embedding strip). Agent-generated scorecard at end.
+
+**Effort:** M (~600-line prompt covering full surface).
+
+### 10.7.9 Sub-phase ordering + commit cadence
+
+```
+10.7.0 plan + doc-sync pointers       ← single planning commit (THIS commit)
+10.7.1 schema + embed text + upsert    ← migration runs on MCP boot
+10.7.2 backfill + get_component strip  ← run backfill live on dev DB
+10.7.3 vector_search filters/exclude   ← projection + kwargs
+10.7.4 search_* filters/exclude         ← parallel work to 10.7.3
+10.7.5 agent prompts                    ← smoke-test format()
+10.7.6 admin UI description             ← cache-bust + mock_seed
+10.7.7 final doc sync                   ← commit-hash fill-ins
+10.7.8 DEMO11 prompt + smoke            ← ready for /loop monitoring
+```
+
+Each = its own commit + push. Doctrine: tests-pass-first before each commit; restart MCP after schema migration commit (10.7.1); restart agent_manager after prompt commit (10.7.5).
+
+### 10.7.10 Schema delta
+
+One additive column:
+```sql
+ALTER TABLE components ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+```
+Idempotent. No data loss. Existing rows get empty default; backfill seeds from doc_md.
+
+### 10.7.11 What this is NOT solving
+
+- Plane filter on components via vector_search (defer — needs RCA→resources JOIN; agents use `vector_search(table="attributions", filters={"plane": ...})` instead).
+- Hard 400-char enforcement on description (warn-not-reject; soft cap via prompt + log).
+- Phase 11+ phase-flow completion items (orch-driven sweeps) — separate scope.
+- Per-phase cost analyzer — separate scope (post-onboarding instrumentation).
+
+---
+
 ## Phase 11+: Future phases (planned, not started)
 
 **Phase 11 — Phase-flow completion** (orchestrator-driven sweeps):

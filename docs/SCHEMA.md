@@ -44,6 +44,13 @@ CREATE TABLE components (
     split_briefing  TEXT,                        -- briefing doc from parent explaining what this component is
     component_doc_md TEXT,                       -- SME-authored markdown component doc (Phase 3).
                                                  -- Rendered in graph-viz hover popup (Phase 3.5).
+                                                 -- NO embed contribution (Phase 10.7) — purely
+                                                 -- human-render. No length cap.
+    description     TEXT NOT NULL DEFAULT '',    -- Phase 10.7. Dense, terse component description
+                                                 -- (≤400 chars soft cap). THE embed-text contributor
+                                                 -- for vector_search ranking precision. SMEs maintain
+                                                 -- this separately from component_doc_md so prose
+                                                 -- length doesn't dilute the identity signal.
     source_slice   JSONB,                        -- Structural description of what this component
                                                  -- covers within its source resource(s). Nullable
                                                  -- (single-resource whole-component = NULL).
@@ -849,13 +856,13 @@ IMPLEMENTATION-PHASES §5.10.
 Embeddings generated at write time via `cartograph-db` MCP. No batch step.
 
 
-| Table          | What's embedded                                        | Purpose                                                                                                |
-| -------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| `components`   | `"{type}: {canonical_name} {display_name} {metadata}"` | Fuzzy matching during consolidation                                                                    |
-| `attributions` | `"{resource_type}: {identifier}"`                      | Fuzzy resource lookup across planes                                                                    |
-| `unresolved`   | `"{reference_type}: {reference_value}"`                | Match dangling refs to components                                                                      |
-| `edges`        | `"{edge_type}: {identifier}"`                          | Fuzzy match calls across components — e.g., match `GET /scorecard/cricket` to `GET /cricket/scorecard` |
-| `catalogs`     | `"{kind}: {identifier}"`                               | Phase 7.4. Find similar exposed surfaces across components — "find an endpoint similar to /payments/charge" |
+| Table          | What's embedded                                                          | Purpose                                                                                                |
+| -------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `components`   | `"{type}: {canonical_name} {display_name} {description} {metadata}"`     | Phase 10.7. Fuzzy matching during consolidation. `description` (≤400 chars) is the dense embed-target; `component_doc_md` is NOT embedded (it's the human-render field). |
+| `attributions` | `"{resource_type}: {identifier}"`                                        | Fuzzy resource lookup across planes                                                                    |
+| `unresolved`   | `"{reference_type}: {reference_value}"`                                  | Match dangling refs to components                                                                      |
+| `edges`        | `"{edge_type}: {identifier}"`                                            | Fuzzy match calls across components — e.g., match `GET /scorecard/cricket` to `GET /cricket/scorecard` |
+| `catalogs`     | `"{kind}: {identifier}"`                                                 | Phase 7.4. Find similar exposed surfaces across components — "find an endpoint similar to /payments/charge" |
 
 
 **Bulk read gap (open chore — see PROMPT-ENHANCEMENTS §3.10):** today

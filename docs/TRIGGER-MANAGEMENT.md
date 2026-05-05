@@ -548,14 +548,27 @@ get_edges(component_id) → EdgeRow[]
 get_unresolved(component_id) → UnresolvedRow[]
   Read unresolved references for a component.
 
-vector_search(agent_id, query_text, table, limit) → {query_embedded, results}
-  Embed query_text (text-embedding-3-small, 1536 dims) and KNN-cosine
-  against the target table's embedding column. Tables: components,
-  attributions, unresolved, edges. limit clamped to [1, 50].
-  Returns {query_embedded: False, results: []} when the query can't be
-  embedded (missing OPENAI_API_KEY, transport error, empty text) so
-  callers can distinguish "no matches" from "couldn't search".
-  Available to all active agents.
+vector_search(agent_id, query_text, table, limit,
+              filters?, exclude_self=True) → {query_embedded, results}
+  Embed query_text (mxbai-embed-large, 1024 dims) and KNN-cosine against
+  the target table's embedding column. Tables: components, attributions,
+  unresolved, edges, catalogs. limit clamped to [1, 50].
+  Phase 10.7:
+    - components projection now includes `description` column.
+    - `filters: dict | None = None` (default no filter). Per-table
+      allowed keys (AND across keys; OR within key via list):
+        components:   component_type, status
+        attributions: plane, resource_type, component_id
+        edges:        edge_type, from_component_id, to_component_id
+        catalogs:     kind, component_id
+        unresolved:   reference_type, found_in_component_id, resolved
+      Invalid key for table → ValueError.
+    - `exclude_self: bool = True` (default ON). Excludes rows owned by
+      the caller's component(s) via RCA. Non-SME callers no-op silently.
+      Set False to include own rows (rare, e.g. self-loop sanity check).
+  Returns {query_embedded: False, results: []} when query can't be
+  embedded (Ollama unreachable, empty text). Available to all active
+  agents.
 
 get_resource(agent_id, resource_id) → ResourceRow
   Read a single resource row.
@@ -1131,6 +1144,18 @@ search_unresolved(agent_id, reference_value_pattern?,
 
 All 6 are also callable inside `mcp_call_batch` (registered in
 `_BATCH_DISPATCH`).
+
+**Phase 10.7** adds two optional kwargs to 5 of the 6 (skipped:
+`search_flows` — flow rows have no direct component owner):
+- `exclude_self: bool = True` (default ON) — skip rows owned by caller.
+- `filters: dict | None = None` (default OFF) — same per-table allowed
+  keys as `vector_search` (see §3.4 above). AND across keys; OR within
+  key via list. Invalid key for table → ValueError.
+
+These kwargs are STRICTLY OPTIONAL — agents that don't pass them get
+the new defaults (exclude_self=True, no filters). Pre-Phase-10.7 callers
+that explicitly want their own rows in results must pass
+`exclude_self=False`.
 
 ---
 

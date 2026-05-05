@@ -312,7 +312,7 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 
 | Tool | Orch | Iter | SME | Res | Scope notes |
 |---|---|---|---|---|---|
-| `upsert_component(agent_id, component_data)` | — | — | ✓ *one per SME* | — | First call fills the SME's `component_id=NULL` RCA slot. Subsequent calls UPDATE in place. 1-active-component-per-SME invariant structurally enforced (splits go through consolidation). canonical_name cross-owner conflict → refuse. |
+| `upsert_component(agent_id, component_data)` | — | — | ✓ *one per SME* | — | First call fills the SME's `component_id=NULL` RCA slot. Subsequent calls UPDATE in place. 1-active-component-per-SME invariant structurally enforced (splits go through consolidation). canonical_name cross-owner conflict → refuse. **Phase 10.7**: `component_data["description"]` (≤400 chars soft cap) is the dense embed-target field; `component_data["component_doc_md"]` is human-render only (NOT embedded). REPLACE-on-provide / COALESCE-on-omit / None=preserve / ""=clear semantics for both fields. |
 | `upsert_attribution(agent_id, component_id, data)` | — | — | ✓ *own component* | — | Idempotent on `(plane, resource_type, identifier)`; cross-component conflict → refuse. |
 | `create_edge(agent_id, edge_data)` | — | — | ✓ *own source* | — | [Phase 3.9 legacy shim] Dispatches to `upsert_edge_outbound` with both endpoints set. Accepts `source_id`/`target_id` keys. Prefer `upsert_edge_outbound` in new code. |
 | `upsert_edge_catalog(agent_id, edge_data)` | — | — | ✓ *own to_component* | — | Phase 3.9. Callee declares exposed endpoint / consumed topic. Writes `from_component_id=NULL`. Idempotent per `(to, type, identifier)`. |
