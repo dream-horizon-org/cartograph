@@ -158,8 +158,21 @@ working. YOU (orch) are the phase coordinator.
     a. upsert_component ONCE per SME. Required fields:
        canonical_name, display_name, component_type. Phase 10.7
        NEW REQUIRED: description (≤400 chars, dense, role + key
-       deps). component_doc_md (multi-paragraph, free) is
-       OPTIONAL but recommended for graph-viz hover.
+       deps).
+       *** component_doc_md IS REQUIRED + RICH (service-document
+       standard, see SME prompt). *** Must include the 7 sections
+       defined in the SME prompt:
+         ## Role
+         ## Key Surfaces
+         ## Inbound Flows (who calls me + why)
+         ## Outbound Flows (what I call + why)
+         ## Runtime + Deploy
+         ## Storage + State
+         ## Operational Notes
+         ## Source (file paths)
+       Treat this as a service document — written so a peer SME
+       reading the graph-viz hover can understand the component
+       cold. NORMAL ENGLISH (the only path that's caveman-exempt).
        SMEs MUST maintain ./component_doc.md in workspace as the
        source-of-truth for doc_md (Phase 10.7 workspace rule).
        On every upsert call, pass file content. Don't reconstruct
@@ -192,6 +205,29 @@ working. YOU (orch) are the phase coordinator.
        Expected: 0 (any bound peer edge during materialisation =
        phase-doctrine violation).
     d. ≥3 unresolved rows seeded (paired with danglings).
+    e. *** DOC_MD QUALITY METRIC (NEW). *** Every component's
+       component_doc_md is a real service document, not a one-liner.
+       SQL probe — should be 0:
+         SELECT count(*) FROM components
+         WHERE component_doc_md IS NULL
+            OR length(component_doc_md) < 400
+            OR component_doc_md NOT ILIKE '%## Role%'
+            OR component_doc_md NOT ILIKE '%## Key Surfaces%'
+            OR component_doc_md NOT ILIKE '%## Inbound%'
+            OR component_doc_md NOT ILIKE '%## Outbound%'
+            OR component_doc_md NOT ILIKE '%## Runtime%'
+            OR component_doc_md NOT ILIKE '%## Storage%'
+            OR component_doc_md NOT ILIKE '%## Operational%'
+            OR component_doc_md NOT ILIKE '%## Source%';
+       Report per-component breakdown of which sections are
+       missing or thin. [DEMO11-FAIL] for any component missing
+       required sections without an explicit "N/A: <reason>"
+       line. Light prose padding alone does NOT pass — section
+       headers must be present and have substantive content.
+       Spot-check 1 SME's doc_md by paste-back to admin chat for
+       human eyeball review (admin will judge "would another
+       engineer reading this hover-popup understand the
+       component cold?").
 
 4.4 Workspace-local doc_md rule check (Phase 10.7):
     For 1 SME, verify ./component_doc.md exists in their workspace
@@ -666,7 +702,8 @@ Emit ONE admin chat message:
   Phase 1  — TOOL SURFACE + DAEMON HEALTH             [PASS|FAIL]
   Phase 2  — PHASE DEMARCATION                         [PASS|FAIL]
   Phase 3  — ITERATION (3 PLANES, telemetry 4-surface) [PASS|FAIL]
-  Phase 4  — MATERIALISATION (description + flows)     [PASS|FAIL]
+  Phase 4  — MATERIALISATION (description + doc_md + flows) [PASS|FAIL]
+  Phase 4e — DOC_MD QUALITY (service-document standard) [PASS|FAIL]
   Phase 5  — CONSOLIDATION + MUTATION                  [PASS|FAIL]
   Phase 5b — CORRECTIVE DELETE SURFACE                 [PASS|FAIL]
   Phase 6  — EDGE DISCOVERY                            [PASS|FAIL]

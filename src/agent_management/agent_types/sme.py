@@ -399,12 +399,116 @@ STEP 1 — upsert_component ONCE for your own component.
     DON'T pad with prose intended for humans. Token cost shows up
     on every search round-trip.
 
-  component_doc_md (multi-paragraph, free):
-    Renders in the graph-viz hover popup for human browsing. NO
-    length cap; can include sections, code blocks, deployment
-    nuances, runtime quirks, captured pre-merge handoff details
-    from absorbed agents. NOT embedded — write whatever serves the
-    human reader. 3-8 lines is a UX hint, not a hard rule.
+  component_doc_md (multi-paragraph, free) — TREAT AS A SERVICE
+    DOCUMENT, not a one-liner. Renders in graph-viz hover popup +
+    Catalog drill-down, read by other agents during consolidation
+    AND by humans browsing the graph. NO length cap. NOT embedded
+    — write whatever serves the reader. Aim for the level of
+    detail a new on-call engineer or peer SME would need to
+    understand this component cold.
+
+    Required sections (use markdown headers; skip a section ONLY
+    with a one-line "N/A: <reason>"):
+
+      ## Role
+      One paragraph: what this component IS, what it DOES, who
+      depends on it, who it depends on. Plain English.
+
+      ## Key Surfaces
+      Endpoints / topics / queues / data sources YOU expose
+      (mirrors your catalog rows). Cite identifiers verbatim.
+      Group by kind. Note auth model + rate limits if known.
+
+      ## Inbound Flows (who calls me + why)
+      For each significant caller (or group), what they hit + the
+      typical request shape. If you have many callers, list the
+      top few + summarise the long tail.
+
+      ## Outbound Flows (what I call + why)
+      For each significant outbound dependency: target component
+      (or hostname if unresolved), edge_type, what data flows,
+      how it triggers. Group by purpose (auth lookups vs writes
+      vs telemetry). The catalog→outgoing mapping you wired in
+      STEP 4 lives here in human form.
+
+      ## Runtime + Deploy
+      Language / framework / runtime version. Where it runs (EKS
+      cluster + namespace, Lambda function name, ASG, cron
+      schedule). Deploy artefact (helm chart path, serverless.yml
+      handler, Dockerfile location). Key env vars + their secrets
+      sources.
+
+      ## Storage + State
+      DBs / caches / queues this component owns or relies on
+      (cross-link to their components by canonical_name).
+      Schemas, key tables / collections / topics.
+
+      ## Operational Notes (gotchas, on-call tips)
+      Known runtime quirks, monitoring dashboards, alerting
+      channels, common failure modes, captured pre-merge handoff
+      facts from absorbed components, deploy-time gotchas.
+
+      ## Source (file paths)
+      The repo paths / files that define this component (mirrors
+      source_slice). cite file:line where load-bearing logic
+      lives so a reader can jump in.
+
+    Caveman rule does NOT apply here — write normal English. This
+    is the ONE prose-allowed surface for humans.
+
+    Worked example (auth-svc, abbreviated):
+      ```
+      ## Role
+      Authentication service. Verifies session tokens issued by
+      ID provider, mints short-lived service tokens for org-
+      internal calls. Every customer-facing API verifies through
+      here.
+
+      ## Key Surfaces
+      - endpoint POST /verify — body {{token}}; returns {{valid, claims}}
+      - endpoint GET /token   — header X-User; returns service JWT
+      Auth: requires `X-Internal-Key` header; rate-limit 1000 rps
+      per caller via redis token bucket.
+
+      ## Inbound Flows
+      - feeds-api hits POST /verify on every request (~80% of our
+        traffic).
+      - payments-svc hits GET /token before any downstream call.
+      - cron-rebalance hits POST /verify once per dawn run.
+
+      ## Outbound Flows
+      - reads_from auth-db (postgres): SELECT users WHERE id=$1;
+        SELECT sessions WHERE token_hash=$1.
+      - writes_to audit-events.kafka: every verify result.
+      - calls id-provider.dream11.com/introspect on cache miss.
+
+      ## Runtime + Deploy
+      Java 17 / Spring Boot 3.2. Runs on EKS prod-shared,
+      namespace `auth`, deployment `auth-svc`. Helm chart at
+      `deploy/charts/auth-svc/`. Env: `AUTH_DB_URL`, `KAFKA_BROKERS`
+      (both from vault path `secret/auth/`).
+
+      ## Storage + State
+      Postgres `auth-db.dream11.local` (db: auth_main). Tables:
+      users, sessions, audit_log. Connection pool sized 20.
+
+      ## Operational Notes
+      Token verify cache TTL is 90s — expect ~30s of stale-cache
+      lag after revocation. PagerDuty: SCHED-AUTH. Datadog
+      dashboard: auth-svc-overview. Common alarm: introspect
+      latency p99 > 200ms.
+
+      ## Source
+      Repo: github.com/dream11/auth-svc. Verify endpoint at
+      `src/main/java/com/dream11/auth/VerifyHandler.java:42`.
+      Outbound calls in `OutboundClients.java:18-87`.
+      ```
+
+    Reason this matters: other SMEs read your doc_md during
+    consolidation evidence review; admins read it on graph
+    hover; future-you reads it after a context compact. A
+    one-line doc_md leaves all three blind. Be generous — every
+    line you write here saves a peer (or future-you) a grep.
 
   WORKSPACE-LOCAL doc_md (Phase 10.7, MANDATORY):
     Maintain `./component_doc.md` in YOUR workspace as the canonical
