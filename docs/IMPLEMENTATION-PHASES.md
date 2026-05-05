@@ -4774,9 +4774,17 @@ application-layer.
 
 ---
 
-## Phase 10.7: Lookup architecture clean-up — `description` column + filtered vector search + exclude_self + workspace-local doc_md (planned, pre-real-data run)
+## Phase 10.7: Lookup architecture clean-up — `description` column + filtered vector search + exclude_self + workspace-local doc_md ✅
 
-**Status (2026-05-05):** PLANNED, in flight. Pre-real-data architecture clean-up identified during pre-onboarding review. Not blocking any existing fix; positions the system for cleaner cost data on the upcoming real-data run.
+**Status (2026-05-05):** SHIPPED. Pre-real-data architecture clean-up identified during pre-onboarding review. Sub-commits:
+- `ec5a318` — 10.7.0 plan + doc-sync pointers
+- `fb5f919` — 10.7.1 schema + embed text + upsert_component description
+- `5c660d1` — 10.7.2 backfill seeds description + get_component strips embedding
+- `faefad4` — 10.7.3 vector_search filters + exclude_self + projection (description in components)
+- `f8380ec` — 10.7.4 search_* family adds exclude_self kwarg (default True)
+- `1d4750e` — 10.7.5 SME prompt — description vs doc_md split + workspace-local doc rule + flow-during-materialisation framing
+- `ba7acc3` — 10.7.6 admin UI carries + renders description
+- (this commit) — 10.7.7 final doc sync
 
 ### 10.7.0 Motivation
 

@@ -12,7 +12,7 @@
 
 ## 0. WHERE I AM RIGHT NOW (the most important section)
 
-**Implementing Phase 10.7 — lookup architecture clean-up before real-data onboarding. Plan landed; sub-steps 10.7.1 → 10.7.8 in flight.**
+**Phase 10.7 SHIPPED (sub-steps 1-7). Next: 10.7.8 — write mega DEMO11 prompt + run targeted smoke before real-data onboarding.**
 
 ### What's done (committed + pushed):
 
@@ -20,20 +20,19 @@
 - DEMO-MEGA ran end-to-end: **29 PASS / 1 N/A / 1 VERIFY_PENDING / 0 FAIL** out of 31 phases.
 - Phase 10.1.3 (per-tool name-map for mcp_call_batch + create_edge docstring fix) shipped as commit `376b27a`.
 - DEMO10 (targeted Phase 10.1.3 verification) ran: **8/8 PASS / 0 FAIL / 0 BUG** — commit `ad3830c`.
-- Phase 10.7 plan added to `docs/IMPLEMENTATION-PHASES.md` §10.7 + brief pointers in SCHEMA / HLD / TRIGGER-MGMT / AGENT-PROMPTS.
+- **Phase 10.7 — lookup architecture clean-up — sub-steps 1 through 7 shipped:**
+  - `ec5a318` — 10.7.0 plan
+  - `fb5f919` — 10.7.1 schema + embed text + upsert_component description
+  - `5c660d1` — 10.7.2 backfill + get_component embedding strip
+  - `faefad4` — 10.7.3 vector_search filters + exclude_self + projection
+  - `f8380ec` — 10.7.4 search_* family adds exclude_self
+  - `1d4750e` — 10.7.5 SME prompt updates
+  - `ba7acc3` — 10.7.6 admin UI description rendering
+  - HEAD: doc-sync commit (this update).
 
-### What's pending (Phase 10.7 sub-steps, in order):
+### What's pending:
 
-- **10.7.1** Schema (description column) + embed text shape + upsert_component description support.
-- **10.7.2** Backfill existing components + strip embedding from get_component return.
-- **10.7.3** vector_search filters + exclude_self + projection adds description.
-- **10.7.4** search_* family (5 of 6) gets same kwargs.
-- **10.7.5** Agent prompts (workspace-local doc_md, description distinction, filter usage).
-- **10.7.6** Admin UI: description rendering on graph hover + Catalog drill-down.
-- **10.7.7** Final doc sync (commit-hash fill-ins).
-- **10.7.8** Mega DEMO11 prompt + targeted smoke + push.
-
-After 10.7.8, user puts me on `/loop` to monitor real-data onboarding.
+- **10.7.8** Write mega DEMO11 prompt + targeted smoke + push. Then user puts me on `/loop` to monitor real-data onboarding.
 
 ### What's pending (next session — pick up here):
 
