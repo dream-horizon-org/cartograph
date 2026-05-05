@@ -81,60 +81,142 @@ def test_component_doc_md_nullable_on_create(agent_factory):
     assert c["component_doc_md"] is None
 
 
-# ---------- Phase 10.2: doc_md reaches embedding ----------
+# ---------- Phase 10.7: `description` is the embed-target; doc_md is human-only ----------
+# Note: Phase 10.2 added doc_md to the embed text. Phase 10.7 reverted that
+# in favour of a separate `description` column so prose length doesn't
+# dilute the identity signal. The pre-Phase-10.7 tests below were rewritten
+# to reflect the new shape.
 
-def test_phase10_2_embed_text_includes_doc_md_capped():
-    """Pure unit test on the embed-text builder. doc_md included up to 500 chars."""
+
+def test_phase10_7_embed_text_uses_description_not_doc_md():
+    """component_embed_text new signature: takes description, not doc_md."""
     from shared import embedding as emb
-    short_text = emb.component_embed_text(
+    text = emb.component_embed_text(
         "fav2-api", "FAV2 API", "application", {"runtime": "java"},
-        "Auth service handling /verify and /token endpoints",
+        "Dense terse summary of auth service",
     )
-    assert "Auth service handling" in short_text
-    assert "fav2-api" in short_text
-
-    # Cap test: 1500-char doc_md → only first 500 chars in embed string.
-    big_doc = "X" * 1500
-    big_text = emb.component_embed_text(
-        "n", "n", "application", None, big_doc,
-    )
-    assert big_text.count("X") == 500
+    assert "Dense terse summary" in text
+    assert "fav2-api" in text
+    # doc_md content (if any) MUST NOT leak in — the param is description now.
+    # No way to pass doc_md to component_embed_text anymore.
 
 
-def test_phase10_2_doc_md_none_omits_from_embed():
-    """When doc_md isn't provided, embed text falls back to old shape."""
+def test_phase10_7_embed_text_description_none_safe():
+    """Description=None → empty string in embed (no crash)."""
     from shared import embedding as emb
     text = emb.component_embed_text(
         "fav2-api", "FAV2 API", "application", {"k": "v"}, None,
     )
-    # Stable shape: type: name name doc meta — doc placeholder is empty string.
     assert "fav2-api" in text
     assert "FAV2 API" in text
+    # No "None" literal in the embed text.
+    assert "None" not in text
 
 
-def test_phase10_2_update_without_doc_md_preserves_existing_in_embed(agent_factory):
-    """COALESCE on update preserves doc_md in DB; embedding must also be
-    rebuilt from the preserved doc_md, not from None.
-    """
+def test_phase10_7_description_persists_through_create_and_update(agent_factory):
+    """description set on create, replaced on update with new value,
+    preserved on update with key omitted."""
+    _iter(agent_factory, "i", "github")
+    r = resources.upsert_resource("i", "github", "repo", "o/r")
+    _sme(agent_factory, "s", r["id"])
+    c1 = components.upsert_component("s", {
+        "canonical_name": "o/r", "display_name": "R",
+        "component_type": "application",
+        "description": "v1 dense summary",
+    })
+    assert c1["description"] == "v1 dense summary"
+    # Update with new description → REPLACE
+    c2 = components.upsert_component("s", {
+        "canonical_name": "o/r", "display_name": "R",
+        "component_type": "application",
+        "description": "v2 dense summary",
+    })
+    assert c2["description"] == "v2 dense summary"
+    # Update without description → COALESCE-preserve
+    c3 = components.upsert_component("s", {
+        "canonical_name": "o/r", "display_name": "R prime",
+        "component_type": "application",
+    })
+    assert c3["description"] == "v2 dense summary"
+
+
+def test_phase10_7_description_default_empty_on_create_without_field(agent_factory):
+    """Component created without description → DB stores '' (NOT NULL DEFAULT)."""
+    _iter(agent_factory, "i", "github")
+    r = resources.upsert_resource("i", "github", "repo", "o/r")
+    _sme(agent_factory, "s", r["id"])
+    c = components.upsert_component("s", {
+        "canonical_name": "o/r", "display_name": "R",
+        "component_type": "application",
+    })
+    assert c["description"] == ""
+
+
+def test_phase10_7_description_explicit_empty_clears_on_update(agent_factory):
+    """description='' explicitly → COALESCE('', existing) → '' (clears).
+    Distinguishes from description=None (preserve) and omit (preserve)."""
     _iter(agent_factory, "i", "github")
     r = resources.upsert_resource("i", "github", "repo", "o/r")
     _sme(agent_factory, "s", r["id"])
     components.upsert_component("s", {
         "canonical_name": "o/r", "display_name": "R",
         "component_type": "application",
-        "component_doc_md": "auth service does verify",
+        "description": "to be cleared",
     })
-    # Update without re-supplying doc_md.
-    updated = components.upsert_component("s", {
-        "canonical_name": "o/r", "display_name": "R v2",
+    cleared = components.upsert_component("s", {
+        "canonical_name": "o/r", "display_name": "R",
         "component_type": "application",
+        "description": "",
     })
-    # doc_md preserved.
-    assert updated["component_doc_md"] == "auth service does verify"
-    # Embedding column not None (got rebuilt with the preserved doc_md content).
+    assert cleared["description"] == ""
+
+
+def test_phase10_7_description_soft_400_warn(agent_factory, caplog):
+    """description >400 chars logs a warning but does NOT reject."""
+    import logging
+    _iter(agent_factory, "i", "github")
+    r = resources.upsert_resource("i", "github", "repo", "o/r")
+    _sme(agent_factory, "s", r["id"])
+    long_desc = "X" * 500
+    with caplog.at_level(logging.WARNING):
+        c = components.upsert_component("s", {
+            "canonical_name": "o/r", "display_name": "R",
+            "component_type": "application",
+            "description": long_desc,
+        })
+    # No reject — row created.
+    assert c["description"] == long_desc
+    # Warning logged — soft cap.
+    assert any("soft cap 400" in rec.message for rec in caplog.records)
+
+
+def test_phase10_7_doc_md_no_longer_affects_embed_recall(agent_factory):
+    """Pre-10.7, doc_md content drove vector_search recall. Post-10.7,
+    doc_md changes do NOT change the embedding (only description does).
+    This test confirms doc_md updates don't trigger re-embed signal change.
+    """
     from shared.db import execute_one
-    row = execute_one(
-        "SELECT embedding IS NOT NULL AS has_embed FROM components WHERE id = %s",
-        (updated["id"],),
-    )
-    assert row["has_embed"] is True
+    _iter(agent_factory, "i", "github")
+    r = resources.upsert_resource("i", "github", "repo", "o/r")
+    _sme(agent_factory, "s", r["id"])
+    components.upsert_component("s", {
+        "canonical_name": "o/r", "display_name": "R",
+        "component_type": "application",
+        "description": "stable description",
+        "component_doc_md": "v1 doc",
+    })
+    embed_v1 = execute_one(
+        "SELECT embedding::text AS e FROM components WHERE canonical_name='o/r'",
+    )["e"]
+    components.upsert_component("s", {
+        "canonical_name": "o/r", "display_name": "R",
+        "component_type": "application",
+        "description": "stable description",  # SAME description
+        "component_doc_md": "wildly different doc content " * 20,  # CHANGED
+    })
+    embed_v2 = execute_one(
+        "SELECT embedding::text AS e FROM components WHERE canonical_name='o/r'",
+    )["e"]
+    # Same description → embedding text input is identical → embedding
+    # output should be byte-identical (deterministic embed model).
+    assert embed_v1 == embed_v2, "doc_md change should NOT affect embedding"

@@ -582,8 +582,24 @@ def run_migrations() -> None:
 
             # Phase 3: SME-authored human-readable component doc rendered
             # in the graph-viz hover popup. Markdown; nullable.
+            # Phase 10.7: NO LONGER embedded — purely human-render.
             cur.execute(
                 "ALTER TABLE components ADD COLUMN IF NOT EXISTS component_doc_md TEXT"
+            )
+
+            # Phase 10.7: dense, terse component description (≤400 chars
+            # soft cap). The embed-text contributor for vector_search
+            # ranking precision. SMEs maintain this separately from
+            # component_doc_md so prose length doesn't dilute the
+            # identity signal in the vector. NOT NULL DEFAULT '' so
+            # existing rows get an empty string; the embedding_backfill
+            # script seeds non-empty existing components from
+            # LEFT(component_doc_md, 400) on the next --force-components
+            # run. Soft cap enforced via prompt + log.warning, not DB
+            # CHECK (prevents demo-time blockers).
+            cur.execute(
+                "ALTER TABLE components ADD COLUMN IF NOT EXISTS "
+                "description TEXT NOT NULL DEFAULT ''"
             )
 
             # Phase 3.8: structural slice description — which parts of

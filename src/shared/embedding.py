@@ -115,22 +115,32 @@ def vector_literal(vec: Optional[list[float]]) -> Optional[str]:
 
 def component_embed_text(canonical_name: str, display_name: str,
                          component_type: str, metadata: dict | None,
-                         component_doc_md: str | None = None) -> str:
+                         description: str | None = None) -> str:
     """Build the embed text for a component row.
 
-    Phase 10.2: includes `component_doc_md` (capped at 500 chars) so
-    vector_search can match on semantic intent ("auth service") not
-    just identity ("fav2-api"). Closes the recall gap where searches
-    for the conceptual purpose miss components whose canonical_name
-    is a code-name.
+    Phase 10.7: uses the new `description` column (≤400 chars soft cap)
+    as the dense embed-text contributor. `component_doc_md` is no
+    longer embedded — it's purely a human-render field for the graph-
+    viz hover popup, free to be multi-paragraph prose without diluting
+    the identity signal in the vector.
+
+    Pre-Phase-10.7 (Phase 10.2 shape) embedded `component_doc_md[:500]`
+    instead. The 500-char slice was a recall cliff for any longer doc
+    AND mixed two concerns (human-render + embed-target) into one
+    field. Phase 10.7 separates them.
 
     `source_slice` deliberately NOT included — paths/files are
     structural references, not semantic content; would dilute the
     embedding signal.
+
+    Mandatory after upgrade: run `python -m shared.embedding_backfill
+    --force-components` once to re-embed existing components with the
+    new shape. Otherwise old rows stay on doc-based vectors and search
+    ranking is inconsistent across vintages.
     """
     meta = json.dumps(metadata or {}, sort_keys=True)
-    doc = (component_doc_md or "")[:500]
-    return f"{component_type}: {canonical_name} {display_name} {doc} {meta}"
+    desc = (description or "").strip()
+    return f"{component_type}: {canonical_name} {display_name} {desc} {meta}"
 
 
 def attribution_embed_text(resource_type: str, identifier: str) -> str:

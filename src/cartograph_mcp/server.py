@@ -576,7 +576,16 @@ def upsert_component(
       canonical_name (required), display_name (required),
       component_type (required; application/database/cache/queue/lambda/cron/
         external-service/library/infrastructure),
-      confidence (default 1.0), metadata (dict).
+      confidence (default 1.0),
+      metadata (dict, optional),
+      description (Phase 10.7, optional, ≤400 chars soft cap) — DENSE
+        machine-readable summary; THE embed-target for vector_search
+        ranking. REPLACE-on-provide / None=preserve / ""=clear.
+      component_doc_md (optional, no length cap) — multi-paragraph
+        human-readable prose; renders in graph-viz hover popup. NOT
+        embedded post-Phase-10.7. REPLACE/preserve/clear semantics
+        identical to description.
+      source_slice (dict keyed by resource_id, optional).
     """
     return components_tool.upsert_component(agent_id, component_data)
 

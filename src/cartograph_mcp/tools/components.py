@@ -84,6 +84,19 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
     confidence = float(component_data.get("confidence", 1.0))
     metadata = component_data.get("metadata") or {}
     component_doc_md = component_data.get("component_doc_md")
+    # Phase 10.7: dense, ≤400-char embed-target text. Soft cap warned via
+    # log; not DB-enforced (prevents demo-time blockers on rare overflow).
+    # COALESCE semantics same as component_doc_md: None=preserve,
+    # ""=clear, "abc"=replace.
+    description = component_data.get("description")
+    if description is not None and len(description) > 400:
+        import logging as _lg
+        _lg.getLogger(__name__).warning(
+            "upsert_component: description for '%s' is %d chars (soft cap "
+            "400). Not rejecting, but vector_search ranking may dilute the "
+            "identity signal. Consider tightening.",
+            canonical_name, len(description),
+        )
     # source_slice: structural description of which parts of which source
     # resource(s) this component covers. REPLACE-on-provide semantics
     # (caller must pass the full current view); COALESCE-preserve on omit.
@@ -108,8 +121,13 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
     # Does this SME already own an active component? (any RCA row linked
     # to a non-decommissioned component). If yes → UPDATE path on that one.
     # If no → CREATE path requires a reserved RCA row (component_id IS NULL).
+    # Phase 10.7: also pull existing description (the new embed-target
+    # field) so we can compute the post-COALESCE effective value for the
+    # re-embed step below.
     owned = execute_one(
-        """SELECT c.id AS component_id, c.component_doc_md AS existing_doc_md
+        """SELECT c.id AS component_id,
+                  c.component_doc_md AS existing_doc_md,
+                  c.description AS existing_description
            FROM resource_component_agents rca
            JOIN components c ON c.id = rca.component_id
            WHERE rca.agent_id = %s AND c.status != 'decommissioned'
@@ -117,17 +135,23 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
         (agent_id,),
     )
 
-    # Phase 10.2: build embed text from the INTENDED FINAL doc_md value.
-    # On UPDATE with no doc_md provided, the SQL COALESCE preserves the
-    # existing doc_md — and we want the embedding to match. So pull
-    # existing doc_md from `owned` row and use it as the fallback.
-    effective_doc_md = component_doc_md
-    if effective_doc_md is None and owned is not None:
-        effective_doc_md = owned.get("existing_doc_md")
+    # Phase 10.7: build embed text from the INTENDED FINAL `description`
+    # value (post-COALESCE). component_doc_md is no longer in the embed
+    # — purely human-render now.
+    #
+    # On UPDATE with no description provided (None), SQL COALESCE preserves
+    # the existing description, and we want the embedding to match. So pull
+    # the existing description from `owned` and use it as the fallback.
+    # On CREATE (owned is None), default to empty string.
+    effective_description = description
+    if effective_description is None:
+        effective_description = (
+            owned.get("existing_description") if owned is not None else ""
+        )
     vec = emb.vector_literal(emb.embed_text(
         emb.component_embed_text(
             canonical_name, display_name, component_type, metadata,
-            effective_doc_md,
+            effective_description,
         )
     ))
 
@@ -147,6 +171,7 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
                    confidence = %s,
                    metadata = %s::jsonb,
                    component_doc_md = COALESCE(%s, component_doc_md),
+                   description = COALESCE(%s, description),
                    source_slice = COALESCE(%s::jsonb, source_slice),
                    embedding = %s::vector,
                    scanned_at = now(),
@@ -155,7 +180,7 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
                RETURNING *""",
             (
                 canonical_name, display_name, component_type, confidence,
-                json.dumps(metadata), component_doc_md, slice_json, vec,
+                json.dumps(metadata), component_doc_md, description, slice_json, vec,
                 owned["component_id"],
             ),
         )
@@ -195,15 +220,18 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
         )
 
     slice_json = json.dumps(source_slice) if source_slice is not None else None
+    # Phase 10.7: description column has NOT NULL DEFAULT '' so passing
+    # COALESCE(%s, '') ensures we don't accidentally violate the NOT NULL
+    # when the caller omits description (None) on a CREATE.
     new_component = execute_returning(
         """INSERT INTO components
            (canonical_name, display_name, component_type, confidence, metadata,
-            component_doc_md, source_slice, embedding, scanned_at)
-           VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::vector, now())
+            component_doc_md, description, source_slice, embedding, scanned_at)
+           VALUES (%s, %s, %s, %s, %s::jsonb, %s, COALESCE(%s, ''), %s::jsonb, %s::vector, now())
            RETURNING *""",
         (
             canonical_name, display_name, component_type, confidence,
-            json.dumps(metadata), component_doc_md, slice_json, vec,
+            json.dumps(metadata), component_doc_md, description, slice_json, vec,
         ),
     )
     execute_mutate(
