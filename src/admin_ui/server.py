@@ -816,8 +816,14 @@ def create_app() -> FastAPI:
             where.append("c.status = %s")
             params.append(status)
         if q:
-            where.append("(c.canonical_name ILIKE %s OR c.display_name ILIKE %s)")
-            params.extend([f"%{q}%", f"%{q}%"])
+            # Phase 10.7: q also matches description (the new dense
+            # embed-target field) so admins can quickly find components
+            # by role/intent in addition to name.
+            where.append(
+                "(c.canonical_name ILIKE %s OR c.display_name ILIKE %s "
+                "OR c.description ILIKE %s)"
+            )
+            params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
         if before:
             where.append("c.canonical_name > %s")
             params.append(before)
@@ -840,7 +846,7 @@ def create_app() -> FastAPI:
         # join since it's a count, not a plane-derived value.
         rows = execute(
             f"""SELECT c.id, c.canonical_name, c.display_name,
-                       c.component_type, c.status,
+                       c.component_type, c.status, c.description,
                        COALESCE(
                          ARRAY_AGG(DISTINCT r.plane) FILTER (WHERE r.plane IS NOT NULL),
                          ARRAY[]::text[]
@@ -894,8 +900,16 @@ def create_app() -> FastAPI:
         # plane the component LIVES on). attributions.plane is
         # discovery-plane and conflates source-of-evidence with
         # category-of-component.
+        # Phase 10.7: explicit column list excluding the 1024-d
+        # embedding vector (~8KB float array). description column
+        # added (the new dense embed-target).
         component = execute_one(
-            """SELECT c.*,
+            """SELECT c.id, c.canonical_name, c.display_name,
+                      c.component_type, c.status, c.confidence,
+                      c.metadata, c.description, c.component_doc_md,
+                      c.source_slice, c.split_from_component_id,
+                      c.split_briefing, c.scanned_at,
+                      c.created_at, c.updated_at,
                       COALESCE(
                         ARRAY_AGG(DISTINCT r.plane) FILTER (WHERE r.plane IS NOT NULL),
                         ARRAY[]::text[]
@@ -1004,7 +1018,7 @@ def create_app() -> FastAPI:
         nodes = execute(
             """SELECT c.id, c.canonical_name, c.display_name,
                       c.component_type, c.status, c.component_doc_md,
-                      c.source_slice,
+                      c.description, c.source_slice,
                       COALESCE(
                         ARRAY_AGG(DISTINCT r.plane) FILTER (WHERE r.plane IS NOT NULL),
                         ARRAY[]::text[]

@@ -1625,7 +1625,8 @@ async function initOrRefreshGraph() {
     id: n.id,
     name: n.display_name || n.canonical_name,
     canonical: n.canonical_name,
-    doc: n.component_doc_md,
+    description: n.description,            // Phase 10.7: dense embed-target
+    doc: n.component_doc_md,                // human-render only
     slice: n.source_slice,
     type: n.component_type,
     planes: n.planes,
@@ -2448,6 +2449,13 @@ function renderGraphDetailPanel() {
              data-tab="${t.id}">${escapeHtml(t.label)}</button>`
   ).join('');
 
+  // Phase 10.7: description (dense embed-target) renders as a header
+  // line above whatever the active tab shows. Always visible regardless
+  // of tab — it's the at-a-glance identity of the component.
+  const descBlock = node.description
+    ? `<div class="hover-description"><em>${escapeHtml(node.description)}</em></div>`
+    : '';
+
   let body = '';
   if (activeDetailTab === 'doc') {
     body = node.doc
@@ -2479,6 +2487,7 @@ function renderGraphDetailPanel() {
       <div class="kv-row"><span>canonical</span><code>${escapeHtml(node.canonical)}</code></div>
       <div class="kv-row"><span>type</span><code>${escapeHtml(node.type)}</code></div>
       <div class="plane-pills">${planes}</div>
+      ${descBlock}
     </div>
     <div class="detail-tabs">${tabHtml}</div>
     <div class="detail-body">${body}</div>
@@ -3325,6 +3334,12 @@ function _renderComponentDetailHtml(data) {
     <div class="muted">${escapeHtml(c.display_name || '')}</div>
     <div class="muted">${c.component_type} · ${c.status}</div>
     <div>${planes}</div>`;
+  // Phase 10.7: description is the dense embed-target field, distinct
+  // from doc_md (which is multi-paragraph human-render). Render desc
+  // first as a tight italic blurb, then doc_md below for fuller prose.
+  const desc = c.description
+    ? `<div class="cat-desc"><em>${escapeHtml(c.description)}</em></div>`
+    : '';
   const doc = c.component_doc_md
     ? `<h4>Doc</h4><div class="cat-doc">${
         DOMPurify.sanitize(marked.parse(c.component_doc_md))
@@ -3378,7 +3393,7 @@ function _renderComponentDetailHtml(data) {
         `<li><b>${r.plane}/${r.resource_type}</b>: ${escapeHtml(r.identifier)}</li>`
       ).join('') + '</ul>'
     : '';
-  return head + doc + slice + attrsHtml + edgesHtml + flowsHtml + resHtml;
+  return head + desc + doc + slice + attrsHtml + edgesHtml + flowsHtml + resHtml;
 }
 
 document.getElementById('cat-apply')?.addEventListener('click', _writeCatalogFiltersToUrl);

@@ -1409,3 +1409,13 @@ body {
   background: #21262d; color: #8b949e; padding: 1px 6px;
   border-radius: 3px; font-size: 11px;
 }
+
+/* Phase 10.7: description (dense embed-target) renders above doc_md
+ * in graph hover popup + Catalog drill-down. Italic + muted + small
+ * so it reads as a header line while doc_md remains the prose body. */
+.hover-description, .cat-desc {
+  font-style: italic; color: #b8bec7; font-size: 13px;
+  padding: 6px 0 8px 0; border-bottom: 1px solid #30363d;
+  margin-bottom: 8px;
+}
+.cat-desc { margin-bottom: 12px; }

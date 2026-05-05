@@ -160,21 +160,27 @@ def seed_components() -> dict[str, str]:
     """Insert/update mock components. Returns {canonical → id}."""
     out: dict[str, str] = {}
     for c in COMPONENTS:
+        # Phase 10.7: derive description from first ~200 chars of doc
+        # for demo realism (mock seeds don't run an agent that would
+        # hand-craft a tight description).
+        description = (c.get("doc") or "").strip().split("\n", 1)[0]
+        description = description.lstrip("# ").strip()[:400]
         # Idempotent: UPDATE if canonical_name already exists with our mock tag.
         row = execute_returning(
             """INSERT INTO components
                (canonical_name, display_name, component_type, metadata,
-                component_doc_md, confidence)
-               VALUES (%s, %s, %s, %s::jsonb, %s, 1.0)
+                component_doc_md, description, confidence)
+               VALUES (%s, %s, %s, %s::jsonb, %s, %s, 1.0)
                ON CONFLICT (canonical_name) DO UPDATE
                  SET display_name = EXCLUDED.display_name,
                      component_type = EXCLUDED.component_type,
                      metadata = EXCLUDED.metadata,
                      component_doc_md = EXCLUDED.component_doc_md,
+                     description = EXCLUDED.description,
                      updated_at = now()
                RETURNING id""",
             (c["canonical"], c["display"], c["type"],
-             json.dumps(MOCK_TAG), c["doc"]),
+             json.dumps(MOCK_TAG), c["doc"], description),
         )
         out[c["canonical"]] = str(row["id"])
         # Attribute per plane so the graph coloring + legend match.
