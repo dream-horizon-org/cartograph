@@ -12,7 +12,7 @@
 
 ## 0. WHERE I AM RIGHT NOW (the most important section)
 
-**DEMO11 ran end-to-end: 16/16 PASS, 0 FAIL, 0 BUG. System fit for real-data onboarding. Next: insight triage + decisions, then wipe DB, then real data.**
+**DEMO11 ran end-to-end: 16/16 PASS, 0 FAIL, 0 BUG. Phase 10.8 (post-DEMO11 insight bundle) PLANNED — closes the canonical_name forever-held architecture gap, defensive 2-LOC on broadcast read, promotes 3 insights to prompts, spec-syncs lenient delete semantics, runs targeted agentic verification (NOT a mega demo). Then DB wipe + real data.**
 
 ### What's done (committed + pushed):
 
@@ -25,15 +25,21 @@
 
 ### What's pending (next session — pick up here):
 
-1. **Insight triage** — 8 insights filed during DEMO11. 3 promotable, 1 needs schema decision, 1 is the "broadcast read no decom gate" defensive finding from negative tests. See §17.
-2. **Optional small fixes before real-data run:**
-   - Decision: canonical_name uniqueness post-decom (insight `da948bbe`) — keep as forever-held or migrate to `WHERE status='active'` partial unique
-   - Decision: `delete_attributions_bulk` semantics — current "commit valid + per-row not_found" vs DEMO11 spec "reject whole batch on missing id"
-   - Promote spawn_child_agent's auto-migrate-and-resolve behavior to SME prompt (insight `3788c88f`)
-   - Promote "broadcast-driven coordination works without per-agent tasking" to orch prompt (orch insight)
-   - Defensive 2-LOC: add `require_active_agent` gate to `broadcast.get_unacked_broadcasts` + scanner skip
-3. **Wipe DB + workspaces** preserving real-data backup `src/workspaces.bak.20260426-2122/`. Backup current DEMO11 workspaces at `src/workspaces/` to `workspaces.bak.pre-realdata.<ts>/`. Restart 4 daemons. Verify 114 tools.
-4. **Real-data onboarding** — user provides credentials inline via chat. Orch handles intake. /loop monitors as before.
+**Phase 10.8 — Post-DEMO11 insight bundle (in progress):**
+1. **10.8.0 plan + recall sync** — ✅ THIS commit (doc-only).
+2. **10.8.1 canonical_name partial UNIQUE on active** — schema + components.py + mock_seed.py + test. ~30 LOC.
+3. **10.8.2 Defensive `require_active_agent` on broadcast read + scanner skip** — ~10 LOC + 2 tests.
+4. **10.8.3 Prompt promotions** — SME (split-child auto-resolve, leave-dangling-don't-force-create) + orch (broadcast-driven coordination) + smoke.
+5. **10.8.4 DEMO11 spec line fix** for `delete_attributions_bulk` lenient semantics.
+6. **10.8.5 Triage 8 insights** — 5 promoted, 3 wontfix, single SQL block.
+7. **10.8.6 Targeted agentic verification** — write `docs/oorch-test-prompt-demo12-targeted` covering ONLY Phase 10.8 surface (~6 phases, 10-15 min). Hand to fresh orch via direct DB insert. Monitor via /loop.
+8. **10.8.7 Final doc sync** — recall §0 + §17 + PROMPT-ENHANCEMENTS §2.
+
+**After Phase 10.8 verification PASSES:**
+9. **Wipe DB + workspaces** preserving real-data backup `src/workspaces.bak.20260426-2122/`. Backup current DEMO11 workspaces at `src/workspaces/` to `workspaces.bak.pre-realdata.<ts>/`. Restart 4 daemons. Verify 114 tools.
+10. **Real-data onboarding** — user provides credentials inline via chat. Orch handles intake. /loop monitors as before.
+
+See `docs/IMPLEMENTATION-PHASES.md §10.8` for the full plan.
 
 ### DEMO11 final scorecard location:
 

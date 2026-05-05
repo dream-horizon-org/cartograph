@@ -5044,6 +5044,235 @@ Idempotent. No data loss. Existing rows get empty default; backfill seeds from d
 
 ---
 
+## Phase 10.8: Post-DEMO11 insight bundle (pre-real-data) — PLANNED
+
+**Status (2026-05-05):** PLANNED. DEMO11 ran 16/16 PASS, $86.29, 0 BUG. Eight insights filed during the run + three standing semantic questions surfaced from negative-test verification. Phase 10.8 closes the only insight that warrants a code/schema change before real-data onboarding (#1 canonical_name) plus the defensive 2-LOC gap on broadcast read, promotes three insights into prompt rules, syncs DEMO11 spec to match impl semantics for one tool, and triages the rest. Single targeted agentic verification (NOT a mega demo) confirms the surface before DB wipe + real-data run.
+
+### 10.8.0 Insight inventory (DEMO11 — 8 open at planning time)
+
+| # | id (8-char) | source | kind | verdict | sub-phase |
+|---|---|---|---|---|---|
+| 1 | `0c443555` | sme-da948bbe | tool_gap | **Schema decision needed** — canonical_name held forever by decom row | **10.8.1** |
+| 2 | `0f2352f9` | sme-3788c88f | tactic_win | spawn_child_agent auto-migrates + auto-resolves unresolved when target in scope | 10.8.3 |
+| 3 | `d6bff7c3` | orch-8b7025e0 | tactic_win | SMEs auto-bind from broadcast alone — broadcast-driven coordination beats per-agent tasking | 10.8.3 |
+| 4 | `8bd5dae1` | sme-901967e8 | tactic_win | Multi-plane same-canonical: temp name → merge nominate → drop temp | 10.8.5 (wontfix — already in prompt) |
+| 5 | `d21c93f1` | orch-8b7025e0 | doc_confusing | `delete_attributions_bulk` impl is lenient; DEMO11 spec said strict | 10.8.4 (doc-fix) |
+| 6 | `4b21b236` | sme-f97d2059 | prompt_gap | "If target component genuinely missing, leave dangling — don't force-create" | 10.8.3 |
+| 7 | `e67ef425` | sme-f2800e8a | doc_confusing | Identifier-norm hit `orders.events` vs `order-events` | 10.8.5 (wontfix — rule already in prompt) |
+| 8 | `e27b5a8a` | orch-8b7025e0 | workflow_friction | Phase 8c.1 admin-chat ACL synthetic test issue | 10.8.5 (wontfix — synthetic) |
+
+Plus three standing semantic questions from negative-test verification:
+- **SQ-1:** `broadcast.get_unacked_broadcasts(decom_id)` returns rows — function does NOT call `require_active_agent`. Operationally safe but defensive gap. → **10.8.2**
+- **SQ-2:** Post-decom broadcasts surface in proxy queue (no `agent_runs.deactivated_at` to filter). Wasted ack work, not a correctness bug. → **deferred** (would need new schema column).
+- **SQ-3:** `mutation_assigned_to` decom mid-execution — no proxy `execute_mutation`. Mitigated by resolver pre-M conflict check. → **deferred** (edge case, never observed).
+
+### 10.8.1 canonical_name partial UNIQUE on active (insight `0c443555`)
+
+**Symptom.** After `absorb_agent` decommissions a target, the target's row keeps holding its original `canonical_name`. The `components_canonical_name_key` UNIQUE constraint prevents any future component from reusing that name — even though the decom row will never be active again. For real Dream11 data: services get retired and re-launched; v2 of `feeds-api` cannot adopt the v1 name.
+
+**Fix (idempotent migration).**
+
+```sql
+ALTER TABLE components DROP CONSTRAINT IF EXISTS components_canonical_name_key;
+CREATE UNIQUE INDEX IF NOT EXISTS components_canonical_name_active_unique
+  ON components (canonical_name) WHERE status = 'active';
+```
+
+Decom rows free up their names. Active rows stay uniquely-named (was already true). Zero data migration.
+
+**Application-layer change** in `src/cartograph_mcp/tools/components.py::upsert_component` (line 208-214 SELECT pre-check):
+
+```python
+# Phase 10.8.1: only check ACTIVE rows for canonical_name conflicts.
+# Decom rows holding the same name no longer block reuse.
+conflict = execute_one(
+    """SELECT c.id, rca.agent_id AS owner_agent
+       FROM components c
+       LEFT JOIN resource_component_agents rca ON rca.component_id = c.id
+       WHERE c.canonical_name = %s AND c.status = 'active'""",
+    (canonical_name,),
+)
+```
+
+**Mock seed change** in `src/admin_ui/mock_seed.py:174` — `ON CONFLICT (canonical_name) DO UPDATE` requires the predicate matching the partial unique:
+
+```sql
+ON CONFLICT (canonical_name) WHERE status='active' DO UPDATE ...
+```
+
+(Or specify by name: `ON CONFLICT ON CONSTRAINT components_canonical_name_active_unique`.)
+
+**Tests.**
+- Existing `test_upsert_component_canonical_name_conflict_different_owner` (test_components.py:138) — keeps passing (active-vs-active still rejected).
+- New: `test_upsert_component_canonical_name_active_vs_decom_allowed` — set up a decom row holding `feeds-api`, confirm fresh SME's `upsert_component(canonical_name='feeds-api')` succeeds. ~25 LOC.
+
+**Verified safe (read-side):** all 9 admin_ui BE refs, 8 FE refs in app.js, search tools, vector_search, get_component, embedding pipeline, trigger_management (zero refs), agent prompts (text-only) — none assume uniqueness for correctness.
+
+**Pagination caveat (deferred).** `/api/components` cursor `c.canonical_name > %s` is technically non-deterministic if both an active and decom row share a name. Realistic only when admin tab default-shows decom rows, which it doesn't (status filter is opt-in). Tracked as a future tiebreaker (`ORDER BY canonical_name, id`) if real-data exposes it.
+
+**Files touched:** `src/shared/migrations.py`, `src/cartograph_mcp/tools/components.py`, `src/admin_ui/mock_seed.py`, `tests/mcp_tools/test_components.py`.
+**Effort:** S (~30 LOC + migration + 1 new test).
+
+### 10.8.2 Defensive: `require_active_agent` on broadcast read path (SQ-1)
+
+**Symptom.** `broadcast.get_unacked_broadcasts(decom_id, agent_type)` returns rows. Operationally safe — agent_manager pickup loop filters `status != 'decommissioned'` so decom never wakes. But the tool itself doesn't call `require_active_agent`, so any external caller (admin UI / debug script) gets back rows for a decom agent. Belt-and-suspenders gap.
+
+**Fix.**
+- Add `require_active_agent(agent_id)` at the top of `get_unacked_broadcasts` in `src/cartograph_mcp/tools/broadcast.py`. Mirrors every other tool's pattern.
+- Add a `WHERE status != 'decommissioned'` filter (or call through the same helper) in `src/trigger_management/scanners/broadcasts.py::scan` so decom never gets enumerated even at scanner level.
+
+**Tests.**
+- `test_get_unacked_broadcasts_rejects_decom`: insert a decom agent, expect `ValueError` from the gate.
+- `test_broadcast_scanner_skips_decom`: insert decom + broadcast, scanner returns empty for that agent.
+
+**Files touched:** `src/cartograph_mcp/tools/broadcast.py`, `src/trigger_management/scanners/broadcasts.py`, `tests/mcp_tools/test_broadcast*.py`.
+**Effort:** XS (~10 LOC + 2 new tests).
+
+### 10.8.3 Prompt promotions (insights `0f2352f9`, `d6bff7c3`, `4b21b236`)
+
+#### SME prompt (`src/agent_management/agent_types/sme.py`)
+
+**(a) `0f2352f9` — spawn_child_agent auto-migrate + auto-resolve.** Add to the split / mutation block: when you receive a `[split-welcome]` BW task, your component already has any unresolved rows (transferred from parent) AUTO-RESOLVED if the resolution target was within scope of your slice. You do NOT need to manually re-run cosine ladder on those — check `get_unresolved(your_component_id)` and you'll typically find the inherited rows already resolved. Materialise NEW evidence (Step 2-4 on your slice's code paths); skip rework on parent's already-bound stuff.
+
+**(b) `4b21b236` — leave dangling, don't force-create.** Reinforce in STEP 3 (outbound discovery) ladder: when `vector_search` returns no useful match for a hostname / endpoint / topic, the correct action is `upsert_edge_outbound(to=NULL)` + `insert_unresolved(...)`. Do NOT call `upsert_component` to create the missing target yourself — that's another SME's job (their iterator hasn't enumerated yet, or their plane is pending). Force-creating a component you don't actually own pollutes ownership semantics + creates orphan slots.
+
+**(c) `8bd5dae1` (light reinforcement) + `e67ef425` (light reinforcement).** No new content; the prompt already covers temp-name dance + identifier normalisation. Note in the wontfix triage that real-world hits confirm the existing rule lands.
+
+#### Orch prompt (`src/agent_management/agent_types/orchestrator.py`)
+
+**`d6bff7c3` — broadcast-driven coordination beats per-agent tasking for routine phase work.** Add to the phase-coordinator section: when transitioning to EDGE_DISCOVERY (or any phase whose work is uniformly applicable), prefer `send_broadcast(persistent=True)` with concrete steps (e.g. "bind dangling outbounds via cosine ladder, run get_unmatched_callers / get_orphan_catalogs hygiene, dedup post-merge edges via delete_edge"). SMEs autonomously act on the broadcast — DEMO11 verified payments-svc had 4 outgoing_bound edges via broadcast alone, before any explicit per-agent task. Reserve per-agent BW tasks for stragglers (>10 wakes without progress) and edge cases (a specific SME has known blocker).
+
+#### Smoke test (mandatory)
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, 'src')
+from agent_management.agent_types import sme, iterator, orchestrator, resolver
+print('sme:', len(sme.SYSTEM_PROMPT_TEMPLATE.format(plane='x', resource_id='y')))
+print('iter:', len(iterator.SYSTEM_PROMPT_TEMPLATE.format(plane='x', resource_id='y')))
+print('orch:', len(orchestrator.SYSTEM_PROMPT))
+print('res:', len(resolver.SYSTEM_PROMPT))
+"
+```
+
+Catches brace-escape bugs (the `{token}` / `{id}` / `{get,post}` class) before SME spawn.
+
+**Files touched:** `src/agent_management/agent_types/sme.py`, `src/agent_management/agent_types/orchestrator.py`.
+**Effort:** S (~80 LOC across 2 prompts; smoke-test only — prompt edits don't have unit tests).
+
+### 10.8.4 Doc-sync DEMO11 spec for `delete_attributions_bulk` lenient semantics (insight `d21c93f1`)
+
+**Symptom.** During DEMO11 Phase 5b.5, orch tested `delete_attributions_bulk([valid_id, '00000000-...non-existent...'])`. Spec said: "pass invalid id mixed with valid ids, batch returns committed=False with per-row errors." Impl actually committed valid deletions and returned `{deleted: false, reason: 'not_found'}` per missing row — committed=True overall. Orch correctly flagged the spec mismatch as `doc_confusing`. The lenient impl behavior is operationally better (one wrong UUID doesn't roll back legitimate deletions); the spec is wrong.
+
+**Fix.** Update DEMO11 prompt Phase 5b.5 line + audit other places for the same wording:
+- `docs/oorch-test-prompt-demo11` Phase 5b.5: change expected behaviour from "rejects whole batch" to "commits valid + per-row {deleted:false, reason:'not_found'} for missing IDs (lenient semantics)".
+- Verify HLD §2.5 + TRIGGER-MANAGEMENT.md §3 + IMPLEMENTATION-PHASES.md §8.3 — all should match impl. (Phase 8.3 in this doc says "if any row not found → idempotent (skip)" which is correct; "if any row not owned by caller → reject whole batch" is also correct. Owner-violation is strict; missing-id is lenient. Make sure the DEMO11 prompt distinguishes the two.)
+
+**Files touched:** `docs/oorch-test-prompt-demo11` only (single line); other docs already match impl.
+**Effort:** XS (1 line change).
+
+### 10.8.5 Triage all 8 insights
+
+Direct DB UPDATE (admin UI is also fine; SQL is faster):
+
+```sql
+UPDATE agent_insights SET status='promoted', triaged_by='admin', triaged_at=now(),
+  triage_note='Phase 10.8.1 — partial UNIQUE on active'
+  WHERE id::text LIKE '0c443555%';
+
+UPDATE agent_insights SET status='promoted', triaged_by='admin', triaged_at=now(),
+  triage_note='Phase 10.8.3 — promoted to SME prompt (split-child auto-resolve)'
+  WHERE id::text LIKE '0f2352f9%';
+
+UPDATE agent_insights SET status='promoted', triaged_by='admin', triaged_at=now(),
+  triage_note='Phase 10.8.3 — promoted to orch prompt (broadcast-driven coordination)'
+  WHERE id::text LIKE 'd6bff7c3%';
+
+UPDATE agent_insights SET status='promoted', triaged_by='admin', triaged_at=now(),
+  triage_note='Phase 10.8.3 — promoted to SME prompt (leave dangling, don''t force-create)'
+  WHERE id::text LIKE '4b21b236%';
+
+UPDATE agent_insights SET status='wontfix', triaged_by='admin', triaged_at=now(),
+  triage_note='Already in SME prompt (multi-plane temp-name dance) — real-world hit confirms existing rule lands'
+  WHERE id::text LIKE '8bd5dae1%';
+
+UPDATE agent_insights SET status='wontfix', triaged_by='admin', triaged_at=now(),
+  triage_note='Identifier normalisation rule already in STEP 3; this run hit it correctly'
+  WHERE id::text LIKE 'e67ef425%';
+
+UPDATE agent_insights SET status='promoted', triaged_by='admin', triaged_at=now(),
+  triage_note='Phase 10.8.4 — DEMO11 spec updated to match lenient impl'
+  WHERE id::text LIKE 'd21c93f1%';
+
+UPDATE agent_insights SET status='wontfix', triaged_by='admin', triaged_at=now(),
+  triage_note='Synthetic demo-orchestration limit; admin must fire admin→decom chats; not a runtime bug'
+  WHERE id::text LIKE 'e27b5a8a%';
+```
+
+5 promoted, 3 wontfix.
+
+**Effort:** XS (single SQL block, no commit ripple).
+
+### 10.8.6 Targeted agentic verification (NOT a mega demo)
+
+Write `docs/oorch-test-prompt-demo12-targeted` covering ONLY the Phase 10.8 surface. ~6 phases / 10-15 min wall-clock:
+
+| Phase | What |
+|---|---|
+| 1 | Tool surface still 114; daemons healthy |
+| 2 | canonical_name partial UNIQUE — set up decom row holding 'svc-x', spawn fresh SME, confirm `upsert_component(canonical_name='svc-x')` succeeds; confirm active+active still rejected |
+| 3 | Defensive gate — `get_unacked_broadcasts(decom_id, agent_type)` raises ValueError with "decommissioned" in message |
+| 4 | Prompt promotion smoke — spawn split, confirm child SME's first wake observes inherited unresolved rows already resolved (no manual cosine ladder rerun) |
+| 5 | Broadcast-driven coordination — orch sends EDGE_DISCOVERY broadcast, ≥1 SME auto-binds dangling without explicit BW task |
+| 6 | Final scorecard `[DEMO12-RESULT]` |
+
+Hand to fresh orch via direct DB insert; monitor via /loop.
+
+**Effort:** M (~250-line targeted prompt + ~10-15 min runtime monitoring).
+
+### 10.8.7 Final doc sync
+
+After all sub-commits land:
+- `docs/POST-COMPACTION-RECOLLECTION.md` §0 marks Phase 10.8 shipped, lists final HEAD, points pending list at DB wipe + real-data onboarding.
+- §17 records insight outcomes (5 promoted / 3 wontfix breakdown) + Phase 10.8 surface summary.
+- `docs/PROMPT-ENHANCEMENTS.md` §2 gains new entries for the prompt promotions (10.8.3) with commit hashes.
+
+**Effort:** S.
+
+### 10.8.8 Sub-phase ordering + commit cadence
+
+```
+10.8.0 plan + recall sync                ← THIS commit, doc-only
+10.8.1 canonical_name partial UNIQUE     ← schema migration runs on MCP boot
+10.8.2 broadcast defensive gate          ← +require_active_agent on read + scanner skip
+10.8.3 prompt promotions                 ← SME + orch prompt updates + smoke
+10.8.4 DEMO11 spec sync                  ← single-line doc fix
+10.8.5 insight triage                    ← single SQL block (no commit unless logging)
+10.8.6 targeted agentic verification     ← docs/oorch-test-prompt-demo12-targeted + run
+10.8.7 final doc sync                    ← recall §0 + §17 + PROMPT-ENHANCEMENTS §2
+```
+
+Each = its own commit + push. Restart MCP after 10.8.1 (schema migration). Restart agent_manager after 10.8.3 (prompts rebuild from disk per spawn — strictly not needed, but cleaner).
+
+### 10.8.9 Schema delta
+
+```sql
+ALTER TABLE components DROP CONSTRAINT IF EXISTS components_canonical_name_key;
+CREATE UNIQUE INDEX IF NOT EXISTS components_canonical_name_active_unique
+  ON components (canonical_name) WHERE status = 'active';
+```
+
+Single idempotent change. Zero data migration.
+
+### 10.8.10 What this is NOT solving
+
+- Post-decom broadcasts surfacing in proxy queue (SQ-2) — needs `agent_runs.deactivated_at`; deferred until evidence shows survivor's wasted-ack work matters.
+- `mutation_assigned_to` decom mid-execution (SQ-3) — bounded by resolver pre-M conflict check; deferred until edge case observed.
+- `/api/components` pagination tiebreaker — adds `, c.id` to ORDER BY only if real-data exposes the rare collision.
+- DB wipe + real-data onboarding — separate scope, executed AFTER 10.8.6 verification passes.
+
+---
+
 ## Phase 11+: Future phases (planned, not started)
 
 **Phase 11 — Phase-flow completion** (orchestrator-driven sweeps):
