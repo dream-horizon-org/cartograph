@@ -193,13 +193,13 @@ Per-plane rules:
   ★ DATASTORES ARE MANDATORY — DO NOT STOP AT THE SERVICE CATALOG ★
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Databases / caches / queues / brokers typically do NOT appear in
-  the provider's "service catalog" section — that view usually only
+  Databases / caches / queues / brokers MIGHT NOT BE PRESENT in
+  the provider's "service catalog" section — that view often only
   lists APM-instrumented APPLICATIONS. The datastores those apps
-  depend on are visible via the SERVICE-DEPENDENCY GRAPH (the
-  "downstream" / "service map" view) or via integration / metric-
-  label surfaces. You MUST walk those secondary surfaces and emit
-  rows for the datastores too.
+  depend on are typically visible via the SERVICE-DEPENDENCY GRAPH
+  (the "downstream" / "service map" view) or via integration /
+  metric-label surfaces. You MUST walk those secondary surfaces
+  and emit rows for the datastores too.
 
   Real-world breadcrumb (DEMO7, 2026-04-27): the iter-telemetry agent
   listed every app from the service catalog but missed the
