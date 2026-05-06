@@ -5044,9 +5044,19 @@ Idempotent. No data loss. Existing rows get empty default; backfill seeds from d
 
 ---
 
-## Phase 10.8: Post-DEMO11 insight bundle (pre-real-data) — PLANNED
+## Phase 10.8: Post-DEMO11 insight bundle (pre-real-data) ✅
 
-**Status (2026-05-05):** PLANNED. DEMO11 ran 16/16 PASS, $86.29, 0 BUG. Eight insights filed during the run + three standing semantic questions surfaced from negative-test verification. Phase 10.8 closes the only insight that warrants a code/schema change before real-data onboarding (#1 canonical_name) plus the defensive 2-LOC gap on broadcast read, promotes three insights into prompt rules, syncs DEMO11 spec to match impl semantics for one tool, and triages the rest. Single targeted agentic verification (NOT a mega demo) confirms the surface before DB wipe + real-data run.
+**Status (2026-05-06):** SHIPPED. Six sub-commits + DB-only triage:
+- `5e616c9` — 10.8.0 plan + recall sync (this doc)
+- `cd3bc20` — 10.8.1 canonical_name partial UNIQUE on active
+- `5d335b0` — 10.8.2 defensive `require_active_agent` on broadcast read + scanner decom skip
+- `8a60df0` — 10.8.3 prompt promotions (SME + orch)
+- `4a9612b` — 10.8.4 DEMO11 spec sync — `delete_attributions_bulk` lenient semantics
+- (DB-only) — 10.8.5 insight triage: 5 promoted, 3 wontfix
+- `9c3e88c` — 10.8.6 targeted DEMO12 prompt — verification PASS 4/4, 0 BUG, ~3 min wall-clock
+- (this commit) — 10.8.7 final doc sync
+
+**DEMO11 ran 16/16 PASS, $86.29, 0 BUG.** Eight insights filed during the run + three standing semantic questions surfaced from negative-test verification. Phase 10.8 closes the only insight that warranted a code/schema change before real-data onboarding (#1 canonical_name) plus the defensive 2-LOC gap on broadcast read, promotes three insights into prompt rules, syncs DEMO11 spec to match impl semantics for one tool, and triages the rest. **DEMO12 targeted agentic verification (NOT a mega demo) confirmed 4/4 PASS** before the planned DB wipe + real-data run.
 
 ### 10.8.0 Insight inventory (DEMO11 — 8 open at planning time)
 

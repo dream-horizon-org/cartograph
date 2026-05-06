@@ -1,4 +1,4 @@
-# Cartograph — Post-Compaction Recollection (2026-05-05, post-DEMO11)
+# Cartograph — Post-Compaction Recollection (2026-05-06, post-Phase-10.8 + DEMO12)
 
 > **Read this FIRST after compaction.** Then `git log --oneline -25`,
 > then the 7 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
@@ -12,7 +12,7 @@
 
 ## 0. WHERE I AM RIGHT NOW (the most important section)
 
-**DEMO11 ran end-to-end: 16/16 PASS, 0 FAIL, 0 BUG. Phase 10.8 (post-DEMO11 insight bundle) PLANNED — closes the canonical_name forever-held architecture gap, defensive 2-LOC on broadcast read, promotes 3 insights to prompts, spec-syncs lenient delete semantics, runs targeted agentic verification (NOT a mega demo). Then DB wipe + real data.**
+**Phase 10.8 SHIPPED 2026-05-06. DEMO12 targeted verification: 4/4 PASS, 0 BUG. All 8 DEMO11 insights triaged (5 promoted, 3 wontfix). System fit for DB wipe + real-data onboarding.**
 
 ### What's done (committed + pushed):
 
@@ -23,23 +23,26 @@
 - **2026-05-05 just before DEMO11:** SME prompt expanded with **service-document standard for `component_doc_md`** (8 required markdown sections: Role / Key Surfaces / Inbound Flows / Outbound Flows / Runtime+Deploy / Storage+State / Operational Notes / Source). DEMO11 Phase 4 gained a doc_md quality metric. Commit `872b407`. Smoke-test caught a `{token}` brace bug, fixed.
 - **DEMO11 ran 2026-05-05** (T+1h47m): 16/16 PASS, 0 FAIL, 0 BUG. Phase 8c.1 was reported PARTIAL initially (admin must send chat to decom; orch can't self-fire); admin closed it inline post-scorecard, flipped PASS. See §17 below for full detail.
 
+### Phase 10.8 — sub-commits (all shipped):
+
+| Sub | Commit | What |
+|---|---|---|
+| 10.8.0 plan + recall sync | `5e616c9` | doc-only |
+| 10.8.1 canonical_name partial UNIQUE | `cd3bc20` | schema + components.py SELECT pre-check + mock_seed ON CONFLICT + 1 new test |
+| 10.8.2 broadcast defensive gate | `5d335b0` | `require_active_agent` on get_unacked_broadcasts + scanner returns 0 for decom + 2 new tests |
+| 10.8.3 prompt promotions | `8a60df0` | SME (split-child auto-resolve + leave-dangling-don't-force-create) + orch (broadcast-driven coordination) |
+| 10.8.4 DEMO11 spec sync | `4a9612b` | `delete_attributions_bulk` lenient semantics in DEMO11 prompt 5b.5 |
+| 10.8.5 insight triage | DB-only | 5 promoted, 3 wontfix |
+| 10.8.6 DEMO12 targeted prompt + run | `9c3e88c` | 4/4 PASS, 0 BUG, ~3 min wall-clock |
+| 10.8.7 final doc sync | THIS commit | §0 + §17 refresh |
+
 ### What's pending (next session — pick up here):
 
-**Phase 10.8 — Post-DEMO11 insight bundle (in progress):**
-1. **10.8.0 plan + recall sync** — ✅ THIS commit (doc-only).
-2. **10.8.1 canonical_name partial UNIQUE on active** — schema + components.py + mock_seed.py + test. ~30 LOC.
-3. **10.8.2 Defensive `require_active_agent` on broadcast read + scanner skip** — ~10 LOC + 2 tests.
-4. **10.8.3 Prompt promotions** — SME (split-child auto-resolve, leave-dangling-don't-force-create) + orch (broadcast-driven coordination) + smoke.
-5. **10.8.4 DEMO11 spec line fix** for `delete_attributions_bulk` lenient semantics.
-6. **10.8.5 Triage 8 insights** — 5 promoted, 3 wontfix, single SQL block.
-7. **10.8.6 Targeted agentic verification** — write `docs/oorch-test-prompt-demo12-targeted` covering ONLY Phase 10.8 surface (~6 phases, 10-15 min). Hand to fresh orch via direct DB insert. Monitor via /loop.
-8. **10.8.7 Final doc sync** — recall §0 + §17 + PROMPT-ENHANCEMENTS §2.
+1. **Wipe DB + workspaces** preserving real-data backup `src/workspaces.bak.20260426-2122/`. Backup current DEMO11 workspaces at `src/workspaces/` to `workspaces.bak.pre-realdata.<ts>/`. Restart 4 daemons. Verify 114 tools.
+2. **Real-data onboarding** — user provides credentials inline via chat. Orch handles intake. /loop monitors as before.
+3. **Real-data validation of 10.8.3 prompt promotions** — split-child auto-resolve + leave-dangling-don't-force-create + broadcast-driven coordination weren't behaviourally verified in DEMO12 (require full materialisation storm). Watch for these patterns in the real-data run.
 
-**After Phase 10.8 verification PASSES:**
-9. **Wipe DB + workspaces** preserving real-data backup `src/workspaces.bak.20260426-2122/`. Backup current DEMO11 workspaces at `src/workspaces/` to `workspaces.bak.pre-realdata.<ts>/`. Restart 4 daemons. Verify 114 tools.
-10. **Real-data onboarding** — user provides credentials inline via chat. Orch handles intake. /loop monitors as before.
-
-See `docs/IMPLEMENTATION-PHASES.md §10.8` for the full plan.
+See `docs/IMPLEMENTATION-PHASES.md §10.8` for the full Phase 10.8 plan + sub-phase rationale.
 
 ### DEMO11 final scorecard location:
 
@@ -52,14 +55,22 @@ Run cost: **$86.29 total** ($62.99 SME, $15.68 orch, $6.19 res, $1.43 iter). 2,3
 
 ---
 
-## 1. Branch + commit state (HEAD as of 2026-05-05, post-DEMO11)
+## 1. Branch + commit state (HEAD as of 2026-05-06, post-Phase-10.8 + DEMO12)
 
 - **Working dir:** `/Users/venkata.manohar/release-agent/docs/service-dependency/cartograph`
 - **Active branch:** `feat/trigger-manager-cartograh-mcp`
-- **HEAD:** `872b407` (SME prompt: doc_md service-document standard + DEMO11 doc_md quality metric). Pushed to origin.
+- **HEAD:** `9c3e88c` pre-this-doc-sync (DEMO12 targeted prompt). After this commit lands, HEAD will be the doc-sync commit.
 
 Recent commits, newest first:
 ```
+9c3e88c Phase 10.8.6: targeted DEMO12 prompt — Phase 10.8 verification
+4a9612b Phase 10.8.4: DEMO11 spec sync — delete_attributions_bulk lenient
+8a60df0 Phase 10.8.3: prompt promotions for DEMO11 tactic_win insights
+5d335b0 Phase 10.8.2: defensive require_active_agent on broadcast read path
+cd3bc20 Phase 10.8.1: canonical_name partial UNIQUE on active
+5e616c9 docs: Phase 10.8 plan — post-DEMO11 insight bundle
+1f47693 docs: recall §17 — proxy matrix fully verified (3 backfill tests)
+467129c docs: post-DEMO11 recall refresh
 872b407 SME prompt: component_doc_md as service-document; DEMO11 verifies doc_md quality
 d43aafc docs: pre-DEMO11 sweep — recollection refresh + DEMO11 mega expansion
 619acdc DEMO11: comprehensive end-to-end verification covering Phase 0-10.7
@@ -673,4 +684,102 @@ Pull live via: `curl -s 'http://localhost:8200/api/insights?status=open' | jq .`
 
 ---
 
-End of recollection. Feed this + the 7 docs + memory file (auto-loaded) and I'll be caught up. Most important sections post-DEMO11: **§0** (current state + next move), **§17** (DEMO11 results + insight backlog), §9 (invariants), §10 (service flow phases).
+End of recollection. Feed this + the 7 docs + memory file (auto-loaded) and I'll be caught up. Most important sections post-Phase-10.8: **§0** (current state + next move = real-data onboarding), **§18** (Phase 10.8 + DEMO12 results), §17 (DEMO11 results + insight backlog), §9 (invariants), §10 (service flow phases).
+
+---
+
+## 18. Phase 10.8 + DEMO12 results (2026-05-06)
+
+### Phase 10.8 — Post-DEMO11 insight bundle SHIPPED
+
+Eight DEMO11 insights triaged, three standing semantic questions surfaced. The bundle closes the only insight that warranted code/schema change before real-data onboarding (canonical_name forever-held), the defensive 2-LOC gap on broadcast read, three prompt promotions, and one DEMO11 spec sync.
+
+**Sub-commits + scope:**
+
+| Sub | Commit | Touchpoints |
+|---|---|---|
+| 10.8.0 plan | `5e616c9` | `IMPLEMENTATION-PHASES.md §10.8` (229 lines) + recall sync |
+| 10.8.1 canonical_name partial UNIQUE | `cd3bc20` | `migrations.py` (drop legacy + add partial UNIQUE INDEX), `components.py::upsert_component` SELECT pre-check, `mock_seed.py` ON CONFLICT predicate, +1 test (active+decom collision allowed) |
+| 10.8.2 broadcast defensive gate | `5d335b0` | `broadcast.py::get_unacked_broadcasts` + `require_active_agent`, `scanners/broadcasts.py::scan` decom skip, +2 tests |
+| 10.8.3 prompt promotions | `8a60df0` | SME (split-child auto-resolve, leave-dangling-don't-force-create), orch (broadcast-driven coordination beats per-agent tasking) |
+| 10.8.4 DEMO11 spec sync | `4a9612b` | `oorch-test-prompt-demo11` Phase 5b.5 — owner-violation strict, missing-id lenient |
+| 10.8.5 insight triage | DB-only | 5 promoted + 3 wontfix; commit-hash citations in triage_note |
+| 10.8.6 DEMO12 targeted | `9c3e88c` | `oorch-test-prompt-demo12-targeted` (290 lines, 5 phases, ~3 min wall-clock) |
+
+### Schema delta
+
+```sql
+ALTER TABLE components DROP CONSTRAINT IF EXISTS components_canonical_name_key;
+CREATE UNIQUE INDEX IF NOT EXISTS components_canonical_name_active_unique
+  ON components (canonical_name) WHERE status = 'active';
+```
+
+Idempotent. Zero data migration. Existing rows: active rows still uniquely-named; decom rows free up their names for future re-launch.
+
+### Insight outcomes (5 promoted, 3 wontfix)
+
+| id (8-char) | source | kind | verdict | citation |
+|---|---|---|---|---|
+| `0c443555` | sme-da948bbe | tool_gap | **promoted** — Phase 10.8.1 schema | partial UNIQUE on active |
+| `0f2352f9` | sme-3788c88f | tactic_win | **promoted** — Phase 10.8.3 SME prompt | split-children inherit auto-resolved unresolved rows |
+| `d6bff7c3` | orch-8b7025e0 | tactic_win | **promoted** — Phase 10.8.3 orch prompt | broadcast-driven coordination |
+| `4b21b236` | sme-f97d2059 | prompt_gap | **promoted** — Phase 10.8.3 SME prompt | leave dangling, don't force-create |
+| `d21c93f1` | orch-8b7025e0 | doc_confusing | **promoted** — Phase 10.8.4 DEMO11 spec | lenient delete_attributions_bulk |
+| `8bd5dae1` | sme-901967e8 | tactic_win | **wontfix** — already in SME prompt | multi-plane temp-name dance |
+| `e67ef425` | sme-f2800e8a | doc_confusing | **wontfix** — rule already in STEP 3 | identifier normalisation |
+| `e27b5a8a` | orch-8b7025e0 | workflow_friction | **wontfix** — synthetic test issue | Phase 8c.1 admin-chat ACL |
+
+### DEMO12 targeted scorecard
+
+```
+══════════════════════════════════════════════════
+DEMO12 — Phase 10.8 TARGETED VERIFICATION
+Run: 2026-05-06T01:50Z / orch-8b7025e0
+Branch: feat/trigger-manager-cartograh-mcp
+Commits verified: cd3bc20 / 5d335b0 / 8a60df0 / 4a9612b
+══════════════════════════════════════════════════
+
+Phase 1 — TOOL SURFACE + SCHEMA LIVE                [PASS]
+Phase 2 — canonical_name partial UNIQUE (10.8.1)    [PASS]
+  2a active+decom collision allowed (id 22d63bc6 inserted) ✓
+  2b active+active still rejected (UNIQUE violation) ✓
+Phase 3 — Defensive broadcast gate (10.8.2)         [PASS]
+  3.2 ValueError on decom caller ✓
+  3.3 scanner returns 0 for decom ✓
+  3.4 active baseline intact ✓
+Phase 4 — delete_attributions_bulk lenient (10.8.4) [PASS]
+  4.2 mixed batch: committed=True, applied=2,
+      rows[2]={deleted:False, reason:'not_found'} ✓
+  4.3 owner-violation strict reject ✓
+
+NET: PASS — 4/4, 0 BUG, 0 NOTE.
+```
+
+### What 10.8.3 (prompt promotions) explicitly did NOT verify in DEMO12
+
+The targeted run was scoped to schema + defensive gate + spec sync — testable in 3-min wall-clock. The 3 prompt promotions require a full materialisation/edge-discovery storm:
+
+- **Split-child auto-resolve** — needs a real split with inherited unresolved rows; verifiable on real-data run when first split happens.
+- **Leave dangling, don't force-create** — needs a multi-SME storm with cross-component dependencies that don't all materialise at once.
+- **Broadcast-driven coordination** — needs orch issuing EDGE_DISCOVERY broadcast + observing SMEs auto-act without per-agent tasks.
+
+Smoke test confirmed all 4 prompts compile clean (sme=95477, iter=32168, orch=30465, res=25605). Behavioural verification deferred to real-data run.
+
+### Live system state at end of Phase 10.8
+
+- HEAD `9c3e88c`, branch `feat/trigger-manager-cartograh-mcp`, pushed.
+- 4 daemons running, 114 tools registered.
+- Schema migrated: `components_canonical_name_active_unique` partial UNIQUE present, legacy `components_canonical_name_key` dropped.
+- DEMO11 + DEMO12 leftover state in DB — wipe before real-data run.
+- Workspaces backed up at:
+  - `src/workspaces.bak.20260426-2122/` (real-data backup, DO NOT TOUCH)
+  - `src/workspaces.bak.pre-demo11.2026-05-05-153601/`
+  - `src/workspaces.bak.pre-demo10.2026-05-05-084850/`
+  - `src/workspaces.bak.pre-demoMEGA.20260504-154756/`
+
+### Next step: real-data onboarding
+
+1. Wipe DB + active workspaces; back up DEMO11/12 state to `workspaces.bak.pre-realdata.<ts>/`.
+2. Restart 4 daemons; verify 114 tools.
+3. User provides credentials inline via chat to fresh orch.
+4. /loop monitors as before. Watch for 10.8.3 prompt-promotion patterns in the wild.
