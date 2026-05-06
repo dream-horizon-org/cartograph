@@ -558,6 +558,137 @@ enforce it via state.
 
 ---
 
+### 2.12 Split-child auto-resolve + leave-dangling-don't-force-create (`8a60df0`, Phase 10.8.3)
+
+**Source insights:** DEMO11 (`0f2352f9` sme-3788c88f tactic_win) +
+(`4b21b236` sme-f97d2059 prompt_gap).
+
+**(a) Split-child auto-resolve.** After `spawn_child_agent`, the child
+inherits parent's unresolved rows whose `resolved_to_component_id`
+falls inside child's slice — AUTO-RESOLVED by the mutation. New SME
+prompt rule: on first wake after `[split-welcome]` BW task, check
+`get_unresolved(your_component_id)` and you'll typically find
+inherited rows already resolved=TRUE. Do NOT re-run cosine ladder on
+those. Spend wake budget on NEW evidence in your slice's code paths
+(Step 2-4 on freshly-owned files), not rework on parent's already-bound
+stuff.
+
+**(b) Leave dangling, don't force-create.** When `vector_search`
+returns no useful match for a hostname / endpoint / topic, the CORRECT
+action is `upsert_edge_outbound(to=NULL)` + `insert_unresolved(...)`.
+Do NOT call `upsert_component` to create the missing target yourself
+— that's another SME's job (their iterator hasn't enumerated yet, or
+their plane is pending). Force-creating a component you don't actually
+own pollutes ownership semantics + creates orphan slots.
+
+Reinforced in STEP 3 (outbound discovery) ladder. Behavioural verification
+deferred to real-data run (requires a multi-SME storm with cross-component
+dependencies that don't all materialise at once).
+
+### 2.13 Broadcast-driven coordination beats per-agent tasking (`8a60df0`, Phase 10.8.3)
+
+**Source insight:** DEMO11 (`d6bff7c3` orch tactic_win).
+
+**Symptom:** orch was sending per-agent BW tasks for routine phase-wide
+work (e.g. "bind your danglings") → N round-trips per agent, high
+coordination overhead.
+
+**Empirical find:** DEMO11 showed payments-svc had 4 `outgoing_bound`
+edges bound **via broadcast alone**, before any explicit per-agent BW
+task. SMEs autonomously acted on the broadcast as expected.
+
+**Rule promoted to orch prompt:** for routine phase work uniformly
+applicable across SMEs (bind dangling outbounds, hygiene cycle
+`get_unmatched_callers` / `get_orphan_catalogs`, dedup post-merge
+edges), prefer `send_broadcast(persistent=True)` with concrete steps.
+Reserve per-agent BW tasks for:
+- stragglers (>10 wakes without progress on the broadcast contract),
+- edge cases (specific SME has a known blocker),
+- one-off corrections (admin reports a specific SME's component is wrong).
+
+### 2.14 Sleep rewrite — yield over sleep in the tricky case (`13531d7`, Phase 10.10)
+
+**Source:** Admin feedback during DEMO11 observation: *"your broadcast
+is faulty and misleading — why are you pointlessly putting yourself to
+sleep?"* The old "LAST RESORT" framing was too abstract; agents still
+sleep-waited for upstream work.
+
+**New framing (SME + iterator + orch prompts; resolver untouched as
+singleton-serial is fine as-is):**
+
+1. Failure mode first: *"Stop pointlessly putting yourself to sleep.
+   Broadcast is faulty and misleading."*
+2. Default behaviour list: after-task / after-hydrate / after-correction
+   / waiting-for-upstream → YIELD (end the response).
+3. **The tricky case** — multiple things blocked on you, answering one
+   needs another to progress first → YIELD, not sleep. Scanner cycles
+   often; the moment the upstream item progresses you'll be re-woken
+   with the unblocked context. Sleeping locks you out of that re-wake.
+4. Narrow extreme case: external party prompted twice + queue genuinely
+   empty → `sleep_self(300-600)` MAX. Never >3600s.
+
+Behavioural verification deferred to real-data run. Watch for drop in
+pointless `sleep_self` calls + no sleeps >3600s.
+
+### 2.15 Telemetry datastore mandate (`13531d7` + `da49187`, Phase 10.10)
+
+**Source:** DEMO7 (2026-04-27) incident — iter-telemetry listed every
+app from Last9's service catalog but missed feeds-aggregator-v2's MySQL
++ Redis. Those datastores were in the dependency-graph view
+(downstream of feeds-v2's service node), just not in the catalog.
+Admin had to chase multiple times: *"did you find feeds-v2 mysql and
+redis... did iterator list them?"*
+
+**Fix:** front-loaded ★ block at top of iterator telemetry-plane
+section:
+
+```
+★ DATASTORES ARE MANDATORY — DO NOT STOP AT THE SERVICE CATALOG ★
+
+Databases / caches / queues / brokers MIGHT NOT BE PRESENT in the
+provider's "service catalog" section. They are typically visible via
+the SERVICE-DEPENDENCY GRAPH or integration / metric-label surfaces.
+
+If you emit ZERO datastore rows on a real-data plane, you almost
+certainly missed surface 3 below — re-walk it.
+```
+
+Full surface-3 walk-through (Datadog DBM / New Relic Infra / Honeycomb
+spans / Last9 deps) was already in the prompt; Phase 10.10 front-loads
+the imperative so it's impossible to skip. Initial wording
+("do NOT appear") softened to "MIGHT NOT BE PRESENT" (`da49187`) — the
+mandate is clearer, the breadcrumb intact.
+
+Behavioural verification deferred to real-data run.
+
+### 2.16 Bedrock model-id env resolution (`c04f7c9`, Phase 10.11)
+
+**Symptom:** hard-coded Anthropic-API aliases (`claude-opus-4-6`,
+`claude-sonnet-4-6`) rejected by AWS Bedrock with *"provided model
+identifier is invalid"* — Bedrock needs inference profile ids like
+`us.anthropic.claude-opus-4-7[1m]`. Without fix, entire agent fleet
+fails to spawn on Bedrock.
+
+**Fix:** new env-sourced constants in `shared/config.py`:
+```python
+MODEL_OPUS = os.getenv("CARTOGRAPH_MODEL_OPUS",
+    os.getenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-6"))
+MODEL_SONNET = os.getenv("CARTOGRAPH_MODEL_SONNET",
+    os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6"))
+```
+
+Precedence: project-specific env → Claude Code's own `ANTHROPIC_DEFAULT_*_MODEL`
+→ native Anthropic API alias fallback. All 4 agent type files rewired
+to reference `config.MODEL_OPUS` / `config.MODEL_SONNET`.
+
+**SME lanes bumped 4 → 8** in the same commit (total subprocess
+concurrency 8 → 12).
+
+Bedrock dry-run verified opus-4-7 + sonnet-4-6 + opus-4-7+effort=medium
+all resolve correctly. 542/542 mcp_tools tests green.
+
+---
+
 ## 3. Open gaps — diagnosed but not yet shipped
 
 ### 3.1 SME materialisation completeness (real-data evidence, 2026-04-27)

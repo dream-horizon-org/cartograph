@@ -1,18 +1,16 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-04-29):** Phases 0 → 8 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **Token optimisation Rounds 1, 2, 3 ALL SHIPPED 2026-04-29.** **Phase 8 (Token Optimisation + Gap Closings) ✅ SHIPPED 2026-04-29** — 7 sub-batches across 7 commits closing the 4-row-type corrective delete surface, finishing Round-4 bulks, eliminating the `notify.py` PostToolUse race, making `insert_unresolved` idempotent. Tool count 89 → 107 (+18).
+**Status (2026-05-06):** Phases 0 → 10.11 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **DEMO11 ran 16/16 PASS** (2026-05-05), **DEMO12 targeted Phase-10.8 verification 4/4 PASS** (2026-05-06). Ready for real-data onboarding.
 
-Most recent (2026-04-26 → 2026-04-29):
-- 7.4 (catalogs first-class), 7.4.2 (flows reference catalogs), 7.4.3/4/5/6 (DEMO7-round-1 fixes + doc syncs).
-- 7.4.7 (per-type model + admin UI plane source from RCA→resources + agent-row plane symbols + workspace-as-memory + code-repo clone-mandatory + §2.8 mass prompt infusion).
-- 7.4.8 (WebGL GPU memory leak fix v1 — geometry/material caches + `/api/clientlog` + server log piping).
-- 7.4.9 (Communications tab — surface decommissioned agents + plane symbols on rows + component-name filter).
-- 7.4.10 (Graph crash root-cause fix v2 — pause RAF when tab hidden + visibilitychange + wheel null-deref + idempotent ctx-lost).
-- **7.4.11** (`delete_edge` MCP tool + SME identifier normalisation rule + post-merge EDGE DEDUP step) — commits `72b4a93`, `84b0941`, `bc69c23`.
-- **Parallel tool calls** (commits `5b3144d`, `c7f5fd5`) — removed "Call tools sequentially" prompt rule, shipped `== BATCH + PARALLEL TOOL CALLS ==` block in shared mission. Targets the 0.08% pre-fix parallel-tool-call rate.
+Most recent (2026-05-05 → 2026-05-06):
+- **10.7** (`description` column separate from `doc_md` + `vector_search` filters + `exclude_self` + workspace-local doc_md) — 8 sub-commits ending at `e7ce669`.
+- **10.8** (post-DEMO11 insight bundle — canonical_name partial UNIQUE on active, defensive broadcast gate, 3 prompt promotions, DEMO11 spec sync, 8 insights triaged 5/3) — 7 sub-commits ending at `2f54a1e`. DEMO12 verified via `9c3e88c`.
+- **10.9** (admin UI catalog drill-down rebuild — collapsible `<details>` sections + paginated tables, 20 rows/page) — commit `ca7d964`.
+- **10.10** (sleep semantics rewrite across sme/iter/orch + telemetry datastore mandate with DEMO7 breadcrumb) — commits `13531d7` + `da49187`.
+- **10.11** (Bedrock-compatible model ids via `config.MODEL_OPUS` / `MODEL_SONNET` env constants + SME lanes 4 → 8) — commit `c04f7c9`.
 
-- **89 MCP tools** registered (Phase 7.4.11 added `delete_edge`; Phase 7.4.12 added 3 bulk write variants). Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log`.
-- Services running under the active Claude Code session: Postgres (docker), trigger_management.main (logs → `/tmp/cartograph-logs/triggers.log`), cartograph_mcp.server :8100 (`mcp.log`), admin_ui.server :8200 (`admin_ui.log`), agent_management `main` (`agents.log`), browser-side errors (`browser.log` via `/api/clientlog`). 8 concurrent lane workers (1 orch + 2 iter + 1 res + 4 sme) + stale watchdog.
+- **114 MCP tools** registered (Phase 10.3 added 6 deterministic search tools; Phase 10.7+ unchanged surface). Verify with `grep "tools registered" /tmp/cartograph-logs/mcp.log`.
+- Services running under the active Claude Code session: Postgres (docker), trigger_management.main (logs → `/tmp/cartograph-logs/triggers.log`), cartograph_mcp.server :8100 (`mcp.log`), admin_ui.server :8200 (`admin_ui.log`), agent_management `main` (`agents.log`), browser-side errors (`browser.log` via `/api/clientlog`). **12 concurrent lane workers** (1 orch + 2 iter + 1 res + 8 sme) + stale watchdog. **Model routing via Bedrock** when `CLAUDE_CODE_USE_BEDROCK=1` set — inference profile ids resolve through `ANTHROPIC_DEFAULT_{OPUS,SONNET}_MODEL`.
 - See `docs/PROMPT-ENHANCEMENTS.md` for the active prompt-quality backlog (§2 shipped, §3 open gaps, §4 operational nudges + broadcast log + chat log).
 
 ---
@@ -5280,6 +5278,254 @@ Single idempotent change. Zero data migration.
 - `mutation_assigned_to` decom mid-execution (SQ-3) — bounded by resolver pre-M conflict check; deferred until edge case observed.
 - `/api/components` pagination tiebreaker — adds `, c.id` to ORDER BY only if real-data exposes the rare collision.
 - DB wipe + real-data onboarding — separate scope, executed AFTER 10.8.6 verification passes.
+
+---
+
+## Phase 10.9: Admin UI catalog drill-down rebuild — collapsibles + paginated tables ✅
+
+**Status (2026-05-06):** SHIPPED. Single commit `ca7d964`. Admin UI post-DEMO11 polish.
+
+### Motivation
+
+Catalog tab drill-down was a flat `<ul>` wall — all sections (doc, slice, attributions, edges, flows) expanded at once, no pagination. Reading a component with 50+ attributions + 20+ edges + 10+ flows was visually impossible. Phase 10.9 restructures the drill-down into collapsible `<details>` sections + client-side paginated tables (20 rows/page).
+
+### What changed
+
+**`src/admin_ui/static/app.js` — `_renderComponentDetailHtml` rewrite:**
+
+Section layout (top → bottom):
+1. Header — canonical_name + display_name + type/status/plane pills
+2. Description — Phase 10.7 italic blue-bordered block (always visible)
+3. `<details open>` Doc — marked-rendered doc_md
+4. `<details>` Source slice — structured per resource_id
+5. `<details>` Attributions (N) — paginated table (plane / type / identifier / conf / evidence-snippet)
+6. `<details>` Catalog (N) — paginated table (kind / identifier / conf)
+7. `<details>` Bindings in (N) — paginated table (type / identifier / from / conf)
+8. `<details>` Bindings out (N) — paginated table (type / identifier / to / conf)
+9. `<details>` Dangling out (N) — paginated table
+10. `<details>` Flows (N) — grouped by incoming catalog
+11. `<details>` Source resources (N) — flat list with plane pill
+
+**New helper functions:**
+- `_detailsSection({id, label, open, body})` — wrap body in styled `<details><summary>` with rotating chevron.
+- `_mountPaginatedTable($container, rows, columns, opts)` — client-side pagination closure (20 rows/page, Prev/Next buttons, page state per mount). No globals.
+- `_renderSourceSliceForDrilldown(slice)` — per-resource structured render (mirrors graph-hover shape, works with raw drilldown data).
+- `_renderFlowGroupsForDrilldown(flows)` — groups flows by `incoming_catalog_id`.
+- `_mountCatalogDrilldownTables(container, data)` — mounts all 5 paginated tables after HTML is inserted into DOM.
+
+**`src/admin_ui/static/style.css` — new `.cat-*` classes:**
+- `.cat-detail-head`, `.cat-detail-sub`, `.cat-detail-planes` — header block.
+- `.cat-desc` — italic blue-bordered description (`border-left: 3px solid #58a6ff`).
+- `.cat-section`, `.cat-section-summary`, `.cat-section-body` — collapsible dropdowns with `▶` → `▼` rotating chevron.
+- `.cat-table` + pager styling — paginated table layout.
+
+Cache-bust: v=63 → v=64.
+
+### Files touched
+- `src/admin_ui/static/app.js` (+296 / -59 lines)
+- `src/admin_ui/static/style.css` (+187 lines — new section after line 1320)
+- `src/admin_ui/static/index.html` (cache-bust only)
+
+### Verification
+- `node --check src/admin_ui/static/app.js` passes (JS parses).
+- `/api/component/:id/drilldown` returns expected shape on live DB.
+- Visual verification: hard-refresh Cmd+Shift+R, click any catalog component row.
+
+**Effort:** S (~3 hours including CSS polish + verification).
+
+---
+
+## Phase 10.10: Sleep semantics rewrite + telemetry datastore mandate ✅
+
+**Status (2026-05-06):** SHIPPED. Two commits: `13531d7` (rewrite) + `da49187` (wording softening).
+
+### Motivation
+
+Two admin observations from DEMO11 + pre-real-data review:
+
+1. **Sleep rule framing was wrong.** Old text said "LAST RESORT" with When-NOT / When-IS bullets — agents still called `sleep_self(3600)` when they had nothing to do + called it as a "wait for upstream" pattern. Admin's verbatim feedback: *"your broadcast is faulty and misleading — why are you pointlessly putting yourself to sleep?"* The rule missed the **tricky case** — multiple things blocked on you, answering one needs another to progress first — where agents default to sleep but should yield.
+
+2. **Telemetry iterator missed datastores.** DEMO7 (2026-04-27) breadcrumb: iter-telemetry listed every app from the service catalog but missed feeds-aggregator-v2's MySQL + Redis. The datastores were in the **dependency-graph view** (downstream of feeds-v2's service node), not the catalog. Admin had to chase multiple times: *"did you find feeds-v2 mysql and redis... did iterator list them?"*
+
+### Sleep rewrite (sme.py + iterator.py + orchestrator.py)
+
+New framing — failure mode FIRST, then the tricky case, then the narrow extreme case:
+
+```
+== SLEEP — RARE EXTREME-CASE TOOL, NOT A DEFAULT ==
+sleep_self exists for ONE narrow case: you have nothing left to do until
+an EXTERNAL party (admin or a time-bound external dependency) responds,
+AND you've already prompted them a couple of times to no avail.
+
+Stop pointlessly putting yourself to sleep. The trigger scanner re-wakes
+you on actual work; yielding without sleeping does NOT burn cycles.
+Sleeping does NOT save cost vs yielding — it just blocks scanner-driven
+re-wakes until your sleep window expires. Long sleeps are admin's
+explicit complaint: "your broadcast is faulty and misleading."
+
+DEFAULT BEHAVIOUR — just yield (end the response):
+- After finishing a task. Yield.
+- After hydrating your component. Yield.
+- "Waiting for things to come back" — peer consolidation, target
+  component to materialise, resolver to weigh in. Yield.
+
+THE TRICKY CASE — multiple things are blocked on you, but answering
+ONE requires another to progress first.
+  → Even here: just YIELD. Don't sleep. Scanner cycles often; the moment
+    the upstream item progresses you'll be re-woken with the unblocked
+    context. Sleeping locks you out of that re-wake.
+
+WHEN sleep_self IS appropriate (rare, EXTREME case):
+- Raised a blocker that's genuinely admin-bound or external-bound.
+- Prompted twice with concrete requests, no response.
+- Queue genuinely empty (no tasks, consolidations, clarifications,
+  hygiene work, investigation you could be doing).
+Then: sleep_self(300-600) (5-10 min) MAX. Admin chat will wake you.
+Never sleep_self(86400) (24h); never >3600 (1h).
+```
+
+### Telemetry datastore mandate (iterator.py)
+
+Front-loaded block at top of the telemetry-plane section:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+★ DATASTORES ARE MANDATORY — DO NOT STOP AT THE SERVICE CATALOG ★
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Databases / caches / queues / brokers MIGHT NOT BE PRESENT in the
+provider's "service catalog" section — that view often only lists
+APM-instrumented APPLICATIONS. The datastores those apps depend on
+are typically visible via the SERVICE-DEPENDENCY GRAPH (the
+"downstream" / "service map" view) or via integration / metric-label
+surfaces. You MUST walk those secondary surfaces and emit rows for
+the datastores too.
+
+Real-world breadcrumb (DEMO7, 2026-04-27): iter-telemetry listed
+every app from the service catalog but missed feeds-aggregator-v2's
+MySQL + Redis. Admin had to chase multiple times. The MySQL + Redis
+WERE in the dependency-graph view (downstream of feeds-v2's service
+node), just not in the catalog. Don't repeat this. If you emit ZERO
+datastore rows on a real-data plane, you almost certainly missed
+surface 3 below — re-walk it.
+```
+
+Surface 3 walk-through (Datadog DBM / New Relic Infra / Honeycomb spans / Last9 deps) was already in the prompt; Phase 10.10 front-loads the imperative so it's impossible to skip.
+
+**Wording softening (`da49187`):** initial version said "databases typically do NOT appear in..." — too absolute. Changed to "MIGHT NOT BE PRESENT" / "often only lists" / "typically visible" to preserve the mandate without overclaiming.
+
+### Files touched
+- `src/agent_management/agent_types/sme.py` (sleep block rewrite)
+- `src/agent_management/agent_types/iterator.py` (sleep + datastore mandate)
+- `src/agent_management/agent_types/orchestrator.py` (sleep block rewrite)
+
+### Verification
+- Smoke test (all 4 prompts compile clean):
+  ```
+  sme : 96469   (was 95477, +992)
+  iter: 33937   (was 32168, +1769 — datastore block)
+  orch: 31117   (was 30465, +652)
+  res : 25605   (unchanged)
+  ```
+- No unit tests (prompt-only edits).
+
+### What 10.10 does NOT verify
+- Behavioural change on datastore discovery — requires a real-data telemetry iterator run with a dependency graph.
+- Sleep pattern change — requires observation over a full materialisation storm.
+
+Both deferred to real-data onboarding.
+
+**Effort:** S (~2 hours — rewrite + smoke + wording iteration).
+
+---
+
+## Phase 10.11: Bedrock-compatible model ids + SME lanes 4 → 8 ✅
+
+**Status (2026-05-06):** SHIPPED. Single commit `c04f7c9`.
+
+### Motivation
+
+Dry-run on AWS Bedrock (`CLAUDE_CODE_USE_BEDROCK=1`) revealed hard-coded Anthropic-API model aliases in agent type configs fail with "provided model identifier is invalid":
+- `claude-opus-4-6` → rejected (Bedrock wants `us.anthropic.claude-opus-4-7[1m]`)
+- `claude-sonnet-4-6` → rejected (Bedrock wants `us.anthropic.claude-sonnet-4-6[1m]`)
+
+Without this fix, the whole agent fleet fails to spawn on Bedrock setups.
+
+Parallel concern: SME concurrency cap of 4 was chosen conservatively in Phase 2.1 (2026-04-24). At 8 SMEs actively materialising, the rate is good; 16 SMEs causes 12-lane contention. 8 lanes is the sweet spot for typical real-data runs.
+
+### What changed
+
+**`src/shared/config.py`** — new env-sourced model constants:
+```python
+MODEL_OPUS = os.getenv(
+    "CARTOGRAPH_MODEL_OPUS",
+    os.getenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-6"),
+)
+MODEL_SONNET = os.getenv(
+    "CARTOGRAPH_MODEL_SONNET",
+    os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6"),
+)
+```
+
+Precedence:
+1. `CARTOGRAPH_MODEL_{OPUS,SONNET}` (project-specific override)
+2. `ANTHROPIC_DEFAULT_{OPUS,SONNET}_MODEL` (Claude Code's own env — single source of truth)
+3. Hard-coded Anthropic API alias (native API fallback for non-Bedrock setups)
+
+On Bedrock, Claude Code sets `ANTHROPIC_DEFAULT_*_MODEL` to inference profile IDs (e.g. `us.anthropic.claude-opus-4-7[1m]`). Our agents inherit these automatically.
+
+**SME lanes:** `CARTOGRAPH_INVOKE_LANES_SME` default changed `4 → 8`. Total concurrent `claude -p` subprocesses: 8 → 12 (orch 1 + iter 2 + res 1 + sme 8).
+
+**Agent type wiring** — all 4 files now import `shared.config` and reference `config.MODEL_OPUS` / `config.MODEL_SONNET`:
+- `resolver.py` — `model=config.MODEL_OPUS, effort="medium"`
+- `orchestrator.py` — `model=config.MODEL_SONNET`
+- `sme.py` — `model=config.MODEL_SONNET` (was default)
+- `iterator.py` — `model=config.MODEL_SONNET` (was default)
+
+### Bedrock dry-run verification (pre-commit)
+
+```bash
+$ claude -p --model "us.anthropic.claude-opus-4-7[1m]"   "..."   → opus47 ok
+$ claude -p --model "us.anthropic.claude-sonnet-4-6[1m]" "..."   → sonnet46 ok
+$ claude -p --model "us.anthropic.claude-opus-4-7[1m]" --effort medium "..." → effort ok
+```
+
+All 3 profile ids resolve correctly. `--effort medium` works on opus-4-7.
+
+### Test verification
+- 542/542 `tests/mcp_tools/` green.
+- Config smoke:
+  ```
+  MODEL_OPUS   = us.anthropic.claude-opus-4-7[1m]
+  MODEL_SONNET = us.anthropic.claude-sonnet-4-6[1m]
+  INVOKE_LANES_SME = 8
+  total lanes = 12
+  ```
+
+### Model resolution matrix (post-10.11)
+
+| Agent | `config.model` resolves to (Bedrock env) | Effort |
+|---|---|---|
+| orchestrator | `us.anthropic.claude-sonnet-4-6[1m]` | — |
+| resolver | `us.anthropic.claude-opus-4-7[1m]` (was 4-6) | medium |
+| iterator | `us.anthropic.claude-sonnet-4-6[1m]` | — |
+| sme | `us.anthropic.claude-sonnet-4-6[1m]` | — |
+
+**Note on resolver:** originally designed for opus-4-6; on Bedrock now runs on opus-4-7. Newer/better model — upgrade, not regression. Pin to 4-6 via `CARTOGRAPH_MODEL_OPUS=us.anthropic.claude-opus-4-6-v1:0` if needed.
+
+### Files touched
+- `src/shared/config.py` (+17 lines, env constants + lane default bump)
+- `src/agent_management/agent_types/orchestrator.py` (import + reference)
+- `src/agent_management/agent_types/resolver.py` (import + reference)
+- `src/agent_management/agent_types/iterator.py` (import + reference + explicit model)
+- `src/agent_management/agent_types/sme.py` (import + reference + explicit model)
+
+### What 10.11 does NOT solve
+- Haiku routing (none of our agents use haiku; if we add a haiku-tier agent in future, add `MODEL_HAIKU` constant mirroring the pattern).
+- Effort flag on sonnet (CLI doesn't accept `--effort` on sonnet; orch + iter + sme don't pass it).
+- Native-API-only fallback testing (verified only on Bedrock in this run; native API path keeps the Anthropic aliases via the fallback default).
+
+**Effort:** S (~1 hour incl. dry-runs + test).
 
 ---
 

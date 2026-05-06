@@ -1,4 +1,4 @@
-# Cartograph — Post-Compaction Recollection (2026-05-06, post-Phase-10.8 + DEMO12)
+# Cartograph — Post-Compaction Recollection (2026-05-06, post-Phase-10.11 + Bedrock config)
 
 > **Read this FIRST after compaction.** Then `git log --oneline -25`,
 > then the 7 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
@@ -12,7 +12,7 @@
 
 ## 0. WHERE I AM RIGHT NOW (the most important section)
 
-**Phase 10.8 SHIPPED 2026-05-06. DEMO12 targeted verification: 4/4 PASS, 0 BUG. All 8 DEMO11 insights triaged (5 promoted, 3 wontfix). System fit for DB wipe + real-data onboarding.**
+**Phases 10.8 → 10.11 SHIPPED 2026-05-06. DEMO12 targeted: 4/4 PASS. DEMO11 insights all triaged. Admin UI catalog drill-down rebuilt. Sleep + telemetry-datastore prompt rewrites shipped. Bedrock-compatible model ids wired with SME lanes 4→8 (total concurrency 12). System fit for DB wipe + real-data onboarding.**
 
 ### What's done (committed + pushed):
 
@@ -34,15 +34,28 @@
 | 10.8.4 DEMO11 spec sync | `4a9612b` | `delete_attributions_bulk` lenient semantics in DEMO11 prompt 5b.5 |
 | 10.8.5 insight triage | DB-only | 5 promoted, 3 wontfix |
 | 10.8.6 DEMO12 targeted prompt + run | `9c3e88c` | 4/4 PASS, 0 BUG, ~3 min wall-clock |
-| 10.8.7 final doc sync | THIS commit | §0 + §17 refresh |
+| 10.8.7 final doc sync | `2f54a1e` | §0 + §17 refresh |
+
+### Phase 10.9 / 10.10 / 10.11 — shipped post-Phase-10.8 (this session):
+
+| Sub | Commit | What |
+|---|---|---|
+| 10.9 admin UI catalog drill-down | `ca7d964` | Collapsible `<details>` sections + paginated tables (20/page); description always-visible blue-bordered; cache-bust v=64 |
+| 10.10 sleep rewrite + datastore mandate | `13531d7` | SLEEP rewritten in sme/iter/orch prompts (yield-over-sleep doctrine); ★ DATASTORES MANDATORY ★ block in iterator telemetry section with DEMO7 feeds-v2 breadcrumb |
+| 10.10 datastore wording softening | `da49187` | "MIGHT NOT BE PRESENT" not "do NOT appear" — softer framing, mandate intact |
+| 10.11 Bedrock model ids + SME lanes 8 | `c04f7c9` | `config.MODEL_OPUS` / `MODEL_SONNET` env constants (sources `ANTHROPIC_DEFAULT_*_MODEL`); all 4 agent types rewired; `INVOKE_LANES_SME` 4→8 (total 12) |
 
 ### What's pending (next session — pick up here):
 
-1. **Wipe DB + workspaces** preserving real-data backup `src/workspaces.bak.20260426-2122/`. Backup current DEMO11 workspaces at `src/workspaces/` to `workspaces.bak.pre-realdata.<ts>/`. Restart 4 daemons. Verify 114 tools.
+1. **Wipe DB + workspaces** preserving real-data backup `src/workspaces.bak.20260426-2122/`. Backup current DEMO11/12 workspaces at `src/workspaces/` to `workspaces.bak.pre-realdata.<ts>/`. Restart 4 daemons. Verify 114 tools.
 2. **Real-data onboarding** — user provides credentials inline via chat. Orch handles intake. /loop monitors as before.
-3. **Real-data validation of 10.8.3 prompt promotions** — split-child auto-resolve + leave-dangling-don't-force-create + broadcast-driven coordination weren't behaviourally verified in DEMO12 (require full materialisation storm). Watch for these patterns in the real-data run.
+3. **Real-data validation of Phase 10.8.3 + 10.10 prompt changes:**
+   - Split-child auto-resolve + leave-dangling-don't-force-create + broadcast-driven coordination (10.8.3) — not behaviourally verified in DEMO12 (require full materialisation storm).
+   - Sleep rewrite (10.10) — watch for fewer pointless sleep_self calls, no long-duration sleeps.
+   - Datastore mandate (10.10) — watch for non-zero datastore rows emitted by iter-telemetry on real-data plane.
+4. **Monitor Bedrock cost via AWS side** — spend no longer routes through Anthropic API billing.
 
-See `docs/IMPLEMENTATION-PHASES.md §10.8` for the full Phase 10.8 plan + sub-phase rationale.
+See `docs/IMPLEMENTATION-PHASES.md §10.8 / §10.9 / §10.10 / §10.11` for full rationale per sub-phase.
 
 ### DEMO11 final scorecard location:
 
@@ -55,14 +68,20 @@ Run cost: **$86.29 total** ($62.99 SME, $15.68 orch, $6.19 res, $1.43 iter). 2,3
 
 ---
 
-## 1. Branch + commit state (HEAD as of 2026-05-06, post-Phase-10.8 + DEMO12)
+## 1. Branch + commit state (HEAD as of 2026-05-06, post-Phase-10.11 + Bedrock config)
 
 - **Working dir:** `/Users/venkata.manohar/release-agent/docs/service-dependency/cartograph`
 - **Active branch:** `feat/trigger-manager-cartograh-mcp`
-- **HEAD:** `9c3e88c` pre-this-doc-sync (DEMO12 targeted prompt). After this commit lands, HEAD will be the doc-sync commit.
+- **HEAD:** `c04f7c9` pre-this-doc-sync (Bedrock config + SME lanes 8). After this commit lands, HEAD will be the doc-sync commit.
+- **Runtime:** AWS Bedrock (`CLAUDE_CODE_USE_BEDROCK=1`); models resolve via `ANTHROPIC_DEFAULT_{OPUS,SONNET}_MODEL` (opus-4-7[1m] / sonnet-4-6[1m]).
 
 Recent commits, newest first:
 ```
+c04f7c9 config: Bedrock-compatible model ids + SME lanes 4→8
+da49187 prompts: soften datastore-mandate wording — "might not be" not "do NOT"
+13531d7 prompts: rewrite SLEEP semantics + telemetry datastore mandate
+ca7d964 Phase 10.9: admin UI catalog drill-down rebuild — collapsibles + tables
+2f54a1e Phase 10.8.7: final doc sync — recall §0 + §18 + IMPL-PHASES status
 9c3e88c Phase 10.8.6: targeted DEMO12 prompt — Phase 10.8 verification
 4a9612b Phase 10.8.4: DEMO11 spec sync — delete_attributions_bulk lenient
 8a60df0 Phase 10.8.3: prompt promotions for DEMO11 tactic_win insights
@@ -782,4 +801,88 @@ Smoke test confirmed all 4 prompts compile clean (sme=95477, iter=32168, orch=30
 1. Wipe DB + active workspaces; back up DEMO11/12 state to `workspaces.bak.pre-realdata.<ts>/`.
 2. Restart 4 daemons; verify 114 tools.
 3. User provides credentials inline via chat to fresh orch.
-4. /loop monitors as before. Watch for 10.8.3 prompt-promotion patterns in the wild.
+4. /loop monitors as before. Watch for 10.8.3 + 10.10 prompt-promotion patterns in the wild.
+
+---
+
+## 19. Phase 10.9 + 10.10 + 10.11 results (2026-05-06, post-Phase-10.8)
+
+Three small ship-before-real-data batches that landed after the §18 state:
+
+### 10.9 — Admin UI catalog drill-down rebuild (`ca7d964`)
+
+Flat `<ul>` wall → collapsible `<details>` sections + client-side paginated tables. 11 sections top-to-bottom: header → description (always visible) → doc (open by default) → slice / attributions / catalog / bindings-in / bindings-out / dangling-out / flows / source-resources (all collapsible, 20 rows/page).
+
+Helpers added to `app.js`: `_detailsSection`, `_mountPaginatedTable` (closure per mount, no globals), `_renderSourceSliceForDrilldown`, `_renderFlowGroupsForDrilldown`, `_mountCatalogDrilldownTables`. New `.cat-*` CSS classes. Cache-bust v=63→v=64.
+
+Graph-tab hover popup untouched — only Catalog drill-down rebuilt. JS syntactically parses (`node --check`). `/api/component/:id/drilldown` returns expected shape on live DB.
+
+### 10.10 — Sleep rewrite + telemetry datastore mandate (`13531d7` + `da49187`)
+
+**Sleep (sme/iter/orch prompts).** Old framing "LAST RESORT" with When-NOT/When-IS bullets was too abstract; agents still sleep-waited for upstream work. New framing:
+1. Failure mode front: "Stop pointlessly putting yourself to sleep. Broadcast is faulty and misleading."
+2. Default behaviour list (after-task / after-hydrate / after-correction / waiting-for-upstream → YIELD).
+3. **The tricky case** — multiple things blocked on you, one needs another to progress → YIELD, not sleep.
+4. Narrow extreme case: prompted-twice-external-party + queue-empty → sleep_self(300-600s) MAX.
+
+Resolver prompt intentionally unchanged (resolver reasoning is singleton-serial, fine as-is).
+
+**Datastore mandate (iterator.py).** Front-loaded ★ block at top of telemetry-plane section. Names DEMO7 (2026-04-27) feeds-aggregator-v2 MySQL + Redis incident — admin chased multiple times. Bright-line rule: *"If you emit ZERO datastore rows on a real-data plane, you almost certainly missed surface 3 below — re-walk it."*
+
+Wording iteration (`da49187`): initial version said "databases typically do NOT appear in..." — too absolute. Softened to "MIGHT NOT BE PRESENT" + "often only" + "typically visible". Mandate + breadcrumb intact.
+
+**Behavioural verification:** deferred to real-data run. Smoke tests confirmed all 4 prompts compile clean (sme 96469, iter 33937, orch 31117, res 25605).
+
+### 10.11 — Bedrock-compatible model ids + SME lanes 4 → 8 (`c04f7c9`)
+
+**Problem:** hard-coded Anthropic-API aliases (`claude-opus-4-6`, `claude-sonnet-4-6`) rejected by Bedrock with "provided model identifier is invalid" — needs inference profile ids like `us.anthropic.claude-opus-4-7[1m]`. Without fix, entire agent fleet fails on Bedrock.
+
+**Fix:** new env-sourced constants in `shared/config.py`:
+```python
+MODEL_OPUS = os.getenv(
+    "CARTOGRAPH_MODEL_OPUS",
+    os.getenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-6"),
+)
+MODEL_SONNET = os.getenv(
+    "CARTOGRAPH_MODEL_SONNET",
+    os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6"),
+)
+```
+
+Precedence: project-specific env → Claude Code's own env → hard-coded fallback. On Bedrock with `CLAUDE_CODE_USE_BEDROCK=1`, Claude Code sets `ANTHROPIC_DEFAULT_*_MODEL` to profile ids automatically; our agents inherit.
+
+All 4 agent type files rewired: `resolver.py`, `orchestrator.py`, `sme.py`, `iterator.py` all import `shared.config` and reference `config.MODEL_OPUS` / `config.MODEL_SONNET`.
+
+**SME lanes:** `CARTOGRAPH_INVOKE_LANES_SME` default 4 → 8. Total subprocess concurrency 8 → 12 (orch 1 + iter 2 + res 1 + sme 8).
+
+**Bedrock dry-run verification (pre-commit):**
+```
+claude -p --model "us.anthropic.claude-opus-4-7[1m]"   "..."              → opus47 ok
+claude -p --model "us.anthropic.claude-sonnet-4-6[1m]" "..."              → sonnet46 ok
+claude -p --model "us.anthropic.claude-opus-4-7[1m]" --effort medium "..." → effort ok
+```
+
+542/542 mcp_tools tests green.
+
+**Note on resolver:** originally designed for opus-4-6. On Bedrock, `ANTHROPIC_DEFAULT_OPUS_MODEL` resolves to opus-4-7 (newer; upgrade, not regression). Pin to 4-6 via `CARTOGRAPH_MODEL_OPUS=us.anthropic.claude-opus-4-6-v1:0` if desired.
+
+### Final model resolution matrix (on Bedrock)
+
+| Agent | Model | Effort |
+|---|---|---|
+| orchestrator | `us.anthropic.claude-sonnet-4-6[1m]` | — |
+| resolver | `us.anthropic.claude-opus-4-7[1m]` | medium |
+| iterator | `us.anthropic.claude-sonnet-4-6[1m]` | — |
+| sme | `us.anthropic.claude-sonnet-4-6[1m]` | — |
+
+### Concurrency + timing summary (current)
+
+| Parameter | Value | Source |
+|---|---|---|
+| Trigger scan interval | 2.0s | `TRIGGER_POLL_INTERVAL` |
+| Wake debounce | 60s (admin chat / mutation-M bypass) | `WAKE_DEBOUNCE_SECONDS` |
+| Orchestrator lanes | 1 | `INVOKE_LANES_ORCH` |
+| Iterator lanes | 2 | `INVOKE_LANES_ITER` |
+| Resolver lanes | 1 | `INVOKE_LANES_RES` |
+| **SME lanes** | **8** (was 4) | `INVOKE_LANES_SME` |
+| **Total subprocess concurrency** | **12** | sum |

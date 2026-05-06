@@ -109,14 +109,34 @@ tool result mid-batch; it sees N results in one turn.
 `AgentTypeConfig` (`src/agent_management/agent_types/base.py`) carries
 `model: str` and `effort: str | None` per agent type so high-volume
 agents use cheaper models and singleton coordinators get heavier
-reasoning. Defaults:
+reasoning.
 
-| Type | Model | Effort | Rationale |
+**Phase 10.11 (2026-05-06) — Bedrock compatibility.** Model ids are
+sourced from env-driven constants in `shared/config.py` rather than
+hard-coded, so Bedrock inference profile ids (e.g.
+`us.anthropic.claude-opus-4-7[1m]`) work without code changes:
+
+```python
+MODEL_OPUS = os.getenv("CARTOGRAPH_MODEL_OPUS",
+    os.getenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-6"))
+MODEL_SONNET = os.getenv("CARTOGRAPH_MODEL_SONNET",
+    os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6"))
+```
+
+Precedence: project-specific env → Claude Code's own `ANTHROPIC_DEFAULT_*_MODEL`
+→ native Anthropic API alias fallback.
+
+| Type | Model (constant) | Effort | Rationale |
 |---|---|---|---|
-| orchestrator | `claude-opus-4-6` | `medium` | Singleton coordination + user chat |
-| resolver | `claude-opus-4-6` | `medium` | Singleton merge/split gatekeeper |
-| iterator | `claude-sonnet-4-6` | (default) | High-volume enumeration |
-| sme | `claude-sonnet-4-6` | (default) | Per-component, fan-out scale |
+| orchestrator | `config.MODEL_SONNET` | — | High-volume routing + blocker triage (Phase 7.4.12 downgrade from opus). |
+| resolver | `config.MODEL_OPUS` | `medium` | Singleton merge/split gatekeeper — high-stakes reasoning stays on opus. |
+| iterator | `config.MODEL_SONNET` | — | High-volume enumeration. |
+| sme | `config.MODEL_SONNET` | — | Per-component, fan-out scale. |
+
+**On Bedrock (`CLAUDE_CODE_USE_BEDROCK=1`)** these resolve to inference
+profile ids (typically `us.anthropic.claude-opus-4-7[1m]` and
+`us.anthropic.claude-sonnet-4-6[1m]` via `ANTHROPIC_DEFAULT_*_MODEL`).
+Native Anthropic API fallback works unchanged.
 
 `agent_manager.py` cmd list appends `--model <id>` unconditionally and
 `--effort <level>` when set. System prompt is rebuilt from disk on
