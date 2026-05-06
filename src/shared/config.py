@@ -26,7 +26,22 @@ HEARTBEAT_TIMEOUT = int(os.getenv("CARTOGRAPH_HEARTBEAT_TIMEOUT", "300"))
 INVOKE_LANES_ORCH = int(os.getenv("CARTOGRAPH_INVOKE_LANES_ORCH", "1"))
 INVOKE_LANES_ITER = int(os.getenv("CARTOGRAPH_INVOKE_LANES_ITER", "2"))
 INVOKE_LANES_RES  = int(os.getenv("CARTOGRAPH_INVOKE_LANES_RES",  "1"))
-INVOKE_LANES_SME  = int(os.getenv("CARTOGRAPH_INVOKE_LANES_SME",  "4"))
+INVOKE_LANES_SME  = int(os.getenv("CARTOGRAPH_INVOKE_LANES_SME",  "8"))
+
+# Claude model ids passed to `claude -p --model <id>`. On Bedrock (when
+# CLAUDE_CODE_USE_BEDROCK=1 is set) these MUST be Bedrock inference
+# profile ids (e.g. `us.anthropic.claude-opus-4-7[1m]`), not Anthropic
+# API aliases (`claude-opus-4-6`). Env vars mirror the standard
+# ANTHROPIC_DEFAULT_*_MODEL names so a single source-of-truth controls
+# both Claude Code's own model and our agents' models.
+MODEL_OPUS = os.getenv(
+    "CARTOGRAPH_MODEL_OPUS",
+    os.getenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-6"),
+)
+MODEL_SONNET = os.getenv(
+    "CARTOGRAPH_MODEL_SONNET",
+    os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6"),
+)
 
 MERGE_CONFIDENCE_THRESHOLD = 0.85
 REJECT_CONFIDENCE_THRESHOLD = 0.3

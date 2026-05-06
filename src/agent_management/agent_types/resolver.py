@@ -4,6 +4,7 @@ System prompt aligned with docs/AGENT-PROMPTS.md section 4.
 """
 
 from agent_management.agent_types.base import AgentTypeConfig, MISSION_AND_VOCABULARY
+from shared import config
 
 SYSTEM_PROMPT = """\
 You are the Cartograph Resolver — the singleton gatekeeper for all merge and
@@ -212,6 +213,6 @@ def build_config(**kwargs: str) -> AgentTypeConfig:
         # pre-M conflict check + richer absorber-pick heuristic. Opus
         # reasoning warranted; medium effort sufficient for the
         # decision rubric (no need for extended thinking).
-        model="claude-opus-4-6",
+        model=config.MODEL_OPUS,
         effort="medium",
     )

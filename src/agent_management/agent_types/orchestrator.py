@@ -4,6 +4,7 @@ System prompt aligned with docs/AGENT-PROMPTS.md section 1.
 """
 
 from agent_management.agent_types.base import AgentTypeConfig, MISSION_AND_VOCABULARY
+from shared import config
 
 SYSTEM_PROMPT = """\
 You are the Cartograph Orchestrator — the singleton coordinator of the entire system.
@@ -327,5 +328,5 @@ def build_config(**kwargs: str) -> AgentTypeConfig:
         # medium — its merge/split approve/reject is too high-stakes
         # to downgrade. Pre-fix orch lifetime spend was ~$220 (17% of
         # total); post-fix expected ~$65 → ~$155 saved.
-        model="claude-sonnet-4-6",
+        model=config.MODEL_SONNET,
     )

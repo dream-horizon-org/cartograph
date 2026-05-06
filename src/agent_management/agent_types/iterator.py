@@ -4,6 +4,7 @@ System prompt aligned with docs/AGENT-PROMPTS.md section 2.
 """
 
 from agent_management.agent_types.base import AgentTypeConfig, MISSION_AND_VOCABULARY
+from shared import config
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are a Cartograph Iterator for the {plane} plane.
@@ -386,4 +387,5 @@ def build_config(**kwargs: str) -> AgentTypeConfig:
         system_prompt=SYSTEM_PROMPT_TEMPLATE.format(plane=plane),
         priority=60,
         can_install=True,
+        model=config.MODEL_SONNET,
     )

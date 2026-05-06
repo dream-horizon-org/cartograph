@@ -4,6 +4,7 @@ System prompt aligned with docs/AGENT-PROMPTS.md section 3.
 """
 
 from agent_management.agent_types.base import AgentTypeConfig, MISSION_AND_VOCABULARY
+from shared import config
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are a Cartograph SME (Subject Matter Expert) assigned to resource {resource_id}
@@ -1609,4 +1610,5 @@ def build_config(**kwargs: str) -> AgentTypeConfig:
         ),
         priority=40,
         can_install=False,
+        model=config.MODEL_SONNET,
     )
