@@ -7,3 +7,9 @@ workspaces/
 .idea/
 docs/superpowers/
 *.egg-info/
+
+# DB snapshots (pre-demo / pre-real-data backups). Kept locally, not
+# tracked — they can grow large (19MB+ already) and embed row data that
+# shouldn't hit origin.
+snapshots/
+*.sql
