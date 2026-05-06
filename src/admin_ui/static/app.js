@@ -3319,81 +3319,321 @@ async function showComponentDetail(componentId) {
     }
     const data = await res.json();
     $body.innerHTML = _renderComponentDetailHtml(data);
+    // Phase 10.9: mount paginated tables after HTML is in DOM. Each
+    // table closure tracks its own current page (no shared state).
+    _mountCatalogDrilldownTables($body, data);
   } catch (e) {
     console.error('showComponentDetail failed:', e);
     $body.innerHTML = '<p class="empty">Failed to load.</p>';
   }
 }
 
+// Phase 10.9: catalog drill-down rebuild — collapsible <details> sections
+// per concern, paginated tables for the heavy lists. Replaces the prior
+// single-stack render that compressed everything into a wall of bullets.
+//
+// Section layout (top → bottom):
+//   1. Header (canonical_name + display_name + type/status/planes)
+//   2. Description block (italic, bordered, prominent — Phase 10.7
+//      embed-target identity blurb; ALWAYS visible, NOT collapsible)
+//   3. <details open> Doc — marked-rendered doc_md
+//   4. <details>      Source slice — structured by resource_id
+//   5. <details>      Attributions (N) — paginated table
+//   6. <details>      Catalog (N) — paginated table
+//   7. <details>      Bindings in (N) — paginated table
+//   8. <details>      Bindings out (N) — paginated table
+//   9. <details>      Dangling out (N) — paginated table
+//  10. <details>      Flows (N) — grouped by incoming catalog
+//  11. <details>      Source resources (N)
+//
+// Heavy tables use _mountPaginatedTable post-render so client-side
+// page state lives in a closure (no global state, no React).
 function _renderComponentDetailHtml(data) {
   const { component, attributions = [], edges = {}, flows = [], resources = [] } = data;
   const c = component;
   const planes = (c.planes || []).map(p =>
     `<span class="plane-pill plane-${p}">${p}</span>`).join(' ');
-  const head = `<h3>${escapeHtml(c.canonical_name || '')}</h3>
-    <div class="muted">${escapeHtml(c.display_name || '')}</div>
-    <div class="muted">${c.component_type} · ${c.status}</div>
-    <div>${planes}</div>`;
-  // Phase 10.7: description is the dense embed-target field, distinct
-  // from doc_md (which is multi-paragraph human-render). Render desc
-  // first as a tight italic blurb, then doc_md below for fuller prose.
+
+  // 1. Header
+  const head = `
+    <div class="cat-detail-head">
+      <h3>${escapeHtml(c.canonical_name || '')}</h3>
+      <div class="cat-detail-sub">
+        <span class="cat-display">${escapeHtml(c.display_name || '')}</span>
+        <span class="cat-meta">${escapeHtml(c.component_type || '')} · ${escapeHtml(c.status || '')}</span>
+      </div>
+      <div class="cat-detail-planes">${planes}</div>
+    </div>`;
+
+  // 2. Description (Phase 10.7 — always visible, NOT collapsible).
   const desc = c.description
     ? `<div class="cat-desc"><em>${escapeHtml(c.description)}</em></div>`
     : '';
+
+  // 3. Doc (default open — most useful section for humans).
   const doc = c.component_doc_md
-    ? `<h4>Doc</h4><div class="cat-doc">${
-        DOMPurify.sanitize(marked.parse(c.component_doc_md))
-      }</div>`
-    : '';
-  const slice = c.source_slice
-    ? `<h4>Slice</h4><pre class="cat-slice">${escapeHtml(JSON.stringify(c.source_slice, null, 2))}</pre>`
-    : '';
-  const attrsHtml = attributions.length
-    ? '<h4>Attributions</h4><ul class="cat-attrs">' +
-      attributions.map(a =>
-        `<li><b>${escapeHtml(a.resource_type)}</b>: ${escapeHtml(a.identifier)}
-          <span class="muted">[${a.plane}]</span></li>`).join('') + '</ul>'
-    : '';
-  const edgeBucketHtml = (label, rows) => rows.length ? (
-    `<h5>${label} (${rows.length})</h5><ul>` +
-    rows.map(e =>
-      `<li><b>${escapeHtml(e.edge_type)}</b> ${escapeHtml(e.identifier)}
-        <span class="muted">→ ${e.to_component_id || '?'}</span></li>`
-    ).join('') + '</ul>'
-  ) : '';
-  // Phase 7.4.2: catalog rows have a noun-form `kind` + identifier and
-  // are owned by the component itself, so the "→ to_component_id" arrow
-  // doesn't apply — render kind + identifier + confidence inline.
-  const catalogBucketHtml = (rows) => rows.length ? (
-    `<h5>Catalog (${rows.length})</h5><ul class="cat-catalog-list">` +
-    rows.map(c => {
-      const kind = c.catalog_kind || c.kind || c.edge_type || '';
-      const conf = c.confidence != null
-        ? ` <span class="muted">· conf ${Number(c.confidence).toFixed(2)}</span>`
-        : '';
-      return `<li><span class="cat-kind">${escapeHtml(kind)}</span>
-        <code>${escapeHtml(c.identifier)}</code>${conf}</li>`;
-    }).join('') + '</ul>'
-  ) : '';
-  const edgesHtml = '<h4>Edges</h4>' +
-    edgeBucketHtml('Bound in', edges.bound_in || []) +
-    edgeBucketHtml('Bound out', edges.bound_out || []) +
-    catalogBucketHtml(edges.catalog || []) +
-    edgeBucketHtml('Dangling out', edges.dangling_out || []);
-  const flowsHtml = flows.length
-    ? '<h4>Flows</h4><ul>' +
-      flows.map(f =>
-        `<li>catalog <code>${f.incoming_catalog_id.slice(0, 8)}</code> →
-          outgoing <code>${f.outgoing_edge_id.slice(0, 8)}</code></li>`
+    ? _detailsSection({
+        id: 'cat-sec-doc', label: 'Doc', open: true,
+        body: `<div class="cat-doc">${DOMPurify.sanitize(marked.parse(c.component_doc_md))}</div>`,
+      })
+    : _detailsSection({
+        id: 'cat-sec-doc', label: 'Doc', open: false,
+        body: '<p class="empty">No doc_md written yet.</p>',
+      });
+
+  // 4. Source slice (structured per resource_id; reuses graph-hover shape).
+  const slice = _detailsSection({
+    id: 'cat-sec-slice', label: 'Source slice', open: false,
+    body: _renderSourceSliceForDrilldown(c.source_slice)
+      || '<p class="empty">No source_slice — component covers its whole source resource.</p>',
+  });
+
+  // 5. Attributions — paginated table.
+  const attrsTbl = `<div data-cat-table="attributions"></div>`;
+  const attrs = _detailsSection({
+    id: 'cat-sec-attrs', label: `Attributions (${attributions.length})`, open: false,
+    body: attrsTbl,
+  });
+
+  // 6. Catalog — paginated table.
+  const catalogTbl = `<div data-cat-table="catalog"></div>`;
+  const catalog = _detailsSection({
+    id: 'cat-sec-catalog', label: `Catalog (${(edges.catalog || []).length})`, open: false,
+    body: catalogTbl,
+  });
+
+  // 7-9. Edge buckets — each in its own section + paginated table.
+  const boundInTbl = `<div data-cat-table="bound_in"></div>`;
+  const boundIn = _detailsSection({
+    id: 'cat-sec-bound-in', label: `Bindings in (${(edges.bound_in || []).length})`, open: false,
+    body: boundInTbl,
+  });
+  const boundOutTbl = `<div data-cat-table="bound_out"></div>`;
+  const boundOut = _detailsSection({
+    id: 'cat-sec-bound-out', label: `Bindings out (${(edges.bound_out || []).length})`, open: false,
+    body: boundOutTbl,
+  });
+  const danglingTbl = `<div data-cat-table="dangling_out"></div>`;
+  const dangling = _detailsSection({
+    id: 'cat-sec-dangling', label: `Dangling out (${(edges.dangling_out || []).length})`, open: false,
+    body: danglingTbl,
+  });
+
+  // 10. Flows — grouped by incoming catalog (no pagination — small).
+  const flowsBody = flows.length
+    ? `<div class="cat-flows">${_renderFlowGroupsForDrilldown(flows)}</div>`
+    : '<p class="empty">No flows recorded.</p>';
+  const flowsSec = _detailsSection({
+    id: 'cat-sec-flows', label: `Flows (${flows.length})`, open: false,
+    body: flowsBody,
+  });
+
+  // 11. Source resources — small list, no pagination.
+  const resBody = resources.length
+    ? '<ul class="cat-res">' + resources.map(r =>
+        `<li><span class="cat-kind plane-pill plane-${r.plane}">${escapeHtml(r.plane)}</span>
+          <span class="cat-meta">${escapeHtml(r.resource_type)}</span>
+          <code>${escapeHtml(r.identifier)}</code>
+          <span class="muted">${escapeHtml(r.status || '')}</span></li>`
       ).join('') + '</ul>'
-    : '';
-  const resHtml = resources.length
-    ? '<h4>Source resources</h4><ul>' +
-      resources.map(r =>
-        `<li><b>${r.plane}/${r.resource_type}</b>: ${escapeHtml(r.identifier)}</li>`
-      ).join('') + '</ul>'
-    : '';
-  return head + desc + doc + slice + attrsHtml + edgesHtml + flowsHtml + resHtml;
+    : '<p class="empty">No source resources linked via RCA.</p>';
+  const resSec = _detailsSection({
+    id: 'cat-sec-res', label: `Source resources (${resources.length})`, open: false,
+    body: resBody,
+  });
+
+  return head + desc + doc + slice + attrs + catalog + boundIn + boundOut + dangling + flowsSec + resSec;
+}
+
+// Wrap a body string in a <details><summary> dropdown. Caller controls
+// whether it starts open. The summary line is rendered as a styled bar
+// so the visual hierarchy is clear (head → bar → body).
+function _detailsSection({id, label, open, body}) {
+  return `
+    <details class="cat-section" id="${id}"${open ? ' open' : ''}>
+      <summary class="cat-section-summary">${escapeHtml(label)}</summary>
+      <div class="cat-section-body">${body}</div>
+    </details>`;
+}
+
+// Lightweight client-side paginated table. Mounts into a placeholder
+// <div data-cat-table="<key>"></div> after the parent HTML is in the
+// DOM. State lives in a closure per mount, no globals.
+function _mountPaginatedTable($container, rows, columns, opts = {}) {
+  const pageSize = opts.pageSize || 20;
+  let page = 0;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+
+  function render() {
+    if (rows.length === 0) {
+      $container.innerHTML = '<p class="empty">No rows.</p>';
+      return;
+    }
+    const start = page * pageSize;
+    const slice = rows.slice(start, start + pageSize);
+    const headHtml = '<tr>' + columns.map(c =>
+      `<th>${escapeHtml(c.label)}</th>`).join('') + '</tr>';
+    const bodyHtml = slice.map(r => '<tr>' + columns.map(c => {
+      const raw = c.render ? c.render(r) : (r[c.key] ?? '');
+      // c.render returns HTML; c.key returns raw value, must escape.
+      return `<td class="${c.cls || ''}">${c.render ? raw : escapeHtml(String(raw))}</td>`;
+    }).join('') + '</tr>').join('');
+    const pagerHtml = totalPages > 1
+      ? `<div class="cat-pager">
+           <button class="cat-pager-btn" data-pager="prev" ${page === 0 ? 'disabled' : ''}>‹ Prev</button>
+           <span class="cat-pager-info">Page ${page + 1} of ${totalPages} · ${rows.length} rows</span>
+           <button class="cat-pager-btn" data-pager="next" ${page === totalPages - 1 ? 'disabled' : ''}>Next ›</button>
+         </div>`
+      : `<div class="cat-pager-info muted">${rows.length} ${rows.length === 1 ? 'row' : 'rows'}</div>`;
+    $container.innerHTML = `
+      <table class="cat-table">
+        <thead>${headHtml}</thead>
+        <tbody>${bodyHtml}</tbody>
+      </table>
+      ${pagerHtml}`;
+    $container.querySelectorAll('[data-pager]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.pager === 'prev' && page > 0) page--;
+        if (btn.dataset.pager === 'next' && page < totalPages - 1) page++;
+        render();
+      });
+    });
+  }
+  render();
+}
+
+// Source slice renderer for the catalog drill-down (independent of
+// graphSnapshot — uses only the API response shape). Mirrors the
+// graph-hover formatter's structure but works with raw drilldown data.
+function _renderSourceSliceForDrilldown(slice) {
+  if (!slice || typeof slice !== 'object' || Object.keys(slice).length === 0) {
+    return '';
+  }
+  const KNOWN = ['paths','files','manifests','workflows','entry_points','k8s_workloads'];
+  return Object.entries(slice).map(([resourceId, info]) => {
+    const plane = info?.plane || 'unknown';
+    const planeColor = (typeof PLANE_COLORS !== 'undefined' && PLANE_COLORS[plane]) || '#6e7681';
+    const rowsHtml = Object.entries(info || {})
+      .filter(([k, v]) => k !== 'plane' && Array.isArray(v) && v.length)
+      .sort((a, b) => (KNOWN.indexOf(a[0]) - KNOWN.indexOf(b[0])))
+      .map(([k, v]) => `
+        <div class="slice-row">
+          <span class="slice-k">${escapeHtml(k)}</span>
+          <span class="slice-v">${v.map(s => `<code>${escapeHtml(String(s))}</code>`).join(' ')}</span>
+        </div>
+      `).join('');
+    return `
+      <div class="slice-block">
+        <div class="slice-head">
+          <span class="plane-pill" style="background:${planeColor}22;color:${planeColor}">${escapeHtml(plane)}</span>
+          <code class="slice-resource" title="${escapeHtml(resourceId)}">${escapeHtml(resourceId.slice(0, 8))}…</code>
+        </div>
+        ${rowsHtml || '<p class="empty">(empty slice)</p>'}
+      </div>
+    `;
+  }).join('');
+}
+
+// Flows renderer for catalog drill-down — groups by incoming_catalog_id
+// without depending on graphSnapshot (which is only loaded on the Graph
+// tab). Shows just the FK-id pairs since we don't have edge identifiers
+// here without a follow-up fetch.
+function _renderFlowGroupsForDrilldown(flows) {
+  const byIncoming = {};
+  for (const f of flows) {
+    (byIncoming[f.incoming_catalog_id] ||= []).push(f);
+  }
+  return Object.entries(byIncoming).map(([incomingId, rows]) => {
+    const outList = rows.map(r => {
+      const conf = r.confidence != null
+        ? ` <span class="muted">· conf ${Number(r.confidence).toFixed(2)}</span>` : '';
+      return `<li>outgoing <code>${escapeHtml(r.outgoing_edge_id.slice(0, 8))}</code>${conf}</li>`;
+    }).join('');
+    return `
+      <div class="flow-block">
+        <div class="flow-incoming">catalog <code>${escapeHtml(incomingId.slice(0, 8))}</code> fans out to:</div>
+        <ul class="flow-outgoings">${outList}</ul>
+      </div>`;
+  }).join('');
+}
+
+// Mount all paginated tables for the drill-down. Called after
+// _renderComponentDetailHtml output is inserted into the DOM.
+function _mountCatalogDrilldownTables(container, data) {
+  const { attributions = [], edges = {} } = data;
+  const $ = (sel) => container.querySelector(sel);
+
+  // Attributions table
+  const attrsDiv = $('[data-cat-table="attributions"]');
+  if (attrsDiv) {
+    _mountPaginatedTable(attrsDiv, attributions, [
+      {key: 'plane',         label: 'Plane',
+       render: (r) => `<span class="plane-pill plane-${r.plane}">${escapeHtml(r.plane)}</span>`},
+      {key: 'resource_type', label: 'Type',         cls: 'cat-bold'},
+      {key: 'identifier',    label: 'Identifier',
+       render: (r) => `<code>${escapeHtml(r.identifier || '')}</code>`},
+      {key: 'confidence',    label: 'Conf',
+       render: (r) => r.confidence != null ? Number(r.confidence).toFixed(2) : ''},
+      {key: 'evidence',      label: 'Evidence',
+       render: (r) => `<span class="cat-evidence" title="${escapeHtml(r.evidence || '')}">${escapeHtml((r.evidence || '').slice(0, 50))}${(r.evidence || '').length > 50 ? '…' : ''}</span>`},
+    ]);
+  }
+
+  // Catalog table
+  const catalogDiv = $('[data-cat-table="catalog"]');
+  if (catalogDiv) {
+    _mountPaginatedTable(catalogDiv, edges.catalog || [], [
+      {key: 'kind',       label: 'Kind',
+       render: (r) => `<span class="cat-kind">${escapeHtml(r.catalog_kind || r.kind || r.edge_type || '')}</span>`},
+      {key: 'identifier', label: 'Identifier',
+       render: (r) => `<code>${escapeHtml(r.identifier || '')}</code>`},
+      {key: 'confidence', label: 'Conf',
+       render: (r) => r.confidence != null ? Number(r.confidence).toFixed(2) : ''},
+    ]);
+  }
+
+  // Bindings in (other components → me)
+  const boundInDiv = $('[data-cat-table="bound_in"]');
+  if (boundInDiv) {
+    _mountPaginatedTable(boundInDiv, edges.bound_in || [], [
+      {key: 'edge_type',         label: 'Type',
+       render: (r) => `<span class="edge-type">${escapeHtml(r.edge_type)}</span>`},
+      {key: 'identifier',        label: 'Identifier',
+       render: (r) => `<code>${escapeHtml(r.identifier || '')}</code>`},
+      {key: 'from_component_id', label: 'From',
+       render: (r) => `<code class="muted" title="${escapeHtml(r.from_component_id || '')}">${escapeHtml((r.from_component_id || '').slice(0, 8))}</code>`},
+      {key: 'confidence',        label: 'Conf',
+       render: (r) => r.confidence != null ? Number(r.confidence).toFixed(2) : ''},
+    ]);
+  }
+
+  // Bindings out (me → other components)
+  const boundOutDiv = $('[data-cat-table="bound_out"]');
+  if (boundOutDiv) {
+    _mountPaginatedTable(boundOutDiv, edges.bound_out || [], [
+      {key: 'edge_type',       label: 'Type',
+       render: (r) => `<span class="edge-type">${escapeHtml(r.edge_type)}</span>`},
+      {key: 'identifier',      label: 'Identifier',
+       render: (r) => `<code>${escapeHtml(r.identifier || '')}</code>`},
+      {key: 'to_component_id', label: 'To',
+       render: (r) => `<code class="muted" title="${escapeHtml(r.to_component_id || '')}">${escapeHtml((r.to_component_id || '').slice(0, 8))}</code>`},
+      {key: 'confidence',      label: 'Conf',
+       render: (r) => r.confidence != null ? Number(r.confidence).toFixed(2) : ''},
+    ]);
+  }
+
+  // Dangling out (me → unresolved)
+  const danglingDiv = $('[data-cat-table="dangling_out"]');
+  if (danglingDiv) {
+    _mountPaginatedTable(danglingDiv, edges.dangling_out || [], [
+      {key: 'edge_type',  label: 'Type',
+       render: (r) => `<span class="edge-type">${escapeHtml(r.edge_type)}</span>`},
+      {key: 'identifier', label: 'Identifier',
+       render: (r) => `<code>${escapeHtml(r.identifier || '')}</code>`},
+      {key: 'confidence', label: 'Conf',
+       render: (r) => r.confidence != null ? Number(r.confidence).toFixed(2) : ''},
+    ]);
+  }
 }
 
 document.getElementById('cat-apply')?.addEventListener('click', _writeCatalogFiltersToUrl);

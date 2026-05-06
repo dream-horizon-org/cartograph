@@ -1318,6 +1318,193 @@ body {
 .cat-attrs { list-style: disc; padding-left: 20px; font-size: 12px; }
 .cat-attrs .muted { color: #6e7681; }
 
+/* ============ Phase 10.9: Catalog drill-down restructure ============ */
+
+/* Header block */
+.cat-detail-head {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #21262d;
+}
+.cat-detail-head h3 {
+  margin: 0 0 4px 0;
+  font-size: 18px;
+  color: #f0f6fc;
+}
+.cat-detail-sub {
+  display: flex; gap: 12px; align-items: baseline;
+  font-size: 12px; color: #8b949e;
+  margin-bottom: 8px;
+}
+.cat-display { color: #c9d1d9; font-weight: 500; }
+.cat-meta    { color: #8b949e; font-size: 11px; }
+.cat-detail-planes { display: flex; gap: 4px; }
+
+/* Description (Phase 10.7 — always visible, prominent) */
+.cat-desc {
+  font-size: 13px; line-height: 1.45;
+  color: #c9d1d9;
+  background: #161b22;
+  border-left: 3px solid #58a6ff;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  border-radius: 0 4px 4px 0;
+}
+.cat-desc em { font-style: italic; }
+
+/* Collapsible <details> sections */
+.cat-section {
+  margin-bottom: 8px;
+  border: 1px solid #21262d;
+  border-radius: 4px;
+  background: #0d1117;
+  overflow: hidden;
+}
+.cat-section[open] {
+  border-color: #30363d;
+}
+.cat-section-summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  background: #161b22;
+  font-weight: 600;
+  font-size: 13px;
+  color: #c9d1d9;
+  user-select: none;
+  list-style: none;
+  display: flex; align-items: center; gap: 6px;
+}
+.cat-section-summary::-webkit-details-marker { display: none; }
+.cat-section-summary::before {
+  content: '▶';
+  font-size: 9px;
+  color: #6e7681;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+.cat-section[open] > .cat-section-summary::before {
+  transform: rotate(90deg);
+}
+.cat-section-summary:hover {
+  background: #1c2128;
+}
+.cat-section-body {
+  padding: 12px;
+  font-size: 12px;
+}
+
+/* Paginated tables */
+.cat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.cat-table thead {
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+}
+.cat-table th {
+  text-align: left;
+  padding: 6px 8px;
+  font-weight: 600;
+  color: #8b949e;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.cat-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid #161b22;
+  vertical-align: top;
+}
+.cat-table tbody tr:hover {
+  background: #161b22;
+}
+.cat-table .cat-bold { font-weight: 600; color: #c9d1d9; }
+.cat-table code {
+  background: #161b22;
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-size: 11px;
+}
+
+/* Pager */
+.cat-pager {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-top: 1px solid #21262d;
+  font-size: 11px;
+}
+.cat-pager-btn {
+  cursor: pointer;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #c9d1d9;
+  padding: 3px 10px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-family: inherit;
+}
+.cat-pager-btn:hover:not([disabled]) {
+  background: #21262d;
+  border-color: #58a6ff;
+}
+.cat-pager-btn[disabled] {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.cat-pager-info {
+  color: #8b949e;
+  font-size: 11px;
+}
+
+/* Helpers */
+.cat-evidence {
+  color: #8b949e;
+  font-size: 11px;
+  cursor: help;
+}
+.cat-kind {
+  display: inline-block;
+  padding: 1px 6px;
+  background: #1f6feb;
+  color: #ffffff;
+  border-radius: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+/* Source resources list */
+.cat-res {
+  list-style: none; padding: 0; margin: 0;
+}
+.cat-res li {
+  padding: 4px 0;
+  display: flex; gap: 8px; align-items: center;
+  border-bottom: 1px solid #161b22;
+  font-size: 12px;
+}
+.cat-res li:last-child { border-bottom: none; }
+
+/* Flows in drill-down (separate from graph-hover .flow-block) */
+.cat-flows .flow-block {
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  background: #161b22;
+  border-radius: 3px;
+}
+.cat-flows .flow-incoming {
+  font-size: 12px; color: #c9d1d9;
+  margin-bottom: 4px;
+}
+.cat-flows .flow-outgoings {
+  list-style: none; padding-left: 14px; margin: 0;
+  font-size: 11px; color: #8b949e;
+}
+.cat-flows .flow-outgoings li { padding: 1px 0; }
+
 /* Phase 5.4: persistent broadcast pill */
 .persistent-pill {
   background: #d29922 !important; color: #0d1117 !important;
