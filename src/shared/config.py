@@ -22,7 +22,8 @@ HEARTBEAT_TIMEOUT = int(os.getenv("CARTOGRAPH_HEARTBEAT_TIMEOUT", "300"))
 
 # Invoke-loop concurrency lanes per agent type. Each lane is one dedicated
 # worker thread spawning one claude subprocess at a time. Total concurrent
-# subprocesses = sum of these. Default: 8 (1+2+1+4).
+# subprocesses = sum of these. Default: 12 (1+2+1+8 — Phase 10.11 bumped
+# SME from 4 to 8).
 INVOKE_LANES_ORCH = int(os.getenv("CARTOGRAPH_INVOKE_LANES_ORCH", "1"))
 INVOKE_LANES_ITER = int(os.getenv("CARTOGRAPH_INVOKE_LANES_ITER", "2"))
 INVOKE_LANES_RES  = int(os.getenv("CARTOGRAPH_INVOKE_LANES_RES",  "1"))
