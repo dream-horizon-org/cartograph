@@ -12,7 +12,7 @@
 
 ## 0. WHERE I AM RIGHT NOW (the most important section)
 
-**Phases 10.8 → 10.11 SHIPPED 2026-05-06. DEMO12 targeted: 4/4 PASS. DEMO11 insights all triaged. Admin UI catalog drill-down rebuilt. Sleep + telemetry-datastore prompt rewrites shipped. Bedrock-compatible model ids wired with SME lanes 4→8 (total concurrency 12). System fit for DB wipe + real-data onboarding.**
+**Phases 10.8 → 10.12 SHIPPED 2026-05-06. First real-data attempt 2026-05-06 surfaced 2 iterator prompt gaps (MCP port conflict, APM surface fallback) — closed in Phase 10.12 `45a9f4d`. Ready for second real-data attempt.**
 
 ### What's done (committed + pushed):
 

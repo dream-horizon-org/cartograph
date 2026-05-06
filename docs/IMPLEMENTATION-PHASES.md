@@ -1,6 +1,6 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-05-06):** Phases 0 → 10.11 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **DEMO11 ran 16/16 PASS** (2026-05-05), **DEMO12 targeted Phase-10.8 verification 4/4 PASS** (2026-05-06). Ready for real-data onboarding.
+**Status (2026-05-06):** Phases 0 → 10.12 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **DEMO11 ran 16/16 PASS** (2026-05-05), **DEMO12 targeted Phase-10.8 verification 4/4 PASS** (2026-05-06). **First real-data attempt (2026-05-06) surfaced 2 iterator prompt gaps — closed in Phase 10.12** (`45a9f4d`). Ready for second real-data attempt.
 
 Most recent (2026-05-05 → 2026-05-06):
 - **10.7** (`description` column separate from `doc_md` + `vector_search` filters + `exclude_self` + workspace-local doc_md) — 8 sub-commits ending at `e7ce669`.
@@ -5526,6 +5526,64 @@ All 3 profile ids resolve correctly. `--effort medium` works on opus-4-7.
 - Native-API-only fallback testing (verified only on Bedrock in this run; native API path keeps the Anthropic aliases via the fallback default).
 
 **Effort:** S (~1 hour incl. dry-runs + test).
+
+---
+
+## Phase 10.12: Iterator prompt — MCP port conflicts + APM surface fallback ✅
+
+**Status (2026-05-06):** SHIPPED. Single commit `45a9f4d`. Motivated by the real-data onboarding session earlier today.
+
+### Motivation
+
+Two gaps surfaced during first-ever real-data run (2026-05-06):
+
+1. **MCP port collision** — iter-telemetry spawned last9-mcp bound to port 8200, colliding with admin UI. Both processes bound successfully (macOS dual-socket permissive), localhost requests routed to whichever was most recent → admin UI became unreachable with "Accept must contain 'text/event-stream'" errors. Iterator prompt told agents to install external MCPs + wire them via `.mcp.json` but gave no port conflict guidance.
+
+2. **APM surface 400/403 → iterator gave up** — last9's APM-backed tools (`get_service_dependency_graph`, `get_service_summary`, `get_databases`, prometheus queries) returned 400 Bad Request for the write-scoped refresh token we initially had. iter-telemetry's fallback was to grep-scan alert configs globally for DB keywords ("rds"/"redis"/"kafka"), producing noise. Prompt documented Surfaces 1-4 but didn't tell agents how to ladder-fallback when a surface is gated.
+
+### Two additions to `src/agent_management/agent_types/iterator.py`
+
+#### (a) AUXILIARY MCP PROXIES / SIDECARS — PORT CONFLICTS (new block after `== TOOL INSTALLATION ==`)
+
+Tells iterators to probe port availability via `lsof -nP -iTCP:<port> -sTCP:LISTEN` before binding. Lists cartograph's core ports (8100 MCP / 8200 admin UI / 5432 postgres) as reserved. Pick any free port ≥ 8101. Write chosen port into resource metadata. For proxies meant to be reused by SMEs, register in `src/mcp_servers.yaml` under a sensible name (`last9-reader`, etc.) so SMEs spawned by orch inherit the connection via `mcp_registry_keys`.
+
+Generic — applies to any auxiliary MCP proxy or sidecar, not just last9.
+
+#### (b) SURFACE FALLBACK LADDER (new block in telemetry-plane Surface 1-4 section)
+
+Tells iterators: when a high-level tool 4xx/5xxs, don't give up; drop to an adjacent surface:
+
+- Catalog / service-summary fails → per-provider list endpoints (Datadog `metrics/list`, Last9 `did_you_mean`, New Relic `entities`, Honeycomb `datasets`); at extreme, recover service list from PromQL label values on `service_name`.
+- Dependency graph sparse / fails → raw PromQL on trace-span metrics (`traces_span_metrics_count_total`); group-by `peer_service` / `server_address` / `db_system` / `messaging_system` labels to reconstruct the graph manually.
+- Traces fail / empty → alert rules / monitor definitions / dashboard configs name exact DBs + endpoints.
+- Everything fails → raise blocker with tool error payloads VERBATIM (don't paraphrase — the 4xx body often reveals the scope gap).
+
+Generic across providers. Per-provider specific label names (peer_service, db_system) stay as worked examples in the existing detailed Surface-3 section.
+
+### Insights closed
+
+| id (8-char) | kind | source | closed by |
+|---|---|---|---|
+| `fe6f9e29` | prompt_gap | iter-telemetry | Phase 10.12(a) |
+| `be6f9e29` | prompt_gap | iter-telemetry | Phase 10.12(b) |
+| `c136de59` | workflow_friction | iter-telemetry | partial — 10.12(b) covers the "global scan is wrong" implicitly via dep-graph fallback ladder |
+| `74929d44` | prompt_gap | orch | same as c136de59 |
+| `546cf47f` | tactic_win | orch | wontfix dup — covered by 10.12(b) |
+| `45d59823` | tactic_win | iter-telemetry | wontfix dup |
+| `fd7bf67a` | workflow_friction | orch | wontfix — resolved by user's explicit "telemetry first" order (not a prompt gap) |
+
+### Not in this phase
+
+Deliberately NOT added: the "per-service drill-down mandate" (iterator must link every datastore to a target service). User rejected the framing — iterator's role is to enumerate, not opine. Datastore-without-service-linkage judgment belongs to SMEs during materialisation, not iterator during enumeration.
+
+### Verification
+
+- All 4 prompts compile clean (sme=96469, iter=36782 **+2845**, orch=31117, res=25605)
+- 542/542 mcp_tools tests green
+- Behavioural verification deferred to next real-data run
+
+**Files touched:** `src/agent_management/agent_types/iterator.py` (+58 lines).
+**Effort:** S (~1 hour incl. discussion + smoke + test).
 
 ---
 
