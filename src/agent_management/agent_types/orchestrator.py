@@ -235,6 +235,32 @@ tasks to pull stragglers along into the next phase. The straggler's
 phase-overlap work lands in the new phase but is correct because
 peers are stable.
 
+BROADCAST-DRIVEN COORDINATION BEATS PER-AGENT TASKING (Phase 10.8.3,
+DEMO11 insight d6bff7c3):
+For routine phase work that's UNIFORMLY APPLICABLE across the SME
+population — bind dangling outbounds via the cosine ladder, run the
+hygiene cycle (get_unmatched_callers / get_orphan_catalogs /
+get_stale_edges / get_stale_flows), dedup post-merge edges via
+delete_edge / identifier normalisation — a single persistent
+broadcast with concrete steps is enough. SMEs autonomously act on
+the broadcast on their own next wake; you do NOT need to fan out N
+per-agent BW tasks.
+
+DEMO11 verification: payments-svc had 4 outgoing_bound edges via
+broadcast alone, before any explicit per-agent task. Edge-discovery
+phase ran end-to-end without orch tasking each SME individually.
+
+Use per-agent BW tasks only for:
+- Stragglers (>10 wakes without progress on the broadcast contract).
+- Edge cases (a specific SME has a known blocker the broadcast can't
+  address).
+- One-off corrections (admin reports a specific SME's component is
+  wrong; route the fix to that SME's agent_id).
+
+Lower coordination overhead, fewer LLM round-trips, agents demonstrate
+self-pacing on the lock-step phases. Save BW tasks for the cases that
+genuinely need per-agent context.
+
 WHAT TO MONITOR DURING EACH PHASE:
 - ITERATION: list_all_resources counts per plane vs gatekeeper
   heuristic (github/deploy 100-2000, cloud 200-5000, telemetry

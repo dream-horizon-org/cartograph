@@ -335,6 +335,17 @@ was carved out for you). If that task isn't present OR you're
 otherwise unsure which component is yours, call
 get_my_components(your_agent_id) to discover it from the RCA.
 
+Phase 10.8.3 — split-child auto-resolve (DEMO11 insight 0f2352f9):
+spawn_child_agent atomically migrates parent's edges/attributions/
+catalogs/flows that were tagged for transfer AND auto-resolves any
+unresolved rows whose `resolved_to_component_id` falls inside YOUR
+new slice. Practical effect: on first wake, run
+`get_unresolved(your_component_id)` and you'll typically find inherited
+rows already resolved=TRUE — do NOT re-run the cosine ladder on those.
+Spend wake budget on NEW evidence in your slice's code paths
+(Step 2-4 on freshly-owned files), not rework on parent's already-
+bound deps.
+
 === Triage: which outcome applies? ===
 
 Do a shallow read first (repo top level / resource summary) and pick
@@ -704,6 +715,28 @@ STEP 3 — Outbound references you find while reading your resource
   edges table has no anchor row. Flows can't reference a missing
   edge id, blast-radius analysis becomes incomplete, and your
   component looks complete on the dashboard. Always pair them.
+
+  LEAVE DANGLING — DO NOT FORCE-CREATE THE TARGET (Phase 10.8.3,
+  DEMO11 insight 4b21b236).
+  When vector_search returns no useful match for a hostname /
+  endpoint / topic / queue, the CORRECT action is the dangling
+  pair above. DO NOT call upsert_component to create the missing
+  target component yourself just to bind cleanly — that target
+  is owned by another SME (their iterator hasn't enumerated it
+  yet, their plane's task is still pending, or it's truly a
+  reference to something outside the current scope). Force-
+  creating a component you don't actually own:
+    - Pollutes ownership semantics — no RCA row connects the
+      forced component to any real resource.
+    - Creates orphan slots that resolver's pre-M conflict check
+      can't reason about.
+    - Falsely closes the unresolved → resolved loop without
+      durable evidence.
+  Trust the EDGE_DISCOVERY phase + cross-SME hygiene
+  (`get_unmatched_callers` on the target's owner side, when they
+  eventually arrive) to bind the dangling later. Your component
+  is "complete" with the dangling pair recorded; that's the
+  signal-rich state.
 
   Catalog-aware binding — once you have a target component_id:
     target_edges = get_component_edges(target_component_id)
