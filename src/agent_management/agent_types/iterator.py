@@ -275,6 +275,37 @@ Per-plane rules:
      (Stripe, Twilio, Slack, etc.). Emit as resource_type=
      'external-service' so SMEs can later attribute outbound edges.
 
+  SURFACE FALLBACK LADDER — WHEN A HIGH-LEVEL TOOL 4xx/5xxs.
+  APM providers gate different surfaces behind different scopes,
+  regions, or infra endpoints. It's common for one tool to work
+  (e.g. alert_configs) while its sibling fails (e.g. service_summary
+  returns 400 Bad Request). Don't give up on the provider — drop
+  to an adjacent surface and keep going:
+
+  - Catalog / service-summary fails → try the provider's broader
+    list endpoints at coarser granularity: Datadog `metrics/list`,
+    Last9 `did_you_mean` / alert-entity search, New Relic `entities`
+    GraphQL query, Honeycomb `datasets` list. At the extreme, the
+    list of APM-instrumented services is recoverable from the label
+    values of `service_name` on any span-metric (PromQL).
+
+  - Dependency graph sparse / fails → fall back to raw PromQL on
+    common trace-span metrics. `traces_span_metrics_count_total`
+    (or equivalent) carries labels like `peer_service`, `server_address`,
+    `db_system`, `messaging_system`, `messaging_destination`.
+    Group-by those labels reconstructs the service → DB / service →
+    topic / service → peer-service graph manually. Same data, lower
+    abstraction.
+
+  - Traces fail / empty → alert rules + monitor definitions +
+    dashboard configs often name the exact DB hostnames, Kafka
+    topic patterns, HTTP routes the team cares about. Scan those.
+
+  - Everything fails → raise a blocker with the tool error payloads
+    verbatim (don't paraphrase — the 4xx body often tells you the
+    scope gap, wrong region, or missing org-feature). Don't guess or
+    emit half-confirmed resources.
+
   Per-provider auth: get the credential key via list_secrets_for_plane
   + get_secret. Common keys: `datadog_api_key` + `datadog_app_key`,
   `newrelic_api_key`, `honeycomb_api_key`, `last9_api_key`,
@@ -347,6 +378,33 @@ If a task asks you to install helm/kubectl/etc:
 - Install globally (available to all agents on next bash call)
 - After install, raise a dummy blocker → orchestrator resolves → you're
   re-invoked with fresh session that picks up new MCP config from .mcp.json
+
+== AUXILIARY MCP PROXIES / SIDECARS — PORT CONFLICTS ==
+When you spawn an auxiliary MCP proxy (e.g. last9-mcp, datadog-mcp) or
+sidecar HTTP server in your workspace, CHECK PORT AVAILABILITY BEFORE
+binding. A port collision with an already-listening daemon is silent
+(both processes bind, localhost requests may route to either) and
+breaks the colliding daemon — admin UI hangs, MCP server rejects
+sessions, etc.
+
+Check with:
+  lsof -nP -iTCP:<port> -sTCP:LISTEN   (macOS / Linux)
+  ss -ltn | grep <port>                (Linux)
+Or `curl -s -o /dev/null -w "%{{http_code}}" http://localhost:<port>/`
+→ anything other than connection-refused means port is in use.
+
+Ports known in use by cartograph core (NEVER bind here):
+- 8100 — cartograph-db MCP server
+- 8200 — admin UI
+- 5432 — postgres
+
+Pick any free port >= 8101 for your proxy. Write the chosen port into
+the resource `metadata.proxy_port` on the relevant resource row, and if
+the proxy is meant to be reused by SMEs later, register it in the
+global registry (edit `src/mcp_servers.yaml` adding a new server
+entry like `last9-reader: url: http://127.0.0.1:<port>/mcp`) so SMEs
+spawned by orch inherit it via `mcp_registry_keys`. Never assume a
+port is free without probing first.
 
 == YOUR WORKSPACE ==
 - Your current working directory (cwd) IS your dedicated workspace. Use it.
