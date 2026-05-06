@@ -325,9 +325,16 @@ delete_edge for post-merge dedup. Verify each is callable + idempotent.
      {deleted: False, reason: 'not_found'} not raise.
 
 5b.5 BULK DELETES: pick one SME, write 3 attributions, delete_
-     attributions_bulk all 3 in one call. Verify atomic-with-pre-
-     validation contract: pass invalid id mixed with valid ids,
-     batch returns committed=False with per-row errors.
+     attributions_bulk all 3 in one call. Lenient semantics
+     (Phase 10.8.4 spec sync — DEMO11 insight d21c93f1):
+     - Owner-violation = strict: any row not owned by caller →
+       reject whole batch with per-row errors.
+     - Missing-id = lenient (idempotent): pass invalid UUID mixed
+       with valid ids → batch returns committed=True, applied=N
+       (where N = valid rows actually deleted), and per-row
+       result for the missing UUID = {deleted: False,
+       reason: 'not_found'}. Mirrors the singleton's idempotent
+       contract from Phase 8.2.
 
 5b.6 delete_edges_bulk: write 3 edges, delete in one bulk call.
 
