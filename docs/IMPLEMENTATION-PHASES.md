@@ -1,6 +1,6 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-05-06):** Phases 0 → 10.12 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **DEMO11 ran 16/16 PASS** (2026-05-05), **DEMO12 targeted Phase-10.8 verification 4/4 PASS** (2026-05-06). **First real-data attempt (2026-05-06) surfaced 2 iterator prompt gaps — closed in Phase 10.12** (`45a9f4d`). Ready for second real-data attempt.
+**Status (2026-05-06 evening):** Phases 0 → 10.12 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **DEMO11 ran 16/16 PASS** (2026-05-05), **DEMO12 targeted Phase-10.8 verification 4/4 PASS** (2026-05-06). **Three real-data onboarding attempts run 2026-05-06** (pre-realdata / pre-realdata2 / pre-realdata3 backups). Attempt 1 surfaced 2 iterator prompt gaps closed in Phase 10.12 (`45a9f4d`). Current DB = mid-3rd-run: 36 agents, 32 components, 291 flows, 56 OPEN insights. **Next work: insight triage batch** (expected as Phase 10.13 bundle — prompt promotions + possible tool additions for `list_agents(include_components)` / `get_component_owner`).
 
 Most recent (2026-05-05 → 2026-05-06):
 - **10.7** (`description` column separate from `doc_md` + `vector_search` filters + `exclude_self` + workspace-local doc_md) — 8 sub-commits ending at `e7ce669`.

@@ -1,4 +1,4 @@
-# Cartograph — Post-Compaction Recollection (2026-05-06, post-Phase-10.11 + Bedrock config)
+# Cartograph — Post-Compaction Recollection (2026-05-06 evening, post-Phase-10.12 + 3× real-data attempts)
 
 > **Read this FIRST after compaction.** Then `git log --oneline -25`,
 > then the 7 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
@@ -12,7 +12,7 @@
 
 ## 0. WHERE I AM RIGHT NOW (the most important section)
 
-**Phases 10.8 → 10.12 SHIPPED 2026-05-06. First real-data attempt 2026-05-06 surfaced 2 iterator prompt gaps (MCP port conflict, APM surface fallback) — closed in Phase 10.12 `45a9f4d`. Ready for second real-data attempt.**
+**Phases 10.8 → 10.12 SHIPPED 2026-05-06. Three real-data onboarding attempts run 2026-05-06 (11:53 / 19:49 / 22:41 backups). Current DB = in-progress 3rd run: 36 agents, 32 components, 291 flows, 56 OPEN insights. Next: insight triage (big batch — user flagged for this session).**
 
 ### What's done (committed + pushed):
 
@@ -36,7 +36,7 @@
 | 10.8.6 DEMO12 targeted prompt + run | `9c3e88c` | 4/4 PASS, 0 BUG, ~3 min wall-clock |
 | 10.8.7 final doc sync | `2f54a1e` | §0 + §17 refresh |
 
-### Phase 10.9 / 10.10 / 10.11 — shipped post-Phase-10.8 (this session):
+### Phase 10.9 / 10.10 / 10.11 / 10.12 — shipped post-Phase-10.8 (this session):
 
 | Sub | Commit | What |
 |---|---|---|
@@ -44,18 +44,23 @@
 | 10.10 sleep rewrite + datastore mandate | `13531d7` | SLEEP rewritten in sme/iter/orch prompts (yield-over-sleep doctrine); ★ DATASTORES MANDATORY ★ block in iterator telemetry section with DEMO7 feeds-v2 breadcrumb |
 | 10.10 datastore wording softening | `da49187` | "MIGHT NOT BE PRESENT" not "do NOT appear" — softer framing, mandate intact |
 | 10.11 Bedrock model ids + SME lanes 8 | `c04f7c9` | `config.MODEL_OPUS` / `MODEL_SONNET` env constants (sources `ANTHROPIC_DEFAULT_*_MODEL`); all 4 agent types rewired; `INVOKE_LANES_SME` 4→8 (total 12) |
+| 10.11 HLD + config stale-lane cleanup | `0521153` | HLD ASCII diagram + config.py comment fixed to 12-lane total |
+| 10.12 iterator prompt gaps (MCP port + APM fallback) | `45a9f4d` | Two blocks added to iterator prompt: AUXILIARY MCP PORT CONFLICTS (port 8101 collision playbook) + SURFACE FALLBACK LADDER (when APM surfaces missing, walk infra/cloud/logs/code) |
+| 10.12 doc sync | `b79bafc` | §19 extended + IMPLEMENTATION-PHASES §10.12 |
 
 ### What's pending (next session — pick up here):
 
-1. **Wipe DB + workspaces** preserving real-data backup `src/workspaces.bak.20260426-2122/`. Backup current DEMO11/12 workspaces at `src/workspaces/` to `workspaces.bak.pre-realdata.<ts>/`. Restart 4 daemons. Verify 114 tools.
-2. **Real-data onboarding** — user provides credentials inline via chat. Orch handles intake. /loop monitors as before.
-3. **Real-data validation of Phase 10.8.3 + 10.10 prompt changes:**
-   - Split-child auto-resolve + leave-dangling-don't-force-create + broadcast-driven coordination (10.8.3) — not behaviourally verified in DEMO12 (require full materialisation storm).
-   - Sleep rewrite (10.10) — watch for fewer pointless sleep_self calls, no long-duration sleeps.
-   - Datastore mandate (10.10) — watch for non-zero datastore rows emitted by iter-telemetry on real-data plane.
-4. **Monitor Bedrock cost via AWS side** — spend no longer routes through Anthropic API billing.
+1. **Insight triage (THIS SESSION)** — 56 OPEN insights filed during the 3 real-data runs. User flagged this as the immediate next work. Pull via:
+   ```sql
+   SELECT id, agent_id, kind, body FROM agent_insights
+     WHERE status='open' ORDER BY created_at DESC;
+   ```
+   Triage each → {promoted / wontfix / deferred} with triage_note citing the commit or rationale. Buckets likely: prompt_gap (SME materialisation / hygiene / identifier-norm), tool_gap (list_agents returns no component_id; "find owner SME" is 5-clarification), doc_confusing (telemetry-plane fallbacks, identifier-norm edge cases), tactic_win (pre-absorb cascade_edges=False, get_unmatched_callers reveals format mismatches, etc.), workflow_friction (monorepo merge cross-plane cases).
+2. **Real-data continuation** — current DB is mid-3rd-run; decide after triage whether to keep driving this run, wipe for a 4th attempt, or keep state + iterate on prompts.
+3. **Bedrock cost monitoring** — spend no longer routes through Anthropic API billing; watch AWS side.
+4. **Uncommitted change:** `src/mcp_servers.yaml` has a pending addition — `last9-reader` on `127.0.0.1:8101/mcp`. Decide if this belongs in committed config or stays a local override.
 
-See `docs/IMPLEMENTATION-PHASES.md §10.8 / §10.9 / §10.10 / §10.11` for full rationale per sub-phase.
+See `docs/IMPLEMENTATION-PHASES.md §10.8 / §10.9 / §10.10 / §10.11 / §10.12` for full rationale per sub-phase.
 
 ### DEMO11 final scorecard location:
 
@@ -68,15 +73,22 @@ Run cost: **$86.29 total** ($62.99 SME, $15.68 orch, $6.19 res, $1.43 iter). 2,3
 
 ---
 
-## 1. Branch + commit state (HEAD as of 2026-05-06, post-Phase-10.11 + Bedrock config)
+## 1. Branch + commit state (HEAD as of 2026-05-06 evening, post-Phase-10.12 + 3× real-data attempts)
 
 - **Working dir:** `/Users/venkata.manohar/release-agent/docs/service-dependency/cartograph`
 - **Active branch:** `feat/trigger-manager-cartograh-mcp`
-- **HEAD:** `c04f7c9` pre-this-doc-sync (Bedrock config + SME lanes 8). After this commit lands, HEAD will be the doc-sync commit.
+- **HEAD:** `b79bafc` (docs: sync for Phase 10.12). After this doc-sync commit lands, HEAD advances to the new sync commit.
 - **Runtime:** AWS Bedrock (`CLAUDE_CODE_USE_BEDROCK=1`); models resolve via `ANTHROPIC_DEFAULT_{OPUS,SONNET}_MODEL` (opus-4-7[1m] / sonnet-4-6[1m]).
+- **Live DB state:** in-progress 3rd real-data run — 36 agents, 32 components, 26 resources, 291 flows, 56 OPEN insights.
+- **Uncommitted:** `src/mcp_servers.yaml` has `last9-reader` addition (127.0.0.1:8101/mcp) — pending decision on committed vs local override.
 
 Recent commits, newest first:
 ```
+b79bafc docs: sync for Phase 10.12 (iterator MCP port + APM fallback)
+45a9f4d Phase 10.12: iterator prompt — MCP port conflicts + APM surface fallback
+45ccf4b gitignore: snapshots/ + *.sql — local-only DB backups
+0521153 docs: fix stale lane-count refs — HLD ASCII diagram + config.py comment
+62ab801 docs: sync for Phase 10.9 + 10.10 + 10.11 (post-DEMO12 pre-real-data)
 c04f7c9 config: Bedrock-compatible model ids + SME lanes 4→8
 da49187 prompts: soften datastore-mandate wording — "might not be" not "do NOT"
 13531d7 prompts: rewrite SLEEP semantics + telemetry datastore mandate
@@ -886,3 +898,62 @@ claude -p --model "us.anthropic.claude-opus-4-7[1m]" --effort medium "..." → e
 | Resolver lanes | 1 | `INVOKE_LANES_RES` |
 | **SME lanes** | **8** (was 4) | `INVOKE_LANES_SME` |
 | **Total subprocess concurrency** | **12** | sum |
+
+---
+
+## 20. Phase 10.12 + Real-data attempts (2026-05-06 afternoon → evening)
+
+### Phase 10.12 — iterator prompt gaps (commits `45a9f4d` + doc-sync `b79bafc`)
+
+First real-data attempt (pre-realdata backup 2026-05-06 11:53) exercised the iterator for the first time on a live plane and surfaced two gaps:
+
+**Gap A — auxiliary MCP port conflicts.** User provided a `last9-reader` MCP server binding to `localhost:8101` (via `src/mcp_servers.yaml`), but `8101` was already in use by an earlier dev process. Iterator silently failed to connect with no clear signal. Prompt now has an `AUXILIARY MCP PORT CONFLICTS` block explicitly directing: check `lsof -i :PORT` before spawning; on EADDRINUSE raise_blocker with the port + the other process's PID + command; never silently retry without diagnosing.
+
+**Gap B — APM surface fallback.** Iterator was expected to find Datadog APM catalog entries, but the Dream11 APM instance lacked the applications section (only agent-side infra metrics). Iterator emitted zero rows and raised blocker. Prompt now has a `SURFACE FALLBACK LADDER` block: if the canonical APM surface is empty or absent, walk the alternative surfaces in order — infra host inventory → cloud compute/RDS/ElastiCache → log sinks → code repo (last resort) — and emit resources from whichever surface yields actual evidence. Zero-row iterator output on a real plane is almost always a surface-selection failure, not a "no resources exist" verdict.
+
+**Files:** `src/agent_management/agent_types/iterator.py` (two new blocks, ~80 LOC). Smoke-tested; no test changes needed.
+
+### Real-data attempts this session
+
+Three pre-realdata backups exist at `src/workspaces.bak.pre-realdata{,2,3}.2026-05-06-{115356,194956,224154}/`. Each corresponds to a DB wipe + fresh onboarding attempt; workspace state preserved forensically.
+
+| Attempt | Backup timestamp | Outcome |
+|---|---|---|
+| 1 | 11:53 (pre-realdata) | Exposed the two Phase 10.12 iterator gaps; stopped + wiped |
+| 2 | 19:49 (pre-realdata2) | Post-10.12; progressed further but still stopped for iteration |
+| 3 | 22:41 (pre-realdata3) | **IN PROGRESS** — current DB state (36 agents, 32 components, 291 flows, 56 insights) |
+
+**Current live state per SQL (at doc-sync time):**
+- 36 `agent_runs` (mix of active / decom / idle)
+- 32 `components` active + some decom
+- 26 `resources` across planes (github + telemetry primary)
+- 291 `flows` — materialisation + edge-discovery produced a dense graph
+- **56 OPEN insights** (distribution: 25 prompt_gap + 20 tactic_win + 5 workflow_friction + 4 tool_gap + 2 doc_confusing)
+
+### Notable open insights (sample)
+
+Full list via `SELECT * FROM agent_insights WHERE status='open'`. Highlights that look promotable at first glance:
+
+- **`a587f682` (tool_gap)** — `list_agents` returns agent_ids but no component-owner mapping. Finding "owner SME for component_id X" took 5 sequential clarifications for sme-d264615e. → Candidate: add `list_agents(include_components=True)` or a standalone `get_component_owner(component_id)` tool.
+- **`b5c84e9e` (tool_gap)** — similar "5 sequential clarifications" pattern to find an owner. Likely same root cause as a587f682.
+- **`319c3536` (tactic_win)** — pre-absorbing with `cascade_edges=False` avoids unique-constraint violations when both sides have overlapping edges; survivor does manual edge hygiene post-absorb. → Candidate: promote to SME prompt as an explicit "when to opt out of cascade" guidance.
+- **`abb7b763` / `1c9e8f99` (tactic_win)** — `get_unmatched_callers` reveals real bound callers whose identifier format doesn't match catalog. Post-merge hygiene signal. → Candidate: add to SME hygiene cycle as a MANDATORY check.
+- **`3a7193fd` (tactic_win)** — `get_stale_edges(my_side='to')` reveals incoming edges from decommissioned callers. Counterpart to the existing `my_side='from'` usage. → Candidate: document both sides in prompt.
+- **`5488a3a0` (prompt_gap)** — when OTel CLIENT spans have no `net.peer.name` for Redis (very common — Redis client libs don't always set it), telemetry iterator has no clear fallback. → Candidate: extend SURFACE FALLBACK LADDER in iterator with the specific Redis/cache client-span case.
+- **`e8dfe292` (prompt_gap)** — circular evidence trap: SMEs reading each other's doc_md for evidence can reinforce mutual incorrect assumptions. → Candidate: explicit rule "doc_md is secondary; primary evidence lives in code + telemetry + attributions".
+- **`e433ca6a` (workflow_friction)** — monorepo github SME merged into telemetry SME; cross-plane merge cascades carry subtle ownership nuances. → Candidate: pre-merge checklist for cross-plane case.
+- **`0e77a9fe` (prompt_gap)** — Kong gateway attribution (`inbound_gateway: kong`) revealed missing inbound edge; Kong-as-entry-point pattern isn't in prompt. → Candidate: add gateway-pattern to SME Step 3 INBOUND grep catalog.
+
+### Triage workflow (for next session)
+
+1. `psql -c "SELECT id, agent_id, kind, body FROM agent_insights WHERE status='open' ORDER BY created_at"`.
+2. Batch by `kind`: start with tool_gap (biggest leverage — new tools), then prompt_gap (bulk promotions in one SME/iterator prompt edit), then tactic_win (hygiene-cycle additions), then doc_confusing (spec fixes), then workflow_friction (process tweaks).
+3. UPDATE with triage_note citing commit hash (for promoted) or reason (for wontfix/deferred).
+4. Commit promotions as a Phase 10.13 bundle with per-sub-commit scope.
+5. Targeted DEMO13 if changes warrant behavioural verification; else advance to 4th real-data attempt.
+
+### Risk notes for real-data iteration
+
+- The 3-attempt pattern (wipe → run → insight → wipe → run) suggests the system has structural gaps that single-prompt changes won't close. Expect Phase 10.13 to be multi-sub-commit, possibly tool-surface changes.
+- `src/mcp_servers.yaml` uncommitted `last9-reader` addition is operational glue for the current run — may or may not belong in committed config depending on whether other users have last9 access.
+- 56 insights is a LOT; previous triage batches (8 from DEMO11) were much smaller. Budget accordingly.
