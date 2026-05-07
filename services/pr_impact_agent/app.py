@@ -11,9 +11,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
-from .analyzer import analyze, parse_github_url
+from .analyzer import analyze, analyze_changes, parse_github_url
 from .db import close_pool, init_pool
-from .models import AnalyzeRequest, AnalyzeResponse
+from .github_client import parse_pr_url
+from .models import (
+    AnalyzeChangesRequest,
+    AnalyzeChangesResponse,
+    AnalyzeRequest,
+    AnalyzeResponse,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -49,3 +55,13 @@ def analyze_endpoint(req: AnalyzeRequest) -> AnalyzeResponse:
         raise HTTPException(status_code=400, detail=str(e))
     result = analyze(req.url)
     return AnalyzeResponse(**result)
+
+
+@app.post("/analyze/changes", response_model=AnalyzeChangesResponse)
+def analyze_changes_endpoint(req: AnalyzeChangesRequest) -> AnalyzeChangesResponse:
+    try:
+        parse_pr_url(req.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    result = analyze_changes(req.url)
+    return AnalyzeChangesResponse(**result)
