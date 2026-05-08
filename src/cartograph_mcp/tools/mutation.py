@@ -805,6 +805,7 @@ def transfer_edges(
     # rules can branch on catalog vs bound/dangling.
     edges = execute(
         """SELECT id, from_component_id, to_component_id, edge_type, identifier,
+                  metadata,
                   CASE
                     WHEN from_component_id IS NULL THEN 'catalog'
                     WHEN to_component_id IS NULL THEN 'dangling'
@@ -886,25 +887,77 @@ def transfer_edges(
         if not (rewrite_from or rewrite_to):
             continue  # edge doesn't reference from_comp; skip
 
-        # Catalog collision handling: if we're moving a catalog's
-        # to_component_id to one that already has an equivalent catalog
-        # (same (to, type, identifier)), drop THIS row instead of
-        # colliding the unique index.
-        if rewrite_to and kind == "catalog":
+        # Phase 10.13.8: collision dedup extended from catalog-only to
+        # bound + dangling. Pre-check whether the post-rewrite tuple
+        # (from, to, edge_type, identifier) collides with an existing
+        # survivor row. If yes, KEEP survivor's row (it's already
+        # bound; the target's row is the duplicate), merge target's
+        # metadata into survivor's, drop target's row. Was: RAISE on
+        # any bound/dangling collision (insight 9a673e68 — forced
+        # 2-attempt absorbs with cascade_edges=False workaround).
+
+        # Compute the resulting tuple after the rewrite.
+        new_from = (to_comp if rewrite_from
+                    else (str(e["from_component_id"]) if e["from_component_id"] else None))
+        new_to = (to_comp if rewrite_to
+                  else (str(e["to_component_id"]) if e["to_component_id"] else None))
+
+        if kind == "catalog":
+            # catalog: from IS NULL, scoped on (to, edge_type, identifier)
             existing = execute_one(
-                """SELECT 1 FROM edges
+                """SELECT id, metadata FROM edges
                    WHERE from_component_id IS NULL
                      AND to_component_id = %s
                      AND edge_type = %s AND identifier = %s
                      AND id != %s""",
-                (to_comp, e["edge_type"], e["identifier"], eid),
+                (new_to, e["edge_type"], e["identifier"], eid),
             )
-            if existing is not None:
-                execute_mutate("DELETE FROM edges WHERE id = %s", (eid,))
-                collapsed += 1
-                continue
+        elif new_from is not None and new_to is not None:
+            # bound: scoped on (from, to, edge_type, identifier)
+            existing = execute_one(
+                """SELECT id, metadata FROM edges
+                   WHERE from_component_id = %s AND to_component_id = %s
+                     AND edge_type = %s AND identifier = %s
+                     AND id != %s""",
+                (new_from, new_to, e["edge_type"], e["identifier"], eid),
+            )
+        elif new_from is not None and new_to is None:
+            # dangling: scoped on (from, edge_type, identifier) WHERE to IS NULL
+            existing = execute_one(
+                """SELECT id, metadata FROM edges
+                   WHERE from_component_id = %s AND to_component_id IS NULL
+                     AND edge_type = %s AND identifier = %s
+                     AND id != %s""",
+                (new_from, e["edge_type"], e["identifier"], eid),
+            )
+        else:
+            existing = None
 
-        # Build the UPDATE.
+        if existing is not None:
+            # Auto-dedup: merge target's metadata into survivor's, drop target.
+            tgt_meta = e.get("metadata") or {}
+            srv_meta = existing.get("metadata") or {}
+            if isinstance(tgt_meta, str):
+                try:
+                    tgt_meta = json.loads(tgt_meta)
+                except (json.JSONDecodeError, TypeError):
+                    tgt_meta = {}
+            if isinstance(srv_meta, str):
+                try:
+                    srv_meta = json.loads(srv_meta)
+                except (json.JSONDecodeError, TypeError):
+                    srv_meta = {}
+            # Survivor keys win on conflict (it was authoritative first).
+            merged = {**tgt_meta, **srv_meta}
+            execute_mutate(
+                "UPDATE edges SET metadata = %s::jsonb, last_seen_at = now() WHERE id = %s",
+                (json.dumps(merged), str(existing["id"])),
+            )
+            execute_mutate("DELETE FROM edges WHERE id = %s", (eid,))
+            collapsed += 1
+            continue
+
+        # No collision — proceed with the UPDATE.
         set_cols = []
         params: list = []
         if rewrite_from:
@@ -922,9 +975,12 @@ def transfer_edges(
             )
             transferred += 1
         except Exception as exc:
-            # Bound/dangling full-key collision — reject.
+            # Defensive: pre-check above should catch all collision cases,
+            # but if a race-condition-style duplicate slips through
+            # (unlikely inside a single mutation transaction), surface it
+            # rather than silently swallow.
             raise ValueError(
-                f"Edge {eid} collision on target component {to_comp}: {exc}"
+                f"Edge {eid} unexpected collision on target {to_comp}: {exc}"
             ) from exc
 
     return {

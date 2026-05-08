@@ -1078,3 +1078,56 @@ def test_get_stale_flows_surfaces_flow_with_dead_outgoing_target(agent_factory):
     rows = comp_tool.get_stale_flows("sme-a")
     assert len(rows) == 1
     assert rows[0]["outgoing_other_status"] == "decommissioned"
+
+
+# ─── Phase 10.13.8: transfer_edges collision auto-dedup ───────────
+
+
+def test_transfer_edges_dangling_collision_auto_dedups(agent_factory):
+    """Phase 10.13.8: dangling-edge collision during transfer is now
+    auto-deduped (was: raised). Survivor keeps authoritative row;
+    target's duplicate is merged into survivor's metadata + dropped.
+
+    Sets up state M with two SMEs that have dangling edges to the same
+    identifier, then directly calls transfer_edges (which is what
+    absorb_agent's cascade calls under the hood) and verifies the
+    collapsed count + final row state.
+    """
+    from cartograph_mcp.tools import mutation, components
+    from shared.db import execute, execute_mutate
+
+    s = _m_state_merge(agent_factory)
+    cons_id, ca, cb = s["cons_id"], s["comp_a"], s["comp_b"]
+    # Survivor (sme-a, ca) has a dangling edge.
+    components.upsert_edge_outbound(
+        "sme-a",
+        {"from_component_id": ca, "edge_type": "calls",
+         "identifier": "/x", "metadata": {"surv": 1}},
+    )
+    # Target (sme-b, cb) has a dangling with same shape.
+    components.upsert_edge_outbound(
+        "sme-b",
+        {"from_component_id": cb, "edge_type": "calls",
+         "identifier": "/x", "metadata": {"tgt": 1}},
+    )
+    # Find the target's edge id
+    tgt_edge = execute(
+        """SELECT id FROM edges WHERE from_component_id = %s
+           AND edge_type = 'calls' AND identifier = '/x'""",
+        (cb,),
+    )[0]
+    # Call transfer_edges with direction='from' to migrate target's edge into survivor.
+    r = mutation.transfer_edges(
+        "sme-a", cons_id, [str(tgt_edge["id"])], direction="from",
+    )
+    assert r["collapsed"] == 1
+    assert r["transferred"] == 0
+    rows = execute(
+        """SELECT id, metadata FROM edges WHERE from_component_id = %s
+           AND edge_type = 'calls' AND identifier = '/x'""",
+        (ca,),
+    )
+    assert len(rows) == 1
+    # Survivor's row is the keeper; target's metadata folded in.
+    assert rows[0]["metadata"].get("surv") == 1
+    assert rows[0]["metadata"].get("tgt") == 1
