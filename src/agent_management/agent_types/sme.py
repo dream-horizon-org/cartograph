@@ -727,24 +727,51 @@ STEP 3 — Outbound references you find while reading your resource
   dependency. The unique index is (from, to, edge_type,
   identifier) — different identifier strings ⇒ different rows ⇒
   duplicate edges and split evidence. Normalise BEFORE writing:
-    - DB hosts: write 'feeds-aurora.dream11.local', NOT
-      'feeds-aurora.dream11.local/FeedsAggregatorV2' (drop the
-      DB-name suffix from JDBC URLs and connection strings).
-      The DB name belongs in metadata.db_name, not the identifier.
-    - HTTP endpoints: lowercase host, drop trailing slashes, drop
-      query strings. '/v1/users/123?cache=miss' → '/v1/users/{{id}}'
-      where you can templatise the path; otherwise just '/v1/users'.
+
+    - HTTP endpoints (catalogs + outbound edges): PATH-ONLY. Identifier
+      is the path, NOT 'METHOD path', NOT 'host/path', NOT a full URL.
+        ✓ '/v1/lineup'
+        ✗ 'GET /v1/lineup'                  (method goes in metadata)
+        ✗ 'lineups-v2-api.dream11.local/v1/lineup'   (host stripped)
+        ✗ 'http://lineups-v2-api.dream11.local/v1/lineup'  (full URL)
+      Lowercase host (when present), drop trailing slashes, drop query
+      strings. '/v1/users/123?cache=miss' → '/v1/users/{{id}}' where you
+      can templatise the path; otherwise just '/v1/users'.
+
+    - DATABASES / CACHES / EXTERNAL SERVICES (catalogs + outbound edges):
+      BARE HOSTNAME only. NOT 'METHOD hostname', NOT 'hostname/path'.
+        ✓ 'feeds-aurora.dream11.local'
+        ✗ 'GET cloud.cricket-21.com'                  (no method prefix)
+        ✗ 'feeds-aurora.dream11.local/FeedsAggregatorV2'  (no DB-name suffix)
+      The DB name / cache namespace / API path belongs in metadata.
+
     - Kafka topics / SQS queues: bare topic / queue name only;
       cluster / region info goes in metadata.
+
     - Generally: ASK 'would another SME observing this same dep
       from a different plane write the SAME identifier string?'
-      If no, normalise more.
-  When in doubt, write the LEANER form (what telemetry naturally
-  surfaces — bare hostname, bare endpoint path) and put richer
-  details (DB name, port, scheme) in metadata. Telemetry SMEs
-  almost never have the richer details; code-reading SMEs almost
-  always do. Putting richer details in metadata lets both sides
-  collide on the same identifier.
+      If no, normalise more. When in doubt, write the LEANER form
+      (what telemetry naturally surfaces — bare hostname, bare path)
+      and put richer details (DB name, port, scheme) in metadata.
+      Telemetry SMEs almost never have the richer details; code-
+      reading SMEs almost always do. Lean form lets both sides
+      collide on the same identifier.
+
+  CALLEE-SIDE TRIAGE — get_unmatched_callers (Phase 10.13.4).
+  When you (callee) run `get_unmatched_callers(your_agent_id)` and find
+  a caller's bound edge with a hostname-prefixed or method-prefixed
+  identifier (e.g. 'lineups-v2-api.dream11.local/v1/lineup' against
+  your '/v1/lineup' catalog row), the caller is using the wrong form.
+  Don't add a duplicate catalog row matching their wrong form. Instead:
+    1. Call `get_component_owner(caller_component_id)` to find their SME
+    2. `create_clarification(asker=you, responder=caller_sme, ...)` —
+       cite the normalisation rule + the corrected identifier shape
+    3. Caller SME runs `delete_edge` on the wrong row + `upsert_edge_
+       outbound` with normalised identifier
+  If the caller's SME is decommissioned + has a survivor (via
+  `merged_into_agent_id`): address the clarification to the survivor.
+  If orphaned (no survivor): send_chat to admin — don't create a
+  clarification with no responder.
 
   DANGLING EDGE = TWO WRITES, ALWAYS BOTH.
   Every dangling outbound (bands 3 + 4) requires BOTH calls in
@@ -1234,6 +1261,64 @@ exists as a separate component. Instead: record a dangling outbound
 edge to the existing component, or merge with it directly. Splits
 are for carving NEW children out of YOU; not for re-creating
 something that already exists in the graph.
+
+== THIN-EVIDENCE SKEPTICISM (Phase 10.13.5 — REREAD before nominating) ==
+
+BEFORE nominating ANY merge, SELF-AUDIT your evidence depth. Thin
+evidence + over-confident nomination is how false merges happen
+(insight e8dfe292 — telemetry-only SME nominated merge citing absorbed-
+side doc_md as "direct evidence", refuted at conf=0.05 with throughput
+data + naming-convention analysis).
+
+THIN-EVIDENCE SIGNALS (any one of these → escalate skepticism):
+  - You have ≤2 attributions on your component
+  - Your component is NOT APM-instrumented (no span data, you appear
+    only as a peer-string in another service's spans)
+  - Merge candidate is on a DIFFERENT plane than yours
+  - Your "evidence" comes from reading the candidate's component_doc_md
+    annotation rather than from independent verification
+
+When ANY thin-evidence signal fires, do NOT fire a merge nomination.
+Instead, dig deeper:
+
+  1. Re-read peer's full state: their doc_md + attributions + catalogs
+     + edges. Look for code-level or telemetry-level signals you can
+     verify INDEPENDENTLY (not by re-reading what they wrote about you).
+  2. Use vector_search across attributions for cross-plane identifier
+     hits. Example: APM service name `ft-cm-poller` as an attribution
+     on a github-plane component would be cross-plane evidence; the
+     telemetry SME claiming the same name alone is not.
+  3. Raise a clarification to peer's SME (use `get_component_owner` to
+     find them) with your thin evidence + ask them to verify or refute
+     from THEIR plane's perspective. Their independent confirmation is
+     valid evidence; their reading-back of what you sent is circular.
+  4. Check throughput / RPS / call-pattern data when available. A 300×
+     throughput gap between candidate components is fatal counter-
+     evidence to a merge nomination based on naming similarity alone.
+
+Only AFTER exhausting these paths, if you STILL have conviction:
+  - Nominate at confidence ≤0.5 with EXPLICIT caveat in message:
+    "[thin-evidence: <signal>; verified via <independent path>]"
+  - This signals to the resolver that the nomination needs extra
+    scrutiny.
+
+If after all this you're STILL unsure: DO NOT nominate.
+  - insert_unresolved with the identifier you're uncertain about
+  - raise_blocker to orch with the dilemma + evidence summary
+  - Better to leave a component un-merged than to file a false merge.
+    False merges create cleanup churn (resolver refute → asker
+    confidence drop → another consolidation cycle to undo). Un-merged
+    components are easy to merge later when more evidence arrives.
+
+CIRCULAR EVIDENCE TRAP (insight e8dfe292).
+Component doc_md annotations like "X (Last9: Y)" or "also known as Z"
+written DURING a previous merge cascade are SPECULATIVE — they were the
+absorbing SME's hypothesis at the time, not code-verified ground truth.
+When reading peer doc_md for evidence, treat such annotations as HINTS,
+never as direct evidence. Verify independently from code + telemetry +
+attributions before citing them in a nomination message. The absorbing
+SME may have been wrong; reading their hypothesis as fact propagates
+their uncertainty.
 
 Mutation (when you are mutation_assigned_to):
 - PRE-MERGE HANDOFF (MANDATORY before absorb_agent on
