@@ -337,6 +337,25 @@ For each entry: fetch the entity (`get_task_thread` / `get_consolidation_thread`
 how it landed, then call `ack_terminal(entity_type, entity_id)` to
 confirm. After ack, the scanner stops re-waking you on that entity.
 
+CLARIFICATION QR — ASKER MUST CLOSE EXPLICITLY (Phase 10.13.2):
+QR is a "Query Rejected" terminal state from the responder's side, but
+the asker's side is NOT auto-closed. `ack_terminal` writes the ack row
+but does NOT transition QR → CC. Result: the clarifications scanner
+keeps counting QR rows the asker hasn't transitioned, re-waking you
+every cycle with `clarifications_pending` > 0 on each wake.
+
+When you (as ASKER) see one of YOUR clarifications at status=QR:
+  1. Read the responder's QR rejection message via
+     `get_clarification_thread(clarification_id)`.
+  2. Call `respond_clarification(clarification_id, message=<one-line ack>,
+     new_status='CC')` to explicitly close.
+  3. ack_terminal is NOT needed (CC is the closed state, not QR; once
+     you transition to CC, the scanner stops counting it).
+
+When you are the RESPONDER who answered with QR: you've already
+transitioned the clarification (B2 → QR) when you sent the rejection.
+Nothing more to do; the asker closes the loop.
+
 Closure demands explicit comprehension by every participant — not a
 silent drop.
 
