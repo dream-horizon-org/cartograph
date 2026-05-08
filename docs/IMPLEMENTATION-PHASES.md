@@ -1,6 +1,6 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-05-08):** Phases 0 → 10.12 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **Phase 10.13 PLANNED** — post-real-data insight triage bundle (10 points across 3 tiers; 2 new MCP tools + 1 schema migration + SME/resolver prompt updates). See §10.13 below for the full plan. **Runtime infra shipped 2026-05-08** (`adb59f3`): `CARTOGRAPH_AGENT_SETTINGS_PATH` env var toggles Bedrock-isolated agent auth (no docker, no host-stack rewrite — agents bill Bedrock while local Claude Code dev session keeps subscription). Details in `docs/POST-COMPACTION-RECOLLECTION.md §2`. **DEMO11 ran 16/16 PASS** (2026-05-05), **DEMO12 targeted Phase-10.8 verification 4/4 PASS** (2026-05-06). **Three real-data onboarding attempts run 2026-05-06**. Current DB = mid-3rd-run: 28 idle agents, 32 components, 291 flows, 56 OPEN insights triaged into Phase 10.13 plan. **Next work: implement Phase 10.13 Tier A** (sub-phases 10.13.1 / 10.13.2 / 10.13.3 / 10.13.6 / 10.13.9) before next real-data attempt.
+**Status (2026-05-08 evening):** Phases 0 → 10.13 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **Phase 10.13 SHIPPED** — all 10 sub-phases across 3 tiers landed in 9 commits; tool count 114 → 117 (+3: `get_component_owner`, `resolve_references_bulk`, `bind_edges_bulk`); 1 schema migration (attribution UNIQUE → component-scoped); 13 OPEN insights triaged (10 promoted, 3 wontfix). **Runtime infra shipped 2026-05-08** (`adb59f3`): `CARTOGRAPH_AGENT_SETTINGS_PATH` env var toggles Bedrock-isolated agent auth (no docker, no host-stack rewrite — agents bill Bedrock while local Claude Code dev session keeps subscription). Details in `docs/POST-COMPACTION-RECOLLECTION.md §2`. **DEMO11 ran 16/16 PASS** (2026-05-05), **DEMO12 targeted Phase-10.8 verification 4/4 PASS** (2026-05-06). **Three real-data onboarding attempts run 2026-05-06**. Current DB after Phase 10.13: 28 idle agents, 32 components, 291 flows. **Next work: 4th real-data attempt** with Phase 10.13 surface; targeted DEMO13 verification optional but not strictly required (changes are mostly prompt + a few isolated tool/schema bits, all test-covered).
 
 Most recent (2026-05-05 → 2026-05-06):
 - **10.7** (`description` column separate from `doc_md` + `vector_search` filters + `exclude_self` + workspace-local doc_md) — 8 sub-commits ending at `e7ce669`.
@@ -5587,7 +5587,24 @@ Deliberately NOT added: the "per-service drill-down mandate" (iterator must link
 
 ---
 
-## Phase 10.13: Post-real-data insight triage bundle — PLANNED
+## Phase 10.13: Post-real-data insight triage bundle ✅ SHIPPED
+
+**Status (2026-05-08 evening):** SHIPPED. All 10 sub-phases across 3 tiers landed in 9 commits.
+
+**Commit hashes:**
+- `6af36e0` 10.13.2 — QR clarification asker prompt fix
+- `d8cb4d9` 10.13.9 — Kafka consumers declare consumed topics as queue catalogs
+- `3e156bf` 10.13.1 — SME prompt split/merge discipline doctrine
+- `fae957b` 10.13.3 — `get_component_owner` MCP tool
+- `e81bcca` 10.13.6 — attribution UNIQUE → component-scoped (schema migration)
+- `0a4d3e6` 10.13.4 + 10.13.5 — identifier normalisation + thin-evidence skepticism
+- `2303322` 10.13.10 — prompt-tightening bundle (7 nudges)
+- `8b66d0c` 10.13.8 — `absorb_agent` cascade-collision auto-dedup
+- `928de48` 10.13.7 — `resolve_references_bulk` + `bind_edges_bulk`
+
+**Tool count: 114 → 117** (+3 new: `get_component_owner`, `resolve_references_bulk`, `bind_edges_bulk`).
+**Schema migration:** attribution `UNIQUE(plane, resource_type, identifier)` → `UNIQUE(component_id, plane, resource_type, identifier)` (component-scoped). Identity-drift moves from structural rejection to social resolution via clarifications.
+**Insight triage:** 13 OPEN insights triaged (10 promoted, 3 wontfix). Remaining 47 left open as low-priority/tactic-win bundle for future runs.
 
 **Status (2026-05-07):** PLANNED. Synthesised from the 3× real-data onboarding runs on 2026-05-06 (pre-realdata / pre-realdata2 / pre-realdata3 backups). Sources: 56 OPEN agent insights + 7 admin→agent chats + 6 agent→admin chats + orch broadcast history. Triaged down from 26 individual findings into 10 consolidated work items; Tier A ships before the next real-data run, Tier B is high-impact follow-on, Tier C is a single bundle commit of small prompt nudges.
 

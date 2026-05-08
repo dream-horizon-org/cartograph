@@ -12,7 +12,18 @@
 
 ## 0. WHERE I AM RIGHT NOW (the most important section)
 
-**Phases 10.8 → 10.12 SHIPPED 2026-05-06. Three real-data onboarding attempts run 2026-05-06. **Phase 10.13 PLANNED** (2026-05-07) — 56 OPEN insights triaged into a 10-point / 3-tier plan. Full plan in `docs/IMPLEMENTATION-PHASES.md §10.13`. Tier A = must-ship before next real-data run: split/merge discipline rewrite (10.13.1), QR clarification asker prompt fix (10.13.2), `get_component_owner` new tool (10.13.3), attribution UNIQUE → component-scoped (10.13.6), Kafka consumer catalog template fix (10.13.9). Tool count will go 114 → 117.**
+**Phases 10.8 → 10.13 SHIPPED. Three real-data onboarding attempts run 2026-05-06; Phase 10.13 (post-real-data insight bundle) shipped 2026-05-08 evening across 9 commits. Tool count 114 → 117. One schema migration (attribution UNIQUE → component-scoped). Next: 4th real-data attempt against the new surface.**
+
+**Phase 10.13 sub-commits (all live):**
+- `6af36e0` 10.13.2 QR clar asker
+- `d8cb4d9` 10.13.9 Kafka queue catalogs
+- `3e156bf` 10.13.1 split/merge discipline
+- `fae957b` 10.13.3 get_component_owner
+- `e81bcca` 10.13.6 attribution UNIQUE → component-scoped
+- `0a4d3e6` 10.13.4 + .5 identifier-norm + thin-evidence
+- `2303322` 10.13.10 prompt-tightening bundle (7 nudges)
+- `8b66d0c` 10.13.8 absorb cascade-collision auto-dedup
+- `928de48` 10.13.7 resolve_references_bulk + bind_edges_bulk
 
 ### What's done (committed + pushed):
 
@@ -51,27 +62,13 @@
 
 ### What's pending (next session — pick up here):
 
-1. **Implement Phase 10.13 Tier A** (before 4th real-data attempt). Plan fully written in `docs/IMPLEMENTATION-PHASES.md §10.13`. Sub-phases + ship-order:
-   - **10.13.1** Split/merge discipline rewrite — SME prompt block (inherit-then-disown via SPLIT; monorepos split-before-merge)
-   - **10.13.2** QR clarification asker terminal path — SME prompt fix (use `respond_clarification(new_status='CC')`, NOT `ack_terminal`)
-   - **10.13.3** `get_component_owner(component_id)` — new MCP tool + SME prompt + 3 tests
-   - **10.13.6** Attribution global-UNIQUE → component-scoped — schema migration + `upsert_attribution(s)_bulk` ON CONFLICT fix + resolver/SME prompt softening + 3 new tests + ~5 inverted tests
-   - **10.13.9** Kafka consumers declare consumed topics as `queue` catalogs — split-welcome template fix + SME prompt Step 2b update
+1. **Phase 10.13 — DONE.** All 10 sub-phases shipped (commits listed above). 117 tools live. Schema migrated. SME / resolver prompts updated.
 
-2. **Then Tier B** (high-impact prompt + tool, follow-on):
-   - **10.13.4** identifier normalisation tightening (SME prompt, 40 LOC)
-   - **10.13.5** thin-evidence skepticism rule (SME prompt, 60 LOC)
-   - **10.13.7** `resolve_references_bulk` + `bind_edges_bulk` — 2 new MCP tools + 10 tests
-   - **10.13.8** `absorb_agent cascade_edges=True` dangling-collision auto-dedup — mutation.py + 4 tests
+2. **4th real-data attempt** — system now incorporates all 10 insight-bundle changes. Optional targeted DEMO13 verification before; not strictly required (changes are mostly prompt + a few isolated tool/schema bits, all test-covered, tools registered cleanly).
 
-3. **Then Tier C** (single bundle commit):
-   - **10.13.10** prompt-tightening bundle — 7 small nudges in one SME prompt commit
+3. **Bedrock cost monitoring** — spend no longer routes through Anthropic API billing; watch AWS side.
 
-4. **Then 10.13.12 final doc sync + targeted agentic verification (DEMO13 if warranted) before 4th real-data attempt.**
-
-5. **Bedrock cost monitoring** — spend no longer routes through Anthropic API billing; watch AWS side.
-
-6. **Uncommitted:** `src/mcp_servers.yaml` has `last9-reader` addition (127.0.0.1:8101/mcp). Decide: commit vs local override.
+4. **mcp_servers.yaml** — `last9-reader` entry promoted to checked-in (no longer a local override).
 
 See `docs/IMPLEMENTATION-PHASES.md §10.8 / §10.9 / §10.10 / §10.11 / §10.12` for full rationale per sub-phase.
 
