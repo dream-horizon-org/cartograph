@@ -44,6 +44,7 @@
 | 10.10 sleep rewrite + datastore mandate | `13531d7` | SLEEP rewritten in sme/iter/orch prompts (yield-over-sleep doctrine); ★ DATASTORES MANDATORY ★ block in iterator telemetry section with DEMO7 feeds-v2 breadcrumb |
 | 10.10 datastore wording softening | `da49187` | "MIGHT NOT BE PRESENT" not "do NOT appear" — softer framing, mandate intact |
 | 10.11 Bedrock model ids + SME lanes 8 | `c04f7c9` | `config.MODEL_OPUS` / `MODEL_SONNET` env constants (sources `ANTHROPIC_DEFAULT_*_MODEL`); all 4 agent types rewired; `INVOKE_LANES_SME` 4→8 (total 12) |
+| Runtime: Bedrock-isolated agent auth (single env-var toggle) | `adb59f3` | `CARTOGRAPH_AGENT_SETTINGS_PATH` → spawned `claude -p` gets `--settings <path>` AND `shared/config.py` auto-loads file's env block at import. Local Claude Code dev session unaffected (subscription); agents bill Bedrock. See §2 for ops detail. Drops the docker-compose detour. |
 | 10.11 HLD + config stale-lane cleanup | `0521153` | HLD ASCII diagram + config.py comment fixed to 12-lane total |
 | 10.12 iterator prompt gaps (MCP port + APM fallback) | `45a9f4d` | Two blocks added to iterator prompt: AUXILIARY MCP PORT CONFLICTS (port 8101 collision playbook) + SURFACE FALLBACK LADDER (when APM surfaces missing, walk infra/cloud/logs/code) |
 | 10.12 doc sync | `b79bafc` | §19 extended + IMPLEMENTATION-PHASES §10.12 |
@@ -101,6 +102,8 @@ b79bafc docs: sync for Phase 10.12 (iterator MCP port + APM fallback)
 45ccf4b gitignore: snapshots/ + *.sql — local-only DB backups
 0521153 docs: fix stale lane-count refs — HLD ASCII diagram + config.py comment
 62ab801 docs: sync for Phase 10.9 + 10.10 + 10.11 (post-DEMO12 pre-real-data)
+adb59f3 runtime: Bedrock-isolated agent auth via CARTOGRAPH_AGENT_SETTINGS_PATH
+ec0fb26 docs: Phase 10.13 plan — post-real-data insight triage bundle
 c04f7c9 config: Bedrock-compatible model ids + SME lanes 4→8
 da49187 prompts: soften datastore-mandate wording — "might not be" not "do NOT"
 13531d7 prompts: rewrite SLEEP semantics + telemetry datastore mandate
