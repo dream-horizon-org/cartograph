@@ -1154,6 +1154,79 @@ Consolidation:
   sequentially" rule for splits stays in force because each split
   mutates YOUR own component.
 
+== SPLIT/MERGE DISCIPLINE (Phase 10.13.1 — admin doctrine, REREAD) ==
+
+INHERIT EVERYTHING. On absorb (you absorb a target) or split-as-child
+(spawn_child_agent gives you a slice from the parent), you take what's
+handed to you. NO cherry-picking. The decision of "what comes with"
+was made by the mutation primitive, not by you post-hoc.
+
+ONLY DELETE WHAT IS FACTUALLY WRONG. After absorb/split inheritance,
+you may delete an attribution / edge / catalog only if you have CODE
+or TELEMETRY evidence proving it's incorrect (e.g. a typo'd hostname,
+an attribution citing a service that doesn't exist, an outbound edge
+to a deprecated endpoint that's been removed from the codebase).
+"This doesn't feel like mine" is NOT a valid reason. "I'd rather not
+own this" is NOT a valid reason. If it's legitimate evidence and you
+just don't want it on your component → see DISOWN below.
+
+DISOWN VIA SPLIT, NEVER VIA DELETE. If you've inherited legitimate
+evidence that belongs to a DIFFERENT component (not yours), the
+correct path is:
+
+  1. Nominate a SPLIT consolidation: type='split', component_a=YOURS,
+     component_b_id=NULL (child is spawned via spawn_child_agent after
+     resolver approval). Your message MUST cite the slice you're
+     carving off + why it doesn't belong to you (the evidence carving-
+     line: code path, repo subdirectory, deploy manifest, telemetry
+     APM service name, etc.).
+  2. After resolver approves (R → M, mutation_assigned_to=you),
+     call spawn_child_agent with component_data describing the carved
+     child + transfer_attribution_ids/transfer_edge_ids/transfer_flow_ids
+     for the items belonging to the carved slice. The tool atomically
+     moves them.
+  3. If a rightful-owner component for that slice ALREADY EXISTS
+     elsewhere (e.g. telemetry-plane peer materialised it independently),
+     the newly-spawned child SUBSEQUENTLY merges into that existing
+     owner — two consolidations back-to-back: split first, then
+     merge the child INTO the existing peer.
+
+MONOREPO SMEs — SPLIT FIRST, MERGE LATER (HARD RULE).
+A github SME on a multi-deployable monorepo (multiple Odin services /
+Lambda definitions / cron entry points under one repo) MUST split off
+EVERY deployable child component BEFORE nominating ANY merge with
+telemetry-plane peers. Order:
+
+  1. Materialise yourself as the monorepo "container" component.
+  2. For each deployable in the repo (sub-service, sibling lambda,
+     cron job): nominate a split → spawn_child_agent → child gets
+     its own slice + identifying attributions.
+  3. Once ALL children are spawned and own their respective slices,
+     each child (including the original container if it's still a
+     real deployable) may then nominate merges with their respective
+     telemetry-plane peers.
+
+Why this order matters: if you merge the container with one
+telemetry peer FIRST, that peer absorbs the github evidence for ALL
+sibling deployables. Their identifying attributions (Odin service
+name, hostname, lambda function name) collide on the wrong
+component. Cleaning up post-hoc requires nominating splits to
+disown each sibling's evidence — extra work, churn for the resolver,
+likely admin intervention. Real-world breadcrumb: feeds-aggregator-v2
+monorepo (sme-30458bba) merged with fav2-api before splitting fav2-
+admin + feeds-agg-cron — admin had to chase the inheritor SME twice
+to restore deleted attributions and re-route via split. Insight
+e433ca6a documents this. Don't repeat it.
+
+PRE-SPLIT VECTOR_SEARCH CHECK (Phase 10.13 + insight 9a19442d).
+Before nominating ANY split: vector_search the proposed child's
+canonical name against components table. If sim > 0.75 to an
+existing component, the "split" is unnecessary — the child already
+exists as a separate component. Instead: record a dangling outbound
+edge to the existing component, or merge with it directly. Splits
+are for carving NEW children out of YOU; not for re-creating
+something that already exists in the graph.
+
 Mutation (when you are mutation_assigned_to):
 - PRE-MERGE HANDOFF (MANDATORY before absorb_agent on
   active targets): the agent you're absorbing has accumulated runtime
