@@ -1364,6 +1364,55 @@ def get_my_components(agent_id: str) -> list[dict]:
     )
 
 
+def get_component_owner(agent_id: str, component_id: str) -> dict:
+    """Phase 10.13.3. Return the active SME owning a component via RCA.
+
+    Solves the "find owner SME for clarification" pain (insights b5c84e9e
+    + a587f682 + 4be95d57 — sme-d264615e burned 5 sequential clarifications
+    guessing wrong owners). Use this BEFORE creating a clarification about
+    another component.
+
+    Returns:
+      {
+        "component_id": "...",
+        "canonical_name": "...",
+        "component_status": "active" | "decommissioned",
+        "owner_agent_id": "sme-..." | None,    # None if no RCA row
+        "owner_status": "idle" | "running" | "decommissioned" | None,
+        "merged_into_agent_id": "sme-..." | None,    # follow chain if decom
+      }
+
+    Triage rules:
+      - owner_status='idle'/'running' → address the clarification directly
+        to owner_agent_id.
+      - owner_status='decommissioned' + merged_into_agent_id set → address
+        to the survivor. They'll see it via get_my_proxy_items.
+      - owner_status='decommissioned' + merged_into_agent_id None →
+        component is orphaned; escalate to admin via send_chat, do not
+        create a clarification.
+
+    Raises ValueError if component_id not found.
+    """
+    _caller(agent_id)
+    row = execute_one(
+        """SELECT c.id::text         AS component_id,
+                  c.canonical_name,
+                  c.status            AS component_status,
+                  rca.agent_id        AS owner_agent_id,
+                  ar.status           AS owner_status,
+                  ar.merged_into_agent_id::text AS merged_into_agent_id
+             FROM components c
+             LEFT JOIN resource_component_agents rca ON rca.component_id = c.id
+             LEFT JOIN agent_runs ar ON ar.agent_id = rca.agent_id
+            WHERE c.id = %s
+            LIMIT 1""",
+        (component_id,),
+    )
+    if row is None:
+        raise ValueError(f"Component {component_id} not found")
+    return row
+
+
 def get_stale_edges(agent_id: str) -> list[dict]:
     """Return edges owned by this SME's component where the OTHER
     endpoint's component is decommissioned. "Owned" = either the edge's

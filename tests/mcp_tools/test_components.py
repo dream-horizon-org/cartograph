@@ -420,3 +420,66 @@ def test_get_component_attributions_edges_unresolved(agent_factory):
 
     unres = components.get_unresolved("orch-1", cid_a)
     assert len(unres) == 1
+
+
+# ─── Phase 10.13.3: get_component_owner ───────────────────────────
+
+
+def test_get_component_owner_active(agent_factory):
+    """Active component → returns the SME owning it via RCA."""
+    _iterator(agent_factory, "iter-gh", "github")
+    r = resources.upsert_resource("iter-gh", "github", "repo", "dream11/x")
+    _sme_with_resource(agent_factory, "sme-x", r["id"])
+    components.upsert_component(
+        "sme-x",
+        {"canonical_name": "comp-x", "display_name": "Comp X",
+         "component_type": "application"},
+    )
+    cid = execute_one(
+        "SELECT id::text AS id FROM components WHERE canonical_name='comp-x'"
+    )["id"]
+
+    agent_factory("orch-1", "orchestrator")
+    res = components.get_component_owner("orch-1", cid)
+    assert res["component_id"] == cid
+    assert res["canonical_name"] == "comp-x"
+    assert res["component_status"] == "active"
+    assert res["owner_agent_id"] == "sme-x"
+    assert res["owner_status"] == "idle"
+    assert res["merged_into_agent_id"] is None
+
+
+def test_get_component_owner_decommissioned_with_merger(agent_factory):
+    """Decommissioned component with merged_into_agent_id → carry survivor."""
+    _iterator(agent_factory, "iter-gh", "github")
+    r = resources.upsert_resource("iter-gh", "github", "repo", "dream11/y")
+    _sme_with_resource(agent_factory, "sme-y", r["id"])
+    components.upsert_component(
+        "sme-y",
+        {"canonical_name": "comp-y", "display_name": "Comp Y",
+         "component_type": "application"},
+    )
+    cid = execute_one(
+        "SELECT id::text AS id FROM components WHERE canonical_name='comp-y'"
+    )["id"]
+    # Mark sme-y decommissioned + chain to a survivor
+    agent_factory("sme-survivor", "sme")
+    execute_mutate(
+        "UPDATE agent_runs SET status='decommissioned', merged_into_agent_id=%s "
+        "WHERE agent_id='sme-y'",
+        ("sme-survivor",),
+    )
+
+    agent_factory("orch-1", "orchestrator")
+    res = components.get_component_owner("orch-1", cid)
+    assert res["owner_status"] == "decommissioned"
+    assert res["merged_into_agent_id"] == "sme-survivor"
+
+
+def test_get_component_owner_not_found(agent_factory):
+    """Bogus component_id → ValueError."""
+    agent_factory("orch-1", "orchestrator")
+    with pytest.raises(ValueError, match="not found"):
+        components.get_component_owner(
+            "orch-1", "00000000-0000-0000-0000-000000000000",
+        )

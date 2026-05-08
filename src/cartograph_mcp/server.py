@@ -1472,6 +1472,26 @@ def get_my_components(agent_id: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+def get_component_owner(agent_id: str, component_id: str) -> dict[str, Any]:
+    """Phase 10.13.3. Return the active SME owning a component via RCA.
+
+    Use BEFORE creating a clarification about another component — saves
+    the round-trip cost of guessing wrong owners (insights b5c84e9e +
+    a587f682 + 4be95d57). Returns:
+      {component_id, canonical_name, component_status, owner_agent_id,
+       owner_status, merged_into_agent_id}
+
+    Triage by owner_status:
+      - 'idle' / 'running' → address clarification to owner_agent_id
+      - 'decommissioned' + merged_into_agent_id set → address to survivor
+      - 'decommissioned' + merged_into_agent_id None → orphaned; escalate
+        via send_chat to admin, don't create a clarification
+
+    Raises ValueError if component_id not found."""
+    return components_tool.get_component_owner(agent_id, component_id)
+
+
+@mcp.tool()
 def get_stale_edges(agent_id: str) -> list[dict[str, Any]]:
     """Phase 4.1 hygiene. Return edges owned by caller's component where
     the OTHER endpoint's component is decommissioned. Each row carries
@@ -2294,6 +2314,7 @@ def _build_batch_dispatch() -> dict:
         "get_unresolved",
         "get_stale_edges", "get_stale_flows",
         "get_my_components",
+        "get_component_owner",
         # catalogs
         "upsert_catalog", "upsert_catalogs_bulk", "upsert_edge_catalog",
         "delete_catalog", "delete_catalogs_bulk",

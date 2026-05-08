@@ -207,6 +207,11 @@ Act — proxy inheritance:
 Act — communication:
 - respond_task(agent_id, task_id, message, new_status, blocker_detail?)
 - create_clarification(asker, responder, question)
+  Phase 10.13.3: BEFORE creating a clarification ABOUT another component
+  (e.g. wrong identifier on their bound edge, missing catalog row), call
+  `get_component_owner(agent_id, component_id)` to find the right
+  responder. Direct-addressed clarifications resolve in 1 round-trip;
+  guessing wrong owners burns 5+ wakes (insight b5c84e9e).
 - respond_clarification(agent_id, clarification_id, message, new_status)
 - send_chat(from_agent_id, to_agent_id="admin", message) — non-admin
   agents may only message admin.
