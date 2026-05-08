@@ -1,6 +1,6 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-05-06 evening):** Phases 0 → 10.12 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **DEMO11 ran 16/16 PASS** (2026-05-05), **DEMO12 targeted Phase-10.8 verification 4/4 PASS** (2026-05-06). **Three real-data onboarding attempts run 2026-05-06** (pre-realdata / pre-realdata2 / pre-realdata3 backups). Attempt 1 surfaced 2 iterator prompt gaps closed in Phase 10.12 (`45a9f4d`). Current DB = mid-3rd-run: 36 agents, 32 components, 291 flows, 56 OPEN insights. **Next work: insight triage batch** (expected as Phase 10.13 bundle — prompt promotions + possible tool additions for `list_agents(include_components)` / `get_component_owner`).
+**Status (2026-05-07):** Phases 0 → 10.12 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). **Phase 10.13 PLANNED** — post-real-data insight triage bundle (10 points across 3 tiers; 2 new MCP tools + 1 schema migration + SME/resolver prompt updates). See §10.13 below for the full plan. **DEMO11 ran 16/16 PASS** (2026-05-05), **DEMO12 targeted Phase-10.8 verification 4/4 PASS** (2026-05-06). **Three real-data onboarding attempts run 2026-05-06** (pre-realdata / pre-realdata2 / pre-realdata3 backups). Current DB = mid-3rd-run: 36 agents, 32 components, 291 flows, 56 OPEN insights triaged into Phase 10.13 plan. **Next work: implement Phase 10.13 Tier A** (sub-phases 10.13.1 / 10.13.2 / 10.13.3 / 10.13.6 / 10.13.9) before next real-data attempt.
 
 Most recent (2026-05-05 → 2026-05-06):
 - **10.7** (`description` column separate from `doc_md` + `vector_search` filters + `exclude_self` + workspace-local doc_md) — 8 sub-commits ending at `e7ce669`.
@@ -5587,7 +5587,431 @@ Deliberately NOT added: the "per-service drill-down mandate" (iterator must link
 
 ---
 
-## Phase 11+: Future phases (planned, not started)
+## Phase 10.13: Post-real-data insight triage bundle — PLANNED
+
+**Status (2026-05-07):** PLANNED. Synthesised from the 3× real-data onboarding runs on 2026-05-06 (pre-realdata / pre-realdata2 / pre-realdata3 backups). Sources: 56 OPEN agent insights + 7 admin→agent chats + 6 agent→admin chats + orch broadcast history. Triaged down from 26 individual findings into 10 consolidated work items; Tier A ships before the next real-data run, Tier B is high-impact follow-on, Tier C is a single bundle commit of small prompt nudges.
+
+### 10.13.0 — Inventory + triage summary
+
+**Source inputs:**
+- 56 `agent_insights` rows (distribution: 25 prompt_gap + 20 tactic_win + 5 workflow_friction + 4 tool_gap + 2 doc_confusing)
+- Admin chats flagging specific pain: split-before-merge discipline (19:11+19:19), QR clarification scanner loop (19:13+19:32), component→owner lookup (19:03), identifier-normalisation mismatch (19:00), ft-cm-poller false merge root-cause (19:04+19:05)
+- Real-run ground truth: monorepo merge-before-split bug (sme-37a63c60 self-corrected at 19:20); thin-telemetry false merge refuted at conf=0.05 (consolidation `8a489bd2`)
+
+**Final 10-point list** (dropped 4, bundled 11 into #10, bumped attribution UNIQUE to CRITICAL):
+
+| # | Theme | Severity | Fix type | Tier |
+|---|---|---|---|---|
+| 1 | Split/merge discipline (inherit-then-disown via SPLIT; monorepos split all children BEFORE telemetry merge) | 🔴 CRITICAL | SME prompt block | A |
+| 2 | QR clarification asker terminal path — use `respond_clarification(new_status='CC')` not `ack_terminal` | 🔴 CRITICAL | SME prompt (no code change) | A |
+| 3 | `get_component_owner(component_id)` MCP tool | 🔴 CRITICAL | New MCP tool + SME prompt | A |
+| 4 | Identifier normalisation tightening + self-serve fix path | 🟠 HIGH | SME prompt | B |
+| 5 | Thin-evidence skepticism rule (don't merge on ≤2 attrs + no APM without digging deeper) | 🟠 HIGH | SME prompt | B |
+| 6 | Attribution global-UNIQUE → component-scoped UNIQUE | 🔴 CRITICAL | Schema migration + upsert tool fix + prompt softening | A |
+| 7 | `resolve_references_bulk` + `bind_edges_bulk` MCP tools | 🟡 MED | 2 new MCP tools | B |
+| 8 | `absorb_agent cascade_edges=True` dangling-collision auto-dedup | 🟡 MED | Code fix in mutation.py | B |
+| 9 | Kafka consumers declare consumed topics as `queue` catalogs | 🟡 MED | Split-welcome template fix + SME prompt | A |
+| 10 | Prompt-tightening bundle (7 small nudges) | 🟢 LOW | SME prompt bundle | C |
+
+**Dropped (reasoning):**
+- `d06fa53a` target-side stale-inbound cleanup → merge cascade already handles it; standalone-decom-without-merger is the rare edge case
+- `4db5fa1c` IP-span cross-reference → complex cross-plane check, no recurrence this run
+- `c13e0acd` route-extraction second-pass grep → SMEs catch via existing hygiene
+- `11f34e8d` missing fantasy-tour-aerospike-v1 → data gap, not a prompt/tool issue
+
+**Backlog (not shipping in 10.13):**
+- Add `env` / `tag` column to `attributions` for structured environment/scope tagging (removes need for prefix-in-identifier workarounds)
+
+### 10.13.1 — Split/merge discipline rewrite (insight `e433ca6a`, `9a19442d` + admin 19:11/19:19)
+
+**Symptom.** Monorepo github SME `sme-30458bba` (feeds-aggregator-v2) merged with telemetry fav2-api BEFORE splitting off fav2-admin + feeds-agg-cron children. Evidence for those 2 siblings landed on fav2-api. The inheritor SME (sme-37a63c60) then DELETED the sibling-specific attributions thinking "these don't belong to me" — wrong response. Admin intervened twice; agent restored the deleted attributions.
+
+**Admin's rule (verbatim 19:19):** *"during split you dont just take what you want, you inherit everything obviously right you can say I'm gonna keep things that seem like that belong this component and delete, if you inherited extra you inherited extra unless it s facttulaly wrong you cant delete right? you own it then, then tyou gotta disown if you believe so saying you dont own it then nomiate for a merge"*
+
+**Correct mental model (to codify in SME prompt):**
+
+1. On split/absorb, inheritor takes EVERYTHING from the source. No cherry-picking.
+2. Only FACTUALLY WRONG attributions can be deleted (e.g. a typo'd hostname; an attribution that is actively incorrect per code evidence).
+3. Legitimate-but-unwanted inheritance → you OWN it until you disown it.
+4. Disown path = **SPLIT**: carve the unwanted slice into a new child component you spawn via `spawn_child_agent`. The child inherits your unwanted slice; you keep the rest.
+5. If a rightful-owner component for the carved slice already exists elsewhere (e.g. a telemetry-plane fav2-admin component), the newly-split child SUBSEQUENTLY merges into that existing owner — two consolidations back-to-back: split first, then merge the child with the existing peer.
+6. Monorepo SMEs MUST split ALL deployable children BEFORE any telemetry-plane merge. Never merge the container directly with a telemetry peer — the container's evidence for sibling deployables will corrupt the telemetry peer's component.
+
+**Files:** `src/agent_management/agent_types/sme.py` — new `== SPLIT/MERGE DISCIPLINE ==` block in CONSOLIDATION section. Target location: near existing consolidation guidance, ~5 paragraphs + worked example (fav2 monorepo case as the breadcrumb).
+
+**Effort:** M (~80 LOC prompt; smoke-test compiles).
+
+### 10.13.2 — QR clarification asker terminal path (insight `b40b4e95` + sme-d264615e chats)
+
+**Symptom.** sme-d264615e terminal-acked 6 clarifications at status=QR (Query Rejected). `ack_terminal` writes to `terminal_acks` table but does NOT transition the clarification's status. Scanner query `WHERE asker_agent_id=%s AND status IN ('B1','QR','QC')` keeps counting QR rows as pending forever. SME re-woken every ~90s with `clarifications_pending=6` and `terminal_pending_ack=0` — scanner loop burning wake cycles.
+
+**Root cause (not a bug, a prompt gap).** Two "I'm done" verbs compete:
+- `ack_terminal(entity_type='clarification', entity_id, agent_id)` — writes ack row (used for CC + QR in current code: `_TERMINAL_STATES = {"clarification": {"CC", "QR"}}`)
+- `respond_clarification(clarification_id, new_status='CC', ...)` — the ONLY path that transitions QR → CC
+
+QR IS terminal (state machine allows `QR → {CC}` via asker response). Both QR and CC are terminal states in the `ack_terminal` sense, but only CC is the fully-closed state that stops the scanner. The asker must explicitly transition QR → CC via `respond_clarification` to close the loop.
+
+**Fix (prompt-only, NO code change):**
+
+SME prompt update — TERMINAL-STATE ACK section:
+- Clarify that QR is a terminal state from the RESPONDER's side only — the asker still has a closing step.
+- On QR: asker calls `respond_clarification(clarification_id, message, new_status='CC')` to explicitly close. This transitions QR → CC and stops scanner wakes.
+- `ack_terminal` on a clarification is still valid for CC (the fully-closed case) but is NOT sufficient for QR — the asker must respond_clarification first, then (optionally) ack_terminal.
+- Worked example in prompt: responder sends QR → asker reads rejection → asker calls respond_clarification(new_status='CC') → done. No ack_terminal needed.
+
+**Files:** `src/agent_management/agent_types/sme.py` — TERMINAL-STATE ACK block (~15 LOC revision).
+
+**Effort:** XS (~15 LOC prompt).
+
+### 10.13.3 — `get_component_owner(component_id)` MCP tool (insights `b5c84e9e`, `a587f682`, `4be95d57`)
+
+**Symptom.** sme-d264615e burned 5 sequential clarification round-trips trying to find the owner of `fantasy-commentary-poller` (f126025d). `list_agents` returns agent_ids only — no mapping from component_id to owning agent. Every mis-addressed clarification = 1 wake + 1 QR response + 1 terminal-ack cycle wasted. Caller-side SMEs wanting to raise a clarification about a peer's component have no efficient path.
+
+**Fix.** New MCP tool `get_component_owner(agent_id, component_id) -> dict`:
+
+```python
+def get_component_owner(agent_id: str, component_id: str) -> dict:
+    """Return the active SME owning a component via RCA.
+
+    Returns: {
+      "component_id": "...",
+      "canonical_name": "...",
+      "owner_agent_id": "sme-..."  | None,  # None if component decommissioned
+      "owner_status": "idle" | "running" | "decommissioned" | None,
+      "merged_into_agent_id": "sme-..." | None,  # chain walk if decom
+    }
+
+    Raises ValueError if component_id not found.
+    """
+    # SELECT c.canonical_name, c.status, rca.agent_id, ar.status, ar.merged_into_agent_id
+    # FROM components c
+    # LEFT JOIN resource_component_agents rca ON rca.component_id = c.id
+    # LEFT JOIN agent_runs ar ON ar.agent_id = rca.agent_id
+    # WHERE c.id = %s
+```
+
+Single SQL join; 1 round-trip. Idempotent read. Usable by any agent (no ACL gate — just `require_active_agent(agent_id)`).
+
+**SME prompt update.** In the hygiene cycle + clarification section:
+- "Before creating a clarification about another component, call `get_component_owner(component_id)` to find the right responder."
+- "If `owner_status='decommissioned'` + `merged_into_agent_id` set → address the clarification to the survivor."
+- "If `owner_status='decommissioned'` + `merged_into_agent_id=None` → component is orphaned; escalate to admin via chat, do not create a clarification."
+
+**Files:**
+- `src/cartograph_mcp/tools/components.py` — new function `get_component_owner`
+- `src/cartograph_mcp/server.py` — tool wrapper + registration (tool count 114 → 115)
+- `src/agent_management/agent_types/sme.py` — prompt block
+- `tests/mcp_tools/test_components.py` — 3 tests (active owner, decom-with-merger, decom-orphan)
+
+**Effort:** S (~50 LOC + prompt + 3 tests).
+
+### 10.13.4 — Identifier normalisation tightening + self-serve fix path (insights `c695d2aa`, `abb7b763`, `1c9e8f99`, `a20f4388`, `8c10ce19`, `4e049439`)
+
+**Symptom.** 6 insights + sme-9bbe926c chat to admin (19:00). Callers on the telemetry plane discover outbound edges via APM span peers and record identifiers as `hostname/path` (e.g. `lineups-v2-api.dream11.local/v1/lineup`). Callees on the github plane declare catalogs as path-only (e.g. `GET /v1/lineup`). The two identifier forms don't match → `get_unmatched_callers` keeps surfacing them forever; callee SME has no self-serve path to fix caller's edge identifier.
+
+**Fix — prompt-only (no schema change, no new tool):**
+
+SME prompt update — IDENTIFIER NORMALISATION block in STEP 3 (extend existing Phase 7.4.11 block):
+- **HTTP endpoints** = path-only (`/v1/lineup`). NEVER prefix with hostname. NEVER prefix with method unless the path itself is method-ambiguous.
+- **DB hosts / caches / external services** = bare hostname only (`feeds-aggregator-v2-elasticache.dream11.local`). NEVER prefix with method (`GET cloud.cricket-21.com` is WRONG; should be `cloud.cricket-21.com` with method in metadata).
+- **Kafka topics / SQS queues** = bare name.
+- **When `get_unmatched_callers` reveals a mismatch:** callee SME raises a clarification to the caller's SME (use `get_component_owner` from #10.13.3 to find them) with the normalised identifier and a one-line explanation of the rule. Caller's SME then does `delete_edge` + `upsert_edge_outbound` with the correct identifier, or `upsert_edge_outbound` with the normalised form (ON CONFLICT merges metadata).
+- **Cross-reference insight `3a7193fd`** (get_stale_edges my_side=to): callee can also detect decommissioned-caller edges and raise clarification to the survivor.
+
+**Files:** `src/agent_management/agent_types/sme.py` — IDENTIFIER NORMALISATION block (~40 LOC revision).
+
+**Effort:** S (~40 LOC prompt).
+
+### 10.13.5 — Thin-evidence skepticism rule (insights `e8dfe292`, `c30e79c1`, `6d48b78b`, `5488a3a0` + sme-38d2924e chat 19:05)
+
+**Symptom.** sme-38d2924e (telemetry-plane SME for ft-cm-poller, non-APM-instrumented) nominated a merge with fantasy-commentary-poller citing fantasy-commentary-api's component_doc_md as "direct evidence". That doc_md annotation ("fantasy-commentary-poller (Last9: ft-cm-poller)") had itself been written during absorb of ft-cm-api — speculative, not code-verified. sme-cb69ffd8 correctly refuted at conf=0.05 using throughput data (300-500× gap) + naming-convention analysis. Merge nomination `8a489bd2` filed and refuted — wasted round-trip.
+
+**Root causes (two):**
+1. **Evidence depth.** Telemetry-only SME with non-APM service = very thin data (maybe 1-2 attributions, no span data, one peer reference). That's not enough to nominate a merge. But the prompt didn't tell them so.
+2. **Circular evidence.** Callee doc_md annotations written during a merge cascade are speculative. Reading them as "direct evidence" reinforces incorrect assumptions across the graph.
+
+**Fix — prompt-only:**
+
+SME prompt update — CONSOLIDATION section:
+- **Before nominating a merge, self-audit evidence depth.** If your component has ≤2 attributions AND no APM instrumentation AND the merge candidate is on another plane → DO NOT nominate yet. Instead:
+  1. Re-read peer's doc_md + peer's attributions + peer's catalogs
+  2. Raise clarification to peer's SME (use `get_component_owner` to find them) with your evidence + ask them to verify from their plane
+  3. Use `vector_search` across attributions for cross-plane identifier hits (e.g. APM service name `ft-cm-poller` as attribution on github-plane component)
+  4. Only after exhausting these paths AND you STILL have conviction → nominate at confidence ≤0.5 with explicit caveat in message
+  5. If after all this you're still unsure → DON'T nominate. insert_unresolved or raise_blocker to orch for admin triage. Better to leave a component un-merged than to file a false merge.
+- **Absorbed-side doc_md is speculative.** When a component's doc_md contains annotations like "X (Last9: Y)" or "also known as Z" — treat these as HINTS, never direct evidence. Verify independently from code + telemetry + attributions before citing in a nomination.
+
+**Files:** `src/agent_management/agent_types/sme.py` — CONSOLIDATION EVIDENCE DEPTH + CIRCULAR EVIDENCE blocks (~60 LOC).
+
+**Effort:** S (~60 LOC prompt).
+
+### 10.13.6 — Attribution global-UNIQUE → component-scoped UNIQUE (insights `de78a2bc`, `85b1272b`, `e8dc68f1`)
+
+**Symptom.** Schema has `attributions UNIQUE(plane, resource_type, identifier)` across ALL components. Legitimate fan-in cases silently break:
+- `(telemetry, deployment_environment, 'uat')` — every UAT service wants to claim this; first-wins
+- `(aerospike_namespace, 'lineups-v2')` — 4 sibling services share this namespace
+- `(github_repo, 'dream11/feeds-aggregator-v2')` — monorepo with multiple components; first split-child wins, siblings silently fail
+- Runtime tags (`runtime=jvm`), framework tags (`framework=vertx`), team ownership, cloud region — all legitimately multi-component
+
+**Design shift.** Identity drift becomes SOCIAL (clarifications between peer SMEs) rather than STRUCTURAL (DB constraint). Any SME can write any attribution for its own component. If peer SMEs spot drift or duplication they raise clarifications and resolve jointly. Resolver + consolidation prompts soften from "shared attribution = merge signal" to "shared attribution = investigate, clarify, decide jointly."
+
+**Schema migration (idempotent):**
+
+```sql
+-- Drop the global UNIQUE
+ALTER TABLE attributions
+  DROP CONSTRAINT IF EXISTS attributions_plane_resource_type_identifier_key;
+
+-- Add component-scoped UNIQUE (prevents duplicate rows on the same component)
+ALTER TABLE attributions
+  ADD CONSTRAINT IF NOT EXISTS attributions_component_plane_rt_id_key
+  UNIQUE (component_id, plane, resource_type, identifier);
+```
+
+Both operations are safe on existing data — the component-scoped UNIQUE is STRICTLY WEAKER than the global one (any row satisfying the old constraint trivially satisfies the new one). No row moves. No embeddings invalidate.
+
+**Tool changes:**
+
+- `upsert_attribution` (singleton) — ON CONFLICT clause currently keyed on `(plane, resource_type, identifier)`. Change to `(component_id, plane, resource_type, identifier)`. Behaviour: same-component re-upsert still updates in place (idempotent); different component claiming the same `(plane, rt, id)` now inserts a new row instead of clobbering the first.
+- `upsert_attributions_bulk` — same ON CONFLICT change.
+- Embedding pipeline — no change (per-row embed).
+- `vector_search(table='attributions')` — unaffected; similarity-based, not uniqueness-based.
+
+**Resolver + SME prompt softening:**
+
+- Resolver prompt (`resolver.py`) — evidence ladder: soften "identical attribution on two components = high-confidence merge signal" to "identical attribution on two components is a DISCUSSION starter. Require code/telemetry cross-verification before recommending M."
+- SME prompt (`sme.py`) — sibling-search during MATERIALISATION: "Finding peer components with overlapping attributions is a normal state, not automatic merge evidence. Raise clarifications with peer SMEs to verify intent before nominating."
+
+**Tests:**
+- `test_upsert_attribution_multi_component_same_triple_allowed` — 2 components legitimately holding `(telemetry, runtime, 'jvm')` → both rows exist
+- `test_upsert_attribution_same_component_idempotent` — re-upsert on same component updates in place, no duplicate row
+- Existing tests assuming cross-component rejection — revert/invert
+
+**Files:**
+- `src/shared/migrations.py` — drop + recreate constraint
+- `src/cartograph_mcp/tools/components.py` — `upsert_attribution` + `upsert_attributions_bulk` ON CONFLICT change
+- `src/agent_management/agent_types/resolver.py` + `sme.py` — doctrine softening (~30 LOC)
+- `tests/mcp_tools/test_components.py` + `test_attributions_bulk.py` — new tests + invert stale ones
+
+**Effort:** M (~100 LOC + migration + 3 new tests + ~5 inverted tests).
+
+### 10.13.7 — `resolve_references_bulk` + `bind_edges_bulk` MCP tools (insight `848e4ce8`)
+
+**Symptom.** During EDGE_DISCOVERY phase, SMEs reconcile N unresolved rows + paired dangling edges. Per-row workflow: `vector_search` → judge similarity → `resolve_reference` → `bind_edge`. For 10 pairs = 40 calls. `mcp_call_batch` gives parallelism (4 calls × 10 = 1 round-trip via batch) but NOT atomicity — if call 7 fails, calls 1-6 already committed in separate transactions → half-resolved state the SME has to manually reconcile.
+
+**Design — 2 separate bulk tools, atomic-with-pre-validation per Phase 8 pattern.** Do NOT fuse vector_search+resolve+bind into one tool; SME judgment on vector_search results must stay per-row. `vector_search_bulk` explicitly NOT shipping (parallel tool_use blocks cover it; each query needs its own embedding anyway).
+
+**`resolve_references_bulk(agent_id, items[]) -> dict`:**
+
+```
+items[i] = {unresolved_id, resolved_to_component_id}
+
+Pre-validation (pre-transaction):
+  - every unresolved_id exists
+  - every resolved_to_component_id exists + active
+  - caller owns found_in_component_id of every unresolved row via RCA
+
+If ANY pre-check fails → {committed: False, applied: 0, errors: {idx: reason}}
+If all pass → atomic: N updates in one transaction → {committed: True, applied: N, rows: [{unresolved_id, resolved: True}]}
+
+Max 500 items.
+```
+
+**`bind_edges_bulk(agent_id, bindings[]) -> dict`:**
+
+```
+bindings[i] = {edge_id, to_component_id}
+
+Pre-validation:
+  - every edge_id exists + is dangling (to_component_id IS NULL)
+  - every to_component_id exists + active
+  - caller owns from_component_id of every edge via RCA
+  - the resulting (from, to, edge_type, identifier) has no existing collision with a bound row; if collision, report per-row and reject batch
+
+If all pass → atomic: N updates in one transaction → {committed: True, applied: N, rows: [{edge_id, bound: True}]}
+
+Max 500 items.
+```
+
+**Tool count:** 115 (after #10.13.3) → 117.
+
+**SME prompt update — BULK CALLS DECISION LADDER (Phase 7.4.12 block):**
+- Add RUNG 1 entries for `resolve_references_bulk` + `bind_edges_bulk` in the existing decision ladder.
+- EDGE_DISCOVERY phase hygiene: "When reconciling N unresolved rows + paired danglings, the atomic pattern is: (1) parallel `vector_search` in one assistant turn to get candidates, (2) judge matches per row, (3) single `resolve_references_bulk` + `bind_edges_bulk` to commit atomically. This keeps the N×3 read-phase fast and the write-phase atomic."
+
+**Files:**
+- `src/cartograph_mcp/tools/components.py` — 2 new functions
+- `src/cartograph_mcp/server.py` — 2 tool wrappers
+- `src/agent_management/agent_types/sme.py` — BULK CALLS LADDER update
+- `tests/mcp_tools/test_resolve_bind_bulk.py` — ~10 tests (atomic success, pre-val failure rollback, collision handling, ownership refusal, idempotent re-run)
+
+**Effort:** M (~120 LOC + prompt + 10 tests).
+
+### 10.13.8 — `absorb_agent cascade_edges=True` dangling-collision auto-dedup (insight `9a673e68`, tactic_win `319c3536`)
+
+**Symptom.** `absorb_agent(survivor, target, cascade_edges=True)` transfers all target's edges to survivor. If survivor ALREADY has a dangling edge with the same `(edge_type, identifier)` as one of target's dangling edges → UNIQUE constraint violation on `edges_dangling_unique` partial index → **whole absorb aborts.** Survivor falls back to `cascade_edges=False` + manual hand-transfer per edge. sme-9bbe926c filed this as tactic_win (pre-absorb cascade_edges=False workaround); several other SMEs hit it.
+
+**Fix — mutation.py `_cascade_edges` path:**
+
+When collision detected on a dangling `(edge_type, identifier)` pair:
+1. KEEP survivor's existing row as authoritative (don't overwrite from_component_id or identifier)
+2. MERGE target's row's metadata INTO survivor's (`metadata = survivor.metadata || target.metadata` with survivor keys winning on clash)
+3. CONFIDENCE accumulation (same as normal upsert ON CONFLICT): take MAX of the two, or compute weighted average
+4. DROP target's duplicate row (it's about to be decommissioned anyway via cascade on the target's component)
+5. Return per-edge summary in the absorb_agent response:
+
+```json
+{
+  "absorbed": true,
+  "cascaded_edges": 34,
+  "edge_collisions_resolved": 2,
+  "edge_collision_detail": [
+    {"survivor_edge_id": "...", "target_edge_id_dropped": "...",
+     "resolution": "metadata_merged_target_dropped"}
+  ]
+}
+```
+
+Bound edges (both from + to set) — same treatment. If survivor has bound `(A, B, reads_from, redis)` and target has bound `(A, B, reads_from, redis)` → merge metadata, keep survivor, drop target.
+
+**Edge cases:**
+- Catalog rows (from IS NULL) — can only exist once per `(to, edge_type, identifier)` by design. Collision here = same catalog declared by both components on absorb; keep survivor's, drop target's, merge metadata.
+- If survivor's edge and target's edge disagree on confidence: keep survivor unless target's is significantly higher (>0.3 delta) — then take target's confidence.
+
+**Files:**
+- `src/cartograph_mcp/tools/mutation.py` — `_cascade_edges` helper + `absorb_agent` response shape extension
+- `tests/mcp_tools/test_mutation.py` — 4 new tests (dangling collision auto-dedup, bound collision auto-dedup, catalog collision auto-dedup, per-edge response shape)
+
+**Effort:** M (~80 LOC + 4 tests).
+
+### 10.13.9 — Kafka consumers declare consumed topics as `queue` catalogs (insight `06d5aafb`)
+
+**Symptom.** Split-welcome task description template for fantasy-consumer (a Kafka-consumer-only split-child) contained the line: *"NO catalogs needed (Kafka consumer, no HTTP endpoints to expose)"*. This is WRONG. Consumed Kafka topics ARE the component's inbound surfaces — `edge_type='consumes_from'` or catalog `kind='queue'`. Without them, Step 4 (flows) has no incoming catalogs to anchor, blast-radius analysis is broken for every Kafka consumer.
+
+**Fix — two places:**
+
+**(a) Split-welcome briefing template** (wherever this is generated — likely in mutation.py's `spawn_child_agent` or SME-facing prompt guidance for the parent SME who writes the split_briefing text):
+
+Replace:
+```
+Subject: [split-welcome] component_id={{child}}
+Body: ... NO catalogs needed (Kafka consumer, no HTTP endpoints to expose) ...
+```
+
+With:
+```
+Body: ... Declare catalogs for every inbound surface: HTTP endpoints exposed, Kafka topics consumed (kind=queue), SQS queues accepted, etc. Kafka consumers DO have catalogs — the topics they consume are the inbound surfaces. ...
+```
+
+Search + verify this template lives in either: `src/cartograph_mcp/tools/mutation.py::spawn_child_agent` welcome-task body construction, OR in the parent SME's prompt guidance for writing split_briefing. If it's generated by the parent SME freeform (via prompt), update the SME prompt; if it's a template string in code, update both.
+
+**(b) SME prompt — Step 2b (catalog declaration)** — already has `queue` kind per Phase 7.4 but doesn't emphasise Kafka-consumer case:
+- Add worked example: "Kafka consumer service consuming topics `user.events.v1` + `order.completed.v2` → declare TWO catalog rows with `kind=queue`, `identifier='user.events.v1'` + `identifier='order.completed.v2'`."
+- Explicitly counter the "consumer has no inbound HTTP surface therefore no catalogs" misconception.
+
+**Files:**
+- `src/cartograph_mcp/tools/mutation.py` — search for split-welcome template; update if present
+- `src/agent_management/agent_types/sme.py` — Step 2b Kafka-consumer example + counter-misconception line
+- No tests (prompt-only).
+
+**Effort:** XS (~20 LOC prompt + ~10 LOC template fix).
+
+### 10.13.10 — Prompt-tightening bundle (7 small nudges, single commit)
+
+Single commit bundling 7 prompt updates, each too small to warrant its own sub-phase but each closes a real insight.
+
+| Nudge | Source insight | Change |
+|---|---|---|
+| **(a) Post-merge flow re-wire hygiene** | `b27e5c6a`, `0b428bf4` | SME prompt hygiene cycle: after any absorb that adds new catalog rows, re-run Step 4 (flow wiring) for the newly-added incoming catalogs. Flows written at initial materialisation don't cover post-merge additions. |
+| **(b) Skip `get_unmatched_callers` for db/cache/queue types** | `8a371137`, `371e91e8` | SME prompt hygiene cycle: if `component_type ∈ {database, cache, queue, object_store}`, SKIP `get_unmatched_callers` — those types have no catalogs by design, so the tool always returns non-empty and requires no action. Wastes a call. |
+| **(c) Kong / inbound_gateway → doc_md** | `0e77a9fe` | SME prompt Step 3 INBOUND grep catalog: add `inbound_gateway` to the patterns to look for in telemetry-cascaded attributions. When present (e.g. `inbound_gateway=kong`), update `component_doc_md` Inbound Flows section to note external traffic path. |
+| **(d) Canonical telemetry resource_type vocab** | `90493cb6` | SME prompt Step 2 (attributions): for telemetry-plane SMEs, standardize `resource_type` values — use `span_peer` (net_peer_name from OTel), `hostname`, `apm_service_name`, `external_service`. Never invent ad-hoc names like `apm_peer_name` or `last9_service_url`. Inconsistent vocab breaks cross-plane identifier-collision evidence. |
+| **(e) DB SMEs run `get_database_slow_queries` + `get_alert_config`** | `b6ca5baa` | SME prompt: for `component_type=database`, run these two Last9 calls during materialisation. Slow-queries → metadata + doc_md Storage section (reveals actively-queried tables); alert-config → doc_md Operational Notes. Cheap (1 call each) and enriches the component record. |
+| **(f) Cron flows = explicit N/A in doc_md** | `e61901cc` (tactic_win) | SME prompt Step 4 (flows): for cron/timer-driven components (no inbound catalog rows), write `"N/A — cron timer-driven, no inbound catalogs"` explicitly in doc_md Inbound Flows section. Prevents hygiene tools flagging zero-flow as suspicious, saves resolver time. |
+| **(g) `get_attributions` uses `component_id` not `id`** | `14191ea3` | SME prompt tools list: clarify `get_attributions` requires `component_id` (the component's UUID), NOT `id`. Tool silently returns empty list on wrong param name in batch calls. |
+
+**Files:** `src/agent_management/agent_types/sme.py` — all 7 nudges in a single commit.
+
+**Effort:** S (~80 LOC total, bundle-commit).
+
+### 10.13.11 — Commit cadence + test budget
+
+```
+10.13.0  plan + recall sync                           ← THIS commit, doc-only
+10.13.1  split/merge discipline rewrite               ← SME prompt block
+10.13.2  QR asker terminal path                       ← SME prompt (short)
+10.13.3  get_component_owner tool                     ← new MCP tool + prompt + tests
+10.13.6  attribution global-UNIQUE → component-scoped ← schema + upsert tools + prompt softening
+10.13.9  Kafka consumer catalogs                      ← template + prompt fix
+── Tier A complete; smoke run next real-data attempt ──
+10.13.4  identifier normalisation tightening          ← SME prompt
+10.13.5  thin-evidence skepticism                     ← SME prompt
+10.13.7  resolve_references_bulk + bind_edges_bulk    ← 2 new MCP tools + prompt + tests
+10.13.8  absorb_agent cascade collision auto-dedup    ← mutation code + tests
+── Tier B complete ──
+10.13.10 prompt-tightening bundle (7 nudges)          ← single SME prompt commit
+10.13.12 final doc sync                               ← recall §0 + §21 + IMPL-PHASES status + PROMPT-ENHANCEMENTS
+── Tier C + wrap ──
+```
+
+Each sub-phase = its own commit + push. Restart sequence:
+- After 10.13.3, 10.13.6, 10.13.7 → restart MCP server (new/changed tools + schema migration)
+- After any prompt change → no restart needed (prompts rebuild from disk per spawn)
+
+**Test budget:**
+
+| Sub | New tests | Retrofit |
+|---|---:|---:|
+| 10.13.3 | 3 | 0 |
+| 10.13.6 | 3 | ~5 (invert stale cross-component-rejection tests) |
+| 10.13.7 | 10 | 0 |
+| 10.13.8 | 4 | 0 |
+| **Total** | **20** | **~5** |
+
+Target final test count: 562+ (from ~542).
+
+### 10.13.12 — Schema delta summary
+
+```sql
+-- Phase 10.13.6: attribution UNIQUE scoping
+ALTER TABLE attributions
+  DROP CONSTRAINT IF EXISTS attributions_plane_resource_type_identifier_key;
+ALTER TABLE attributions
+  ADD CONSTRAINT IF NOT EXISTS attributions_component_plane_rt_id_key
+  UNIQUE (component_id, plane, resource_type, identifier);
+```
+
+Idempotent across fresh + migrated DBs. Zero data migration. Strictly weakens uniqueness; all existing rows remain valid.
+
+### 10.13.13 — Tool surface delta
+
+| Tool | Action | Count delta |
+|---|---|---|
+| `get_component_owner(component_id)` | NEW (#10.13.3) | +1 |
+| `resolve_references_bulk(items[])` | NEW (#10.13.7) | +1 |
+| `bind_edges_bulk(bindings[])` | NEW (#10.13.7) | +1 |
+
+**Tool count:** 114 → **117**. Verify via `grep "tools registered" /tmp/cartograph-logs/mcp.log`.
+
+### 10.13.14 — Admin-chat findings NOT covered by any sub-phase
+
+Three admin concerns that don't map cleanly to a sub-phase but deserve noting:
+
+1. **Admin's 18:48 "do some sanity checks" broadcast** — admin felt the hygiene cycle wasn't firing autonomously, had to prod explicitly. This is a **behavioural** gap (SMEs not running hygiene proactively) rather than a tool/prompt gap per se. Phase 10.13 addresses this indirectly via #10.13.1 (split discipline) + #10.13.4 (identifier norm) + #10.13.5 (thin-evidence) all of which sharpen hygiene triggers. If real-data run #4 still shows the pattern, add an explicit "proactive hygiene on every wake" rule to SME prompt as a follow-up.
+
+2. **Admin wanted orch autonomy ("uninterruptedly, only blockers need admin")** but had to intervene 3+ times anyway. Indicates orch is not surfacing the right blockers OR is surfacing non-blockers. Phase 10.13 doesn't address this directly; consider a follow-up orch prompt update if pattern persists in run #4.
+
+3. **Scope enforcement** — admin manually typed scope rules in onboarding chat, doesn't trust agents to self-enforce. This is a prompt/instruction gap in the orch onboarding path. Defer to post-10.13 observation; may need an explicit ADMIN-SCOPE-DIRECTIVE block in orch prompt if it recurs.
+
+### 10.13.15 — What this is NOT solving
+
+- **#10 (target-side stale-inbound cleanup):** dropped — merge cascade handles the common case; standalone decom without merger is rare
+- **IP-span cross-plane cross-reference** — deferred until recurrence
+- **Route-extraction second-pass grep** — SMEs handle via existing hygiene
+- **Missing fantasy-tour-aerospike-v1 data point** — data gap, orch responsibility
+- **`env` / `tag` column on `attributions`** — backlog (cleaner than prefix-in-identifier workarounds)
+
+---
 
 **Phase 11 — Phase-flow completion** (orchestrator-driven sweeps):
 - **Resolution phase orchestration** — wake config-SMEs to resolve `unresolved` table rows; re-run cosine ladder against now-consolidated component registry.

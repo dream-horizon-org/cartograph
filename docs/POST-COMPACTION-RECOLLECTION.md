@@ -12,7 +12,7 @@
 
 ## 0. WHERE I AM RIGHT NOW (the most important section)
 
-**Phases 10.8 → 10.12 SHIPPED 2026-05-06. Three real-data onboarding attempts run 2026-05-06 (11:53 / 19:49 / 22:41 backups). Current DB = in-progress 3rd run: 36 agents, 32 components, 291 flows, 56 OPEN insights. Next: insight triage (big batch — user flagged for this session).**
+**Phases 10.8 → 10.12 SHIPPED 2026-05-06. Three real-data onboarding attempts run 2026-05-06. **Phase 10.13 PLANNED** (2026-05-07) — 56 OPEN insights triaged into a 10-point / 3-tier plan. Full plan in `docs/IMPLEMENTATION-PHASES.md §10.13`. Tier A = must-ship before next real-data run: split/merge discipline rewrite (10.13.1), QR clarification asker prompt fix (10.13.2), `get_component_owner` new tool (10.13.3), attribution UNIQUE → component-scoped (10.13.6), Kafka consumer catalog template fix (10.13.9). Tool count will go 114 → 117.**
 
 ### What's done (committed + pushed):
 
@@ -50,15 +50,27 @@
 
 ### What's pending (next session — pick up here):
 
-1. **Insight triage (THIS SESSION)** — 56 OPEN insights filed during the 3 real-data runs. User flagged this as the immediate next work. Pull via:
-   ```sql
-   SELECT id, agent_id, kind, body FROM agent_insights
-     WHERE status='open' ORDER BY created_at DESC;
-   ```
-   Triage each → {promoted / wontfix / deferred} with triage_note citing the commit or rationale. Buckets likely: prompt_gap (SME materialisation / hygiene / identifier-norm), tool_gap (list_agents returns no component_id; "find owner SME" is 5-clarification), doc_confusing (telemetry-plane fallbacks, identifier-norm edge cases), tactic_win (pre-absorb cascade_edges=False, get_unmatched_callers reveals format mismatches, etc.), workflow_friction (monorepo merge cross-plane cases).
-2. **Real-data continuation** — current DB is mid-3rd-run; decide after triage whether to keep driving this run, wipe for a 4th attempt, or keep state + iterate on prompts.
-3. **Bedrock cost monitoring** — spend no longer routes through Anthropic API billing; watch AWS side.
-4. **Uncommitted change:** `src/mcp_servers.yaml` has a pending addition — `last9-reader` on `127.0.0.1:8101/mcp`. Decide if this belongs in committed config or stays a local override.
+1. **Implement Phase 10.13 Tier A** (before 4th real-data attempt). Plan fully written in `docs/IMPLEMENTATION-PHASES.md §10.13`. Sub-phases + ship-order:
+   - **10.13.1** Split/merge discipline rewrite — SME prompt block (inherit-then-disown via SPLIT; monorepos split-before-merge)
+   - **10.13.2** QR clarification asker terminal path — SME prompt fix (use `respond_clarification(new_status='CC')`, NOT `ack_terminal`)
+   - **10.13.3** `get_component_owner(component_id)` — new MCP tool + SME prompt + 3 tests
+   - **10.13.6** Attribution global-UNIQUE → component-scoped — schema migration + `upsert_attribution(s)_bulk` ON CONFLICT fix + resolver/SME prompt softening + 3 new tests + ~5 inverted tests
+   - **10.13.9** Kafka consumers declare consumed topics as `queue` catalogs — split-welcome template fix + SME prompt Step 2b update
+
+2. **Then Tier B** (high-impact prompt + tool, follow-on):
+   - **10.13.4** identifier normalisation tightening (SME prompt, 40 LOC)
+   - **10.13.5** thin-evidence skepticism rule (SME prompt, 60 LOC)
+   - **10.13.7** `resolve_references_bulk` + `bind_edges_bulk` — 2 new MCP tools + 10 tests
+   - **10.13.8** `absorb_agent cascade_edges=True` dangling-collision auto-dedup — mutation.py + 4 tests
+
+3. **Then Tier C** (single bundle commit):
+   - **10.13.10** prompt-tightening bundle — 7 small nudges in one SME prompt commit
+
+4. **Then 10.13.12 final doc sync + targeted agentic verification (DEMO13 if warranted) before 4th real-data attempt.**
+
+5. **Bedrock cost monitoring** — spend no longer routes through Anthropic API billing; watch AWS side.
+
+6. **Uncommitted:** `src/mcp_servers.yaml` has `last9-reader` addition (127.0.0.1:8101/mcp). Decide: commit vs local override.
 
 See `docs/IMPLEMENTATION-PHASES.md §10.8 / §10.9 / §10.10 / §10.11 / §10.12` for full rationale per sub-phase.
 
