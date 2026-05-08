@@ -159,7 +159,7 @@ Phase 6 (Globe): parked on `feat/globe-experimental` branch HEAD `1dae0c7`. **Do
 ### Restart sequence (from `cartograph/`):
 ```bash
 # Kill old
-ps aux | grep -E "(admin_ui|cartograph_mcp|trigger_management|python.*-u -m main)" \
+ps aux | grep -E "(admin_ui|cartograph_mcp|trigger_management|python.*-u.*main\.py|python.*-u -m main)" \
   | grep -v grep | awk '{print $2}' | xargs -r kill 2>/dev/null
 sleep 3
 mkdir -p /tmp/cartograph-logs
@@ -168,13 +168,43 @@ cd src
 /opt/homebrew/bin/python3.10 -u -m cartograph_mcp.server   > /tmp/cartograph-logs/mcp.log      2>&1 &
 sleep 5
 /opt/homebrew/bin/python3.10 -u -m trigger_management.main > /tmp/cartograph-logs/triggers.log 2>&1 &
-/opt/homebrew/bin/python3.10 -u -m main                    > /tmp/cartograph-logs/agents.log  2>&1 &
+/opt/homebrew/bin/python3.10 -u main.py                    > /tmp/cartograph-logs/agents.log  2>&1 &
 /opt/homebrew/bin/python3.10 -u -m admin_ui.server         > /tmp/cartograph-logs/admin_ui.log 2>&1 &
 sleep 5
 grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1   # expect: 114 tools
 ```
 
 If Docker daemon is down: `open -a Docker`, wait ~20s, then `docker start cartograph-postgres-1` before MCP.
+
+### Auth mode — subscription vs Bedrock (single env-var toggle)
+
+The agent runtime supports two auth modes selected by the `CARTOGRAPH_AGENT_SETTINGS_PATH` env var:
+
+| Mode | When | What happens |
+|---|---|---|
+| **Subscription** (default) | env var unset | Spawned `claude -p` subprocesses use `~/.claude/settings.json` (your Claude Code subscription auth). All billing flows through Anthropic API. |
+| **Bedrock-isolated** (recommended for cartograph runs) | env var → path of a Bedrock settings file | Subprocesses use `--settings <path>` and read auth from there. Local Claude Code dev session keeps using subscription, completely separate. |
+
+**Bedrock mode — single source of truth start command** (export once before starting agent_manager):
+
+```bash
+export CARTOGRAPH_AGENT_SETTINGS_PATH=~/.claude/settings.cartograph.json
+cd src && python -u main.py
+```
+
+The settings file (`~/.claude/settings.cartograph.json`) holds:
+- `CLAUDE_CODE_USE_BEDROCK=1`
+- `AWS_REGION` + `AWS_BEARER_TOKEN_BEDROCK` (single bearer-token Bedrock auth)
+- `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` (Bedrock 1m inference profile IDs)
+
+`shared/config.py` auto-loads the file's `env` block at import (Phase 10.13.dock-prep), so:
+- agent_manager Python process picks up model IDs (passed as `--model` to subprocess)
+- spawned `claude -p` picks up bearer token + region (via `--settings`)
+- real shell env vars take precedence (file is fallback only)
+
+**To revert to subscription mode for everything:** `unset CARTOGRAPH_AGENT_SETTINGS_PATH` and restart.
+
+Bedrock settings file template lives at `~/.claude/settings.json.bak.bedrock` — copy + flip `CLAUDE_CODE_USE_BEDROCK` to `"1"` + paste fresh bearer token. Tokens are Bedrock-API-Key format with embedded presigned URL; rotate when expired.
 
 ### DB state at scorecard time
 - 8 agents (1 decom = sme-933bbef7 absorbed)

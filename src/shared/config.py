@@ -1,6 +1,25 @@
 """Shared configuration — reads from environment variables."""
 
+import json
 import os
+
+
+# Pre-load env from CARTOGRAPH_AGENT_SETTINGS_PATH file (Bedrock isolation).
+# When set, the file's `env` block populates os.environ so the rest of this
+# module reads model ids / region / token consistently from one source. Real
+# shell env vars take precedence (setdefault), so explicit overrides still
+# work. Unset → no-op, host falls back to defaults below.
+_settings_path = os.getenv("CARTOGRAPH_AGENT_SETTINGS_PATH")
+if _settings_path and os.path.isfile(_settings_path):
+    try:
+        with open(_settings_path) as _f:
+            _env_block = json.load(_f).get("env") or {}
+        for _k, _v in _env_block.items():
+            if _v is not None:
+                os.environ.setdefault(_k, str(_v))
+    except (json.JSONDecodeError, OSError):
+        # Bad file → silently ignore; falls back to defaults. Caller debugs.
+        pass
 
 
 DB_HOST = os.getenv("CARTOGRAPH_DB_HOST", "localhost")

@@ -319,6 +319,14 @@ class AgentManager:
         ]
         if config.effort:
             cmd.extend(["--effort", config.effort])
+        # Optional Bedrock-isolation: when CARTOGRAPH_AGENT_SETTINGS_PATH is set
+        # in the agent_manager process env, every spawned `claude -p` reads its
+        # auth/env config from that file (typically a Bedrock bearer-token
+        # settings.json). Lets the local Claude Code dev session keep using the
+        # subscription default settings while agents bill to Bedrock — no docker
+        # needed. Unset → claude uses default ~/.claude/settings.json (legacy).
+        if settings_path := os.environ.get("CARTOGRAPH_AGENT_SETTINGS_PATH"):
+            cmd.extend(["--settings", settings_path])
         if agent["session_id"]:
             cmd.extend(["--resume", agent["session_id"]])
 

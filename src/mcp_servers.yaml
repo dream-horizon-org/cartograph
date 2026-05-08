@@ -1,5 +1,7 @@
 cartograph-db:
   url: http://localhost:8100
+last9-reader:
+  url: http://127.0.0.1:8101/mcp
 # Plane-specific read-only MCPs — not yet implemented (Phase 4+)
 # github-reader:
 #   url: http://localhost:3001
