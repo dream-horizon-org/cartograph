@@ -84,6 +84,12 @@ Read — component graph:
   Primary use: discover your component_id after a split spawn.
 - get_component(id), get_attributions(component_id),
   get_unresolved(component_id)
+  Phase 10.13.10 (g): get_attributions param name is `component_id`,
+  NOT `id`. Tool silently returns empty list on wrong param name in
+  mcp_call_batch. Use `component_id`.
+- get_component_owner(component_id) — Phase 10.13.3. Map component to
+  owning SME via RCA. Use BEFORE creating a clarification about another
+  component (avoids the 5-clarification-guess pattern).
 - get_component_edges(component_id) — categorised view returning
   {{incoming_bound, incoming_catalog, outgoing_bound, outgoing_dangling}}.
   Prefer over the legacy get_edges(id). incoming_catalog is sourced
@@ -564,6 +570,27 @@ STEP 2 — Hydrate attributions exhaustively on YOUR component.
   ids, telemetry service names, repo paths. Calls to
   upsert_attribution(component_id=YOURS, ...).
 
+  Phase 10.13.10 nudges:
+    (d) CANONICAL TELEMETRY resource_type vocab. For telemetry-plane
+        SMEs, use these standard names so cross-plane evidence
+        accumulates cleanly:
+          - 'span_peer'         (net.peer.name from OTel CLIENT spans)
+          - 'hostname'          (DNS-resolved, when known)
+          - 'apm_service_name'  (Last9 / Datadog APM service identifier)
+          - 'external_service'  (third-party API hostname)
+        Don't invent ad-hoc names like 'apm_peer_name', 'last9_service_url',
+        'span_peer_name' — inconsistent vocab breaks identifier-collision
+        evidence accumulation across planes.
+    (e) DATABASE COMPONENTS — 2 cheap Last9 calls during materialisation:
+        - get_database_slow_queries → reveals actively-queried tables
+          (e.g. FeedsAggregatorV2.FAFeedProviderMaster). Add table
+          names to metadata.queried_tables + reference in doc_md
+          Storage section.
+        - get_alert_config → configured alert rules for the DB host.
+          Reference in doc_md Operational Notes section.
+        Both are 1-call reads, no LLM cost, significantly enrich the
+        component record for component_type=database.
+
   ATTRIBUTION vs EDGE — NEVER CONFUSE.
   An attribution is a fact about WHO YOU ARE (your hostname, your
   deploy manifest, your runtime, your repo path, your telemetry
@@ -668,9 +695,24 @@ STEP 2c — Hygiene cycle: periodically (every few wakes) call
     - dynamic identifier (DB-like, per-call) → ignore
     - missing catalog row → upsert_catalog to declare it
     - caller error (typo, hallucination, deprecated) → raise
-      clarification to the caller
+      clarification to the caller (use get_component_owner first)
   Companion: get_orphan_catalogs(your_agent_id) shows catalogs you
   declared with no callers — could be stale, or just not yet adopted.
+
+  Phase 10.13.10 nudges:
+    (a) SKIP get_unmatched_callers if your component_type ∈
+        {{database, cache, queue, object_store}}. Those types have no
+        catalogs by design, so the tool always returns non-empty —
+        wastes a call.
+    (b) POST-MERGE FLOW RE-WIRE: after any absorb_agent that adds new
+        catalog rows (cascaded from target), re-run Step 4 (flows) for
+        the newly-added incoming catalogs. Flows written at initial
+        materialisation don't auto-cover post-merge additions.
+    (c) Kong / inbound_gateway → doc_md: telemetry-cascaded attributions
+        with resource_type='inbound_gateway' (e.g. identifier='kong')
+        reveal external traffic paths your github materialisation
+        missed. When present, update your component_doc_md "Inbound"
+        section to note the external entry path.
 
 STEP 3 — Outbound references you find while reading your resource
   (things your component CALLS / depends on — NOT things that ARE
@@ -887,6 +929,13 @@ STEP 4 — Flows. CLOSE THE CATALOG → OUTGOING JOIN. **Flows happen
       outgoing edge → unusual; document why (e.g., separate
       threads handle inbound vs outbound; fire-and-forget event
       ingestion).
+    - CRON / TIMER-DRIVEN component (no inbound HTTP/queue): you
+      have NO incoming catalog rows by design (cron fires on schedule,
+      not on external request). Flows are explicitly N/A. Document
+      this in component_doc_md "Inbound Flows" section as
+      "N/A — cron timer-driven, no inbound catalogs" so future
+      hygiene tools / resolver review don't flag the empty flows
+      list as suspicious. (Phase 10.13.10 nudge.)
 
   IMPORTANT: the flow's incoming is ALWAYS a catalog id from the
   `catalogs` table — NOT an edge id. This is because a flow describes
