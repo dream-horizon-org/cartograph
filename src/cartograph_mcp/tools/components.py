@@ -1234,6 +1234,228 @@ def resolve_reference(
     return row
 
 
+# ============ Phase 10.13.7: bulk resolve + bind ============
+
+
+def resolve_references_bulk(agent_id: str, items: list[dict]) -> dict:
+    """[Phase 10.13.7] Bulk-resolve N unresolved rows in one atomic call.
+
+    items[i] = {"unresolved_id": str, "resolved_to_component_id": str}
+
+    Pre-validates every row BEFORE opening transaction:
+      - unresolved_id exists + not already resolved
+      - resolved_to_component_id exists + active (not decommissioned)
+
+    If ANY pre-check fails → return per-row errors, write nothing:
+      {"committed": False, "applied": 0, "errors": {<idx>: <reason>}}
+    If all pass → atomic UPDATE per row in one transaction:
+      {"committed": True, "applied": N, "rows": [<full unresolved row>, ...]}
+
+    Max 500 items. Use during EDGE_DISCOVERY when reconciling N
+    unresolved rows + paired dangling edges. Pair with bind_edges_bulk
+    for the edge half.
+    """
+    _caller(agent_id)
+    if not isinstance(items, list) or not items:
+        raise ValueError("items must be a non-empty list")
+    if len(items) > 500:
+        raise ValueError(f"max 500 items per bulk call (got {len(items)})")
+
+    errors: dict[int, str] = {}
+    normalized: list[dict] = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            errors[i] = "item must be a dict"
+            continue
+        uid = str(it.get("unresolved_id") or "").strip()
+        cid = str(it.get("resolved_to_component_id") or "").strip()
+        if not uid:
+            errors[i] = "unresolved_id is required"
+            continue
+        if not cid:
+            errors[i] = "resolved_to_component_id is required"
+            continue
+        normalized.append({"i": i, "unresolved_id": uid,
+                           "resolved_to_component_id": cid})
+
+    # Pre-validate existence + active state in one query each.
+    if not errors:
+        # Unresolved rows exist + not already resolved
+        uids = [n["unresolved_id"] for n in normalized]
+        u_rows = execute(
+            "SELECT id::text AS id, resolved FROM unresolved WHERE id = ANY(%s::uuid[])",
+            (uids,),
+        )
+        u_by_id = {r["id"]: r for r in u_rows}
+        for n in normalized:
+            r = u_by_id.get(n["unresolved_id"])
+            if r is None:
+                errors[n["i"]] = f"unresolved {n['unresolved_id']} not found"
+            elif r["resolved"]:
+                errors[n["i"]] = f"unresolved {n['unresolved_id']} already resolved"
+        # Targets exist + active
+        cids = list({n["resolved_to_component_id"] for n in normalized})
+        c_rows = execute(
+            "SELECT id::text AS id, status FROM components WHERE id = ANY(%s::uuid[])",
+            (cids,),
+        )
+        c_by_id = {r["id"]: r for r in c_rows}
+        for n in normalized:
+            if n["i"] in errors:
+                continue
+            c = c_by_id.get(n["resolved_to_component_id"])
+            if c is None:
+                errors[n["i"]] = (
+                    f"resolved_to_component_id {n['resolved_to_component_id']} "
+                    "does not exist"
+                )
+            elif c["status"] == "decommissioned":
+                errors[n["i"]] = (
+                    f"resolved_to_component_id {n['resolved_to_component_id']} "
+                    "is decommissioned"
+                )
+
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    # Atomic apply.
+    rows = []
+    for n in normalized:
+        r = execute_returning(
+            """UPDATE unresolved
+               SET resolved = TRUE,
+                   resolved_to_component_id = %s,
+                   attempts = attempts + 1
+               WHERE id = %s
+               RETURNING *""",
+            (n["resolved_to_component_id"], n["unresolved_id"]),
+        )
+        rows.append(r)
+    return {"committed": True, "applied": len(rows), "rows": rows}
+
+
+def bind_edges_bulk(agent_id: str, bindings: list[dict]) -> dict:
+    """[Phase 10.13.7] Bulk-bind N dangling edges in one atomic call.
+
+    bindings[i] = {"edge_id": str, "to_component_id": str}
+
+    Pre-validates every row BEFORE opening transaction:
+      - edge_id exists + is dangling (to_component_id IS NULL)
+      - caller (via SME-RCA) owns the edge's from_component_id
+      - to_component_id exists + active
+      - resulting (from, to, edge_type, identifier) tuple has no
+        existing bound row that would collide on the partial UNIQUE
+        index `edges_bound_unique`
+
+    If ANY pre-check fails → return per-row errors, write nothing.
+    If all pass → atomic UPDATE per row in one transaction.
+
+    Max 500 items.
+    """
+    _caller(agent_id)
+    if not isinstance(bindings, list) or not bindings:
+        raise ValueError("bindings must be a non-empty list")
+    if len(bindings) > 500:
+        raise ValueError(f"max 500 bindings per bulk call (got {len(bindings)})")
+
+    errors: dict[int, str] = {}
+    normalized: list[dict] = []
+    for i, b in enumerate(bindings):
+        if not isinstance(b, dict):
+            errors[i] = "binding must be a dict"
+            continue
+        eid = str(b.get("edge_id") or "").strip()
+        tcid = str(b.get("to_component_id") or "").strip()
+        if not eid:
+            errors[i] = "edge_id is required"
+            continue
+        if not tcid:
+            errors[i] = "to_component_id is required"
+            continue
+        normalized.append({"i": i, "edge_id": eid, "to_component_id": tcid})
+
+    if not errors:
+        # Load edges + verify dangling state.
+        eids = [n["edge_id"] for n in normalized]
+        e_rows = execute(
+            """SELECT id::text AS id, from_component_id::text AS from_component_id,
+                      to_component_id, edge_type, identifier
+               FROM edges WHERE id = ANY(%s::uuid[])""",
+            (eids,),
+        )
+        e_by_id = {r["id"]: r for r in e_rows}
+        # Owned-component lookup (caller's RCA)
+        owned = {str(r["component_id"]) for r in execute(
+            "SELECT component_id FROM resource_component_agents "
+            "WHERE agent_id = %s AND component_id IS NOT NULL",
+            (agent_id,),
+        )}
+        # Targets exist + active
+        tcids = list({n["to_component_id"] for n in normalized})
+        c_rows = execute(
+            "SELECT id::text AS id, status FROM components WHERE id = ANY(%s::uuid[])",
+            (tcids,),
+        )
+        c_by_id = {r["id"]: r for r in c_rows}
+
+        for n in normalized:
+            e = e_by_id.get(n["edge_id"])
+            if e is None:
+                errors[n["i"]] = f"edge {n['edge_id']} not found"
+                continue
+            if e["to_component_id"] is not None:
+                errors[n["i"]] = f"edge {n['edge_id']} is not dangling (already bound)"
+                continue
+            if e["from_component_id"] not in owned:
+                errors[n["i"]] = (
+                    f"caller {agent_id} does not own from_component "
+                    f"{e['from_component_id']} of edge {n['edge_id']}"
+                )
+                continue
+            c = c_by_id.get(n["to_component_id"])
+            if c is None:
+                errors[n["i"]] = (
+                    f"to_component_id {n['to_component_id']} does not exist"
+                )
+                continue
+            if c["status"] == "decommissioned":
+                errors[n["i"]] = (
+                    f"to_component_id {n['to_component_id']} is decommissioned"
+                )
+                continue
+            # Collision check on the bound partial unique
+            collision = execute_one(
+                """SELECT 1 FROM edges
+                   WHERE from_component_id = %s AND to_component_id = %s
+                     AND edge_type = %s AND identifier = %s
+                     AND id != %s""",
+                (e["from_component_id"], n["to_component_id"],
+                 e["edge_type"], e["identifier"], n["edge_id"]),
+            )
+            if collision is not None:
+                errors[n["i"]] = (
+                    f"edge {n['edge_id']} bind would collide with existing "
+                    f"bound row (from={e['from_component_id']}, "
+                    f"to={n['to_component_id']}, type={e['edge_type']}, "
+                    f"identifier={e['identifier']})"
+                )
+
+    if errors:
+        return {"committed": False, "applied": 0, "errors": errors}
+
+    rows = []
+    for n in normalized:
+        r = execute_returning(
+            """UPDATE edges
+               SET to_component_id = %s, last_seen_at = now()
+               WHERE id = %s
+               RETURNING *""",
+            (n["to_component_id"], n["edge_id"]),
+        )
+        rows.append(r)
+    return {"committed": True, "applied": len(rows), "rows": rows}
+
+
 # ============ Reads (open to all active agents) ============
 
 

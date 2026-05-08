@@ -510,3 +510,111 @@ def test_get_component_owner_not_found(agent_factory):
         components.get_component_owner(
             "orch-1", "00000000-0000-0000-0000-000000000000",
         )
+
+
+# ─── Phase 10.13.7: resolve_references_bulk + bind_edges_bulk ──────
+
+
+def test_resolve_references_bulk_happy_path(agent_factory):
+    """All rows valid → atomic apply, all rows resolved=True."""
+    cid_a = _sme_with_component(agent_factory, "sme-a", "dream11/a")
+    cid_b = _sme_with_component(agent_factory, "sme-b", "dream11/b")
+    # Insert 3 unresolved rows on cid_a
+    u_ids = []
+    for i in range(3):
+        u = components.insert_unresolved(
+            "sme-a",
+            {"found_in_component_id": cid_a, "reference_type": "host",
+             "reference_value": f"u{i}.dream11.local"},
+        )
+        u_ids.append(str(u["id"]))
+
+    agent_factory("orch-1", "orchestrator")
+    items = [{"unresolved_id": uid, "resolved_to_component_id": cid_b}
+             for uid in u_ids]
+    r = components.resolve_references_bulk("orch-1", items)
+    assert r["committed"] is True
+    assert r["applied"] == 3
+    assert all(row["resolved"] for row in r["rows"])
+
+
+def test_resolve_references_bulk_pre_validation_fails(agent_factory):
+    """One bad row → reject whole batch, write nothing."""
+    cid_a = _sme_with_component(agent_factory, "sme-a", "dream11/a")
+    u = components.insert_unresolved(
+        "sme-a",
+        {"found_in_component_id": cid_a, "reference_type": "host",
+         "reference_value": "x.dream11.local"},
+    )
+    agent_factory("orch-1", "orchestrator")
+    items = [
+        {"unresolved_id": str(u["id"]), "resolved_to_component_id": cid_a},
+        {"unresolved_id": "00000000-0000-0000-0000-000000000000",
+         "resolved_to_component_id": cid_a},  # bogus
+    ]
+    r = components.resolve_references_bulk("orch-1", items)
+    assert r["committed"] is False
+    assert r["applied"] == 0
+    assert 1 in r["errors"]
+    # Verify the GOOD row was NOT applied (atomic)
+    refreshed = execute_one(
+        "SELECT resolved FROM unresolved WHERE id = %s", (str(u["id"]),)
+    )
+    assert refreshed["resolved"] is False
+
+
+def test_bind_edges_bulk_happy_path(agent_factory):
+    """All bindings valid → atomic apply."""
+    cid_a = _sme_with_component(agent_factory, "sme-a", "dream11/a")
+    cid_b = _sme_with_component(agent_factory, "sme-b", "dream11/b")
+    cid_c = _sme_with_component(agent_factory, "sme-c", "dream11/c")
+    # 2 dangling outbounds from cid_a
+    components.upsert_edge_outbound(
+        "sme-a", {"from_component_id": cid_a, "edge_type": "calls",
+                  "identifier": "/x"},
+    )
+    components.upsert_edge_outbound(
+        "sme-a", {"from_component_id": cid_a, "edge_type": "calls",
+                  "identifier": "/y"},
+    )
+    danglings = execute(
+        "SELECT id::text AS id, identifier FROM edges "
+        "WHERE from_component_id = %s AND to_component_id IS NULL",
+        (cid_a,),
+    )
+    assert len(danglings) == 2
+    bindings = [
+        {"edge_id": danglings[0]["id"], "to_component_id": cid_b},
+        {"edge_id": danglings[1]["id"], "to_component_id": cid_c},
+    ]
+    r = components.bind_edges_bulk("sme-a", bindings)
+    assert r["committed"] is True
+    assert r["applied"] == 2
+
+
+def test_bind_edges_bulk_collision_rejects_batch(agent_factory):
+    """Bind would collide with existing bound row → whole batch rejected."""
+    cid_a = _sme_with_component(agent_factory, "sme-a", "dream11/a")
+    cid_b = _sme_with_component(agent_factory, "sme-b", "dream11/b")
+    # Pre-existing bound edge (a → b, calls /z)
+    components.upsert_edge_outbound(
+        "sme-a",
+        {"from_component_id": cid_a, "to_component_id": cid_b,
+         "edge_type": "calls", "identifier": "/z"},
+    )
+    # Dangling with same shape — bind would collide
+    components.upsert_edge_outbound(
+        "sme-a",
+        {"from_component_id": cid_a, "edge_type": "calls", "identifier": "/z"},
+    )
+    dangling = execute_one(
+        "SELECT id::text AS id FROM edges "
+        "WHERE from_component_id = %s AND to_component_id IS NULL "
+        "AND identifier = '/z'",
+        (cid_a,),
+    )
+    r = components.bind_edges_bulk(
+        "sme-a", [{"edge_id": dangling["id"], "to_component_id": cid_b}],
+    )
+    assert r["committed"] is False
+    assert "collide" in r["errors"][0].lower()

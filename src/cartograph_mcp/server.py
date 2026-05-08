@@ -1200,6 +1200,50 @@ def resolve_reference(
 
 
 @mcp.tool()
+def resolve_references_bulk(
+    agent_id: str, items: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """[Phase 10.13.7] Bulk-resolve N unresolved rows in one atomic call.
+
+    items[i] = {"unresolved_id": str, "resolved_to_component_id": str}
+
+    Atomic-with-pre-validation per Phase 8 pattern. Pre-checks every row
+    (unresolved exists + not already resolved, target exists + active);
+    if any fails, writes nothing. If all pass, applies in one transaction.
+
+    Returns:
+      {"committed": True, "applied": N, "rows": [...]}
+      {"committed": False, "applied": 0, "errors": {idx: reason}}
+
+    Max 500 items. Use during EDGE_DISCOVERY when reconciling N
+    unresolved + paired dangling-edge pairs. Pair with bind_edges_bulk.
+    """
+    return components_tool.resolve_references_bulk(agent_id, items)
+
+
+@mcp.tool()
+def bind_edges_bulk(
+    agent_id: str, bindings: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """[Phase 10.13.7] Bulk-bind N dangling edges in one atomic call.
+
+    bindings[i] = {"edge_id": str, "to_component_id": str}
+
+    Atomic-with-pre-validation per Phase 8 pattern. Pre-checks every row
+    (edge exists + dangling, caller owns from_component_id, target exists +
+    active, no collision with existing bound row); if any fails, writes
+    nothing. If all pass, applies in one transaction.
+
+    Returns:
+      {"committed": True, "applied": N, "rows": [...]}
+      {"committed": False, "applied": 0, "errors": {idx: reason}}
+
+    Max 500 bindings.
+    """
+    return components_tool.bind_edges_bulk(agent_id, bindings)
+
+
+@mcp.tool()
 def get_component(agent_id: str, component_id: str) -> dict[str, Any]:
     """Read any component. Open to all active agents."""
     return components_tool.get_component(agent_id, component_id)
@@ -2298,14 +2342,14 @@ def _build_batch_dispatch() -> dict:
         "upsert_attributions_bulk",
         "create_edge",
         "upsert_edge_outbound", "upsert_edges_outbound_bulk",
-        "bind_edge",
+        "bind_edge", "bind_edges_bulk",
         "delete_edge", "delete_edges_bulk",
         "upsert_flow", "upsert_flows_bulk",
         "delete_flow", "delete_flows_bulk",
         "delete_attribution", "delete_attributions_bulk",
         "insert_unresolved", "insert_unresolved_bulk",
         "delete_unresolved", "delete_unresolved_bulk",
-        "resolve_reference",
+        "resolve_reference", "resolve_references_bulk",
         # components — reads
         "get_component", "get_components_bulk",
         "get_attributions", "get_attributions_bulk",
