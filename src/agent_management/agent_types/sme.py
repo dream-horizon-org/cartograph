@@ -639,6 +639,18 @@ STEP 2b — Catalog declaration (first-class catalogs).
   declare every endpoint you expose, topic/queue you handle, etc.
   Idempotent — re-call updates metadata + confidence, never duplicates.
 
+  KAFKA / SQS CONSUMERS — DO declare catalogs (Phase 10.13.9). If
+  your component is a pure-consumer service (no HTTP endpoints, just
+  reads from queues/topics), declare each consumed topic / queue as
+  a `queue` catalog. Identifier = bare topic/queue name. These ARE
+  your inbound surfaces — they anchor flows in Step 4. Without them
+  blast-radius analysis breaks. Counter-misconception: "Kafka consumer
+  has no inbound HTTP, so no catalogs needed" — WRONG. Topics ARE
+  the inbound contract. Worked example for a `fantasy-consumer` reading
+  topics `user.events.v1` + `order.completed.v2`:
+    upsert_catalog(agent_id, my_component_id, 'queue', 'user.events.v1')
+    upsert_catalog(agent_id, my_component_id, 'queue', 'order.completed.v2')
+
   Skip for db / cache / queue / object-store COMPONENT types — they
   accept arbitrary queries / writes and don't publish a closed API.
 
