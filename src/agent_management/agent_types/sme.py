@@ -586,25 +586,28 @@ STEP 2 — Hydrate attributions exhaustively on YOUR component.
   OTHER components, not facts about you. NEVER write attributions
   with a kind name like `outbound_*` — outbound is the EDGE.
 
-  ATTRIBUTION UNIQUENESS.
-  Attributions enforce a global unique constraint on
-  (plane, resource_type, identifier) — NOT scoped per-component.
-  Two SMEs cannot both claim `(github, deployment_environment,
-  prod)` — only the first wins; the second gets
-  "Attribution already belongs to component <other_id>" and
-  silently fails. When you hit this:
-    1. If the conflicting component IS you (same logical thing,
-       different SME) — file a merge nomination, don't try to
-       force the attribution.
-    2. If the conflicting component is a separate peer (you both
-       legitimately observe the same identifier from different
-       angles, like every prod service holding `env=prod`) — pick
-       a more SPECIFIC identifier scoped to you, OR omit it.
-       Don't try to claim shared categorical labels as
-       attributions.
-    3. If you collided because you mistook an outbound target as
-       your own attribution — see ATTRIBUTION vs EDGE above; turn
-       it into an edge instead.
+  ATTRIBUTION UNIQUENESS (Phase 10.13.6 — component-scoped).
+  Attributions are UNIQUE on (component_id, plane, resource_type,
+  identifier). Multiple components can legitimately share the same
+  (plane, resource_type, identifier) triple — runtime=jvm on every
+  Java service, env=uat on every UAT service, shared kafka topic
+  consumed by N services, shared aerospike namespace across siblings.
+  Cross-component overlap is NOT a write-time error anymore.
+
+  When you find a peer component holding the SAME (plane, rt, id) as
+  yours, that's potential merge signal but NOT structural proof. Two
+  paths:
+    1. Same logical thing, two materialisations (e.g. github + telemetry
+       SME both claiming hostname=foo.dream11.local) → file a merge
+       nomination after Phase MATERIALISATION ends. Identity drift is
+       resolved socially via consolidation, not at the write site.
+    2. Categorically-shared tags (env=prod on every prod service,
+       runtime=jvm on every Java service) → no merge needed, both
+       components legitimately hold the tag. This is the common case.
+  Note: pre-Phase-10.13 the constraint was global, so SMEs sometimes
+  saw "Attribution already belongs to component X" errors. Those
+  errors no longer fire. If you mistook an outbound target as an
+  attribution → see ATTRIBUTION vs EDGE above; turn it into an edge.
 
   PLANE = DISCOVERY PLANE, NOT CATEGORICAL PLANE.
   The `plane` field on each attribution is where YOU found the
@@ -1383,8 +1386,9 @@ delete_edges_bulk, delete_flows_bulk, delete_unresolved_bulk.
 
 DON'T:
 - Try to overwrite a wrong attribution by upserting with corrected
-  shape — UNIQUE on (plane, resource_type, identifier) blocks it.
-  Use delete_attribution then write fresh.
+  shape — UNIQUE on (component_id, plane, resource_type, identifier)
+  treats different identifiers as different rows. Use delete_attribution
+  on the wrong row, then write fresh.
 - Delete and re-create a row when an upsert would update in place
   (upserts on attributions / catalogs / edges / flows are idempotent
   and accumulate metadata).

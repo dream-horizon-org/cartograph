@@ -235,18 +235,45 @@ def test_sme_cannot_attribute_to_other_component(agent_factory):
         )
 
 
-def test_attribution_conflict_different_component_rejected(agent_factory):
+def test_attribution_shared_across_components_allowed(agent_factory):
+    """Phase 10.13.6: cross-component (plane, resource_type, identifier)
+    overlap is NO LONGER rejected. Identity drift handled socially via
+    clarifications between peer SMEs, not at write time. Multiple
+    components legitimately share categorical tags (runtime=jvm,
+    env=prod, shared kafka topic, etc).
+    """
     cid_a = _sme_with_component(agent_factory, "sme-a", "dream11/a")
     cid_b = _sme_with_component(agent_factory, "sme-b", "dream11/b")
-    components.upsert_attribution(
+    a1 = components.upsert_attribution(
         "sme-a", cid_a,
-        {"plane": "cloud", "resource_type": "hostname", "identifier": "foo.dream11.local"},
+        {"plane": "cloud", "resource_type": "runtime", "identifier": "jvm"},
     )
-    with pytest.raises(ValueError, match="already belongs to component"):
-        components.upsert_attribution(
-            "sme-b", cid_b,
-            {"plane": "cloud", "resource_type": "hostname", "identifier": "foo.dream11.local"},
-        )
+    a2 = components.upsert_attribution(
+        "sme-b", cid_b,
+        {"plane": "cloud", "resource_type": "runtime", "identifier": "jvm"},
+    )
+    # Both rows exist, on different components.
+    assert str(a1["component_id"]) == cid_a
+    assert str(a2["component_id"]) == cid_b
+    assert a1["id"] != a2["id"]
+
+
+def test_attribution_same_component_still_idempotent(agent_factory):
+    """Same component re-upserting same triple → updates in place,
+    does NOT create duplicate row (component-scoped UNIQUE)."""
+    cid = _sme_with_component(agent_factory, "sme-a", "dream11/a")
+    a1 = components.upsert_attribution(
+        "sme-a", cid,
+        {"plane": "cloud", "resource_type": "runtime", "identifier": "jvm",
+         "evidence": "first"},
+    )
+    a2 = components.upsert_attribution(
+        "sme-a", cid,
+        {"plane": "cloud", "resource_type": "runtime", "identifier": "jvm",
+         "evidence": "updated"},
+    )
+    assert a1["id"] == a2["id"]
+    assert a2["evidence"] == "updated"
 
 
 def test_attribution_idempotent_on_same_component(agent_factory):

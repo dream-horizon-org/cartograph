@@ -253,10 +253,13 @@ def upsert_component(agent_id: str, component_data: dict) -> dict:
 def upsert_attribution(agent_id: str, component_id: str, attribution_data: dict) -> dict:
     """Create or update an attribution on this SME's component.
 
-    ON CONFLICT on (plane, resource_type, identifier): if the existing
-    attribution is on THIS SME's component → UPDATE; if on another
-    component → refuse (cross-component attributions are a consolidation
-    signal, not a direct write).
+    Phase 10.13.6: ON CONFLICT now scoped to
+    (component_id, plane, resource_type, identifier). Multiple components
+    may legitimately share the same (plane, resource_type, identifier)
+    triple — e.g. runtime=jvm on every Java service, deployment_environment=
+    uat on every UAT service, shared aerospike namespace across siblings.
+    Cross-component overlap is no longer a structural error; identity-
+    drift is now resolved socially via clarifications between peer SMEs.
     """
     _assert_sme(agent_id)
     if not _sme_owns_component(agent_id, component_id):
@@ -283,19 +286,6 @@ def upsert_attribution(agent_id: str, component_id: str, attribution_data: dict)
     if not (0.0 <= confidence <= 1.0):
         raise ValueError("confidence must be in [0.0, 1.0]")
 
-    # Detect cross-component conflicts.
-    existing = execute_one(
-        """SELECT id, component_id FROM attributions
-           WHERE plane = %s AND resource_type = %s AND identifier = %s""",
-        (plane, resource_type, identifier),
-    )
-    if existing is not None and str(existing["component_id"]) != str(component_id):
-        raise ValueError(
-            f"Attribution ({plane}, {resource_type}, {identifier}) already "
-            f"belongs to component {existing['component_id']}. Cross-component "
-            "reassignment requires consolidation (Phase 3)."
-        )
-
     vec = emb.vector_literal(emb.embed_text(
         emb.attribution_embed_text(resource_type, identifier)
     ))
@@ -304,7 +294,7 @@ def upsert_attribution(agent_id: str, component_id: str, attribution_data: dict)
            (component_id, plane, resource_type, identifier, evidence, confidence,
             metadata, embedding, discovered_by, last_seen_at)
            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector, %s, now())
-           ON CONFLICT (plane, resource_type, identifier) DO UPDATE
+           ON CONFLICT (component_id, plane, resource_type, identifier) DO UPDATE
              SET evidence = EXCLUDED.evidence,
                  confidence = EXCLUDED.confidence,
                  metadata = EXCLUDED.metadata,
@@ -398,33 +388,11 @@ def upsert_attributions_bulk(
             "metadata": attr.get("metadata") or {},
         })
 
-    # Cross-component conflict detection (any row already-claimed by
-    # another component → refuse the whole batch; consolidation is
-    # the right path).
-    if not errors:
-        keys = [(n["plane"], n["resource_type"], n["identifier"])
-                for n in normalized]
-        # ANY-style query so this is one DB round-trip not N.
-        existing = execute(
-            """SELECT plane, resource_type, identifier, component_id
-                 FROM attributions
-                WHERE (plane, resource_type, identifier) IN (
-                  SELECT * FROM UNNEST(%s::text[], %s::text[], %s::text[])
-                )""",
-            ([k[0] for k in keys],
-             [k[1] for k in keys],
-             [k[2] for k in keys]),
-        )
-        ex_by_key = {(r["plane"], r["resource_type"], r["identifier"]):
-                     str(r["component_id"]) for r in existing}
-        for n in normalized:
-            ex = ex_by_key.get((n["plane"], n["resource_type"], n["identifier"]))
-            if ex is not None and ex != str(component_id):
-                errors[n["i"]] = (
-                    f"Attribution ({n['plane']}, {n['resource_type']}, "
-                    f"{n['identifier']}) already belongs to component {ex}. "
-                    "Cross-component reassignment requires consolidation."
-                )
+    # Phase 10.13.6: dropped cross-component conflict detection. Multiple
+    # components may legitimately share (plane, resource_type, identifier)
+    # — runtime tags, env tags, shared infra namespaces. Identity-drift
+    # is now resolved socially via clarifications between peer SMEs, not
+    # by structural rejection at write time.
 
     if errors:
         return {
@@ -444,7 +412,7 @@ def upsert_attributions_bulk(
                (component_id, plane, resource_type, identifier, evidence,
                 confidence, metadata, embedding, discovered_by, last_seen_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector, %s, now())
-               ON CONFLICT (plane, resource_type, identifier) DO UPDATE
+               ON CONFLICT (component_id, plane, resource_type, identifier) DO UPDATE
                  SET evidence = EXCLUDED.evidence,
                      confidence = EXCLUDED.confidence,
                      metadata = EXCLUDED.metadata,

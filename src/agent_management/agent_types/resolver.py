@@ -136,6 +136,13 @@ is admin telling you to relax/tighten a merge threshold mid-batch.
      * Catalog overlap? Edge-target overlap? (strong merge signals)
      * Any glaring contradictions? (e.g., they already have an edge
        between them — they're talking, not the same thing)
+     * Phase 10.13.6: shared (plane, resource_type, identifier)
+       attribution is NO LONGER a structural identity proof — multiple
+       components can legitimately share categorical tags (runtime=jvm,
+       env=prod, shared kafka topic, etc.). Treat overlap as a hint to
+       investigate, not as automatic merge evidence. Require code-level
+       or telemetry-level cross-verification before recommending M on
+       attribution-overlap alone.
    - PARTICIPANT CONFLICT CHECK before approving to M:
      For consolidation X with participants {{a, b}} (b may be None
      for split), check if a OR b appears in active_participants. If

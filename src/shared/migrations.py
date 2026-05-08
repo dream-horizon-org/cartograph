@@ -246,7 +246,11 @@ def run_migrations() -> None:
                     discovered_by   TEXT,
                     discovered_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
                     last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    UNIQUE(plane, resource_type, identifier)
+                    -- Phase 10.13.6: component-scoped UNIQUE (was global).
+                    -- Multiple components may legitimately share evidence
+                    -- (runtime=jvm, env=uat, shared kafka topic, etc).
+                    -- Identity-drift handled socially via clarifications.
+                    UNIQUE(component_id, plane, resource_type, identifier)
                 )
             """)
 
@@ -625,6 +629,35 @@ def run_migrations() -> None:
                 "ALTER TABLE components DROP CONSTRAINT IF EXISTS "
                 "components_canonical_name_key"
             )
+
+            # Phase 10.13.6: attributions UNIQUE → component-scoped.
+            # Drop the global UNIQUE(plane, resource_type, identifier) which
+            # silently rejected legitimate fan-in (e.g. runtime=jvm on
+            # multiple components, deployment_environment=uat on every UAT
+            # service, shared aerospike namespace across siblings). Replace
+            # with UNIQUE(component_id, plane, resource_type, identifier)
+            # which prevents same-component duplicates but allows multiple
+            # components to claim the same evidence. Identity-drift moves
+            # from structural-rejection to social-resolution (peer SMEs
+            # raise clarifications when they see overlap). Insights
+            # de78a2bc + 85b1272b + e8dc68f1. Strictly weaker constraint —
+            # any row valid under old constraint is valid under new one;
+            # zero data migration. Idempotent.
+            cur.execute(
+                "ALTER TABLE attributions DROP CONSTRAINT IF EXISTS "
+                "attributions_plane_resource_type_identifier_key"
+            )
+            # PG doesn't support ADD CONSTRAINT IF NOT EXISTS; check first.
+            cur.execute(
+                "SELECT 1 FROM pg_constraint WHERE conname = "
+                "'attributions_component_plane_rt_id_key'"
+            )
+            if cur.fetchone() is None:
+                cur.execute(
+                    "ALTER TABLE attributions ADD CONSTRAINT "
+                    "attributions_component_plane_rt_id_key "
+                    "UNIQUE (component_id, plane, resource_type, identifier)"
+                )
 
             # Phase 3.9: asymmetric edge protocol.
             # Rename source_id → from_component_id, target_id → to_component_id,
