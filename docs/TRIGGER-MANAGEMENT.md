@@ -288,7 +288,7 @@ LOOP (continuous):
 Agent manager is a separate process. One dedicated worker thread per lane
 per agent type. Lane caps are env-configurable
 (`CARTOGRAPH_INVOKE_LANES_{ORCH,ITER,RES,SME}`), defaulting to
-1 / 2 / 1 / 4 (eight concurrent claude subprocesses total). Plus one
+1 / 2 / 1 / 12 (sixteen concurrent claude subprocesses total — Phase 10.13.13 bumped SME 4→8→12). Plus one
 stale-watchdog thread.
 
 ```

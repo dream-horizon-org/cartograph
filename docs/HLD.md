@@ -450,7 +450,7 @@ via `agent_runs.trigger_lock` + `agent_runs.status`.
 │  2. Identify agents that     │    │     orch   = 1               │
 │     need waking              │    │     iter   = 2               │
 │  3. Filter: status='idle'    │    │     res    = 1               │
-│     AND trigger_lock=FALSE   │    │     sme    = 8 (Phase 10.11) │
+│     AND trigger_lock=FALSE   │    │     sme   = 12 (Phase 10.13.13) │
 │  4. SET trigger_lock = TRUE  │    │   (env-configurable;         │
 │     (atomic, skip if 0 rows) │    │   default total = 12)        │
 │  5. Recovery scan: errored   │    │                              │

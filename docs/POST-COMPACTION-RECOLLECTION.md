@@ -55,6 +55,8 @@
 | 10.10 sleep rewrite + datastore mandate | `13531d7` | SLEEP rewritten in sme/iter/orch prompts (yield-over-sleep doctrine); ★ DATASTORES MANDATORY ★ block in iterator telemetry section with DEMO7 feeds-v2 breadcrumb |
 | 10.10 datastore wording softening | `da49187` | "MIGHT NOT BE PRESENT" not "do NOT appear" — softer framing, mandate intact |
 | 10.11 Bedrock model ids + SME lanes 8 | `c04f7c9` | `config.MODEL_OPUS` / `MODEL_SONNET` env constants (sources `ANTHROPIC_DEFAULT_*_MODEL`); all 4 agent types rewired; `INVOKE_LANES_SME` 4→8 (total 12) |
+| 10.13.12 iterator ADMIN-SCOPE rule | `8c7fd30` | iterator.py new block: if admin gives narrow target list, treat as exhaustive scope — `upsert_resource(s_bulk)` writes filtered to (named targets ∪ their dependency-linked datastores/caches/queues). Full plane enumeration dumps to `./<plane>_seen.json` workspace file (not the resources table). Report `seen vs upserted` counts. Trims ~50 LOC of admin kickoff boilerplate per run. iter prompt 37783 → 38973. |
+| 10.13.13 SME lanes 8 → 12 | `89ec1c4` | `INVOKE_LANES_SME` 8→12 ahead of 4th real-data run; total concurrent subprocesses 12 → 16 (orch 1 + iter 2 + res 1 + sme 12). |
 | Runtime: Bedrock-isolated agent auth (single env-var toggle) | `adb59f3` | `CARTOGRAPH_AGENT_SETTINGS_PATH` → spawned `claude -p` gets `--settings <path>` AND `shared/config.py` auto-loads file's env block at import. Local Claude Code dev session unaffected (subscription); agents bill Bedrock. See §2 for ops detail. Drops the docker-compose detour. |
 | 10.11 HLD + config stale-lane cleanup | `0521153` | HLD ASCII diagram + config.py comment fixed to 12-lane total |
 | 10.12 iterator prompt gaps (MCP port + APM fallback) | `45a9f4d` | Two blocks added to iterator prompt: AUXILIARY MCP PORT CONFLICTS (port 8101 collision playbook) + SURFACE FALLBACK LADDER (when APM surfaces missing, walk infra/cloud/logs/code) |
@@ -950,8 +952,8 @@ claude -p --model "us.anthropic.claude-opus-4-7[1m]" --effort medium "..." → e
 | Orchestrator lanes | 1 | `INVOKE_LANES_ORCH` |
 | Iterator lanes | 2 | `INVOKE_LANES_ITER` |
 | Resolver lanes | 1 | `INVOKE_LANES_RES` |
-| **SME lanes** | **8** (was 4) | `INVOKE_LANES_SME` |
-| **Total subprocess concurrency** | **12** | sum |
+| **SME lanes** | **12** (Phase 10.13.13 — was 8, originally 4) | `INVOKE_LANES_SME` |
+| **Total subprocess concurrency** | **16** | sum |
 
 ---
 
