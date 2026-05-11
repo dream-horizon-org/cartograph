@@ -41,12 +41,12 @@ HEARTBEAT_TIMEOUT = int(os.getenv("CARTOGRAPH_HEARTBEAT_TIMEOUT", "300"))
 
 # Invoke-loop concurrency lanes per agent type. Each lane is one dedicated
 # worker thread spawning one claude subprocess at a time. Total concurrent
-# subprocesses = sum of these. Default: 12 (1+2+1+8 — Phase 10.11 bumped
-# SME from 4 to 8).
+# subprocesses = sum of these. Default: 16 (1+2+1+12 — Phase 10.11 bumped
+# SME 4→8; Phase 10.13.13 bumped 8→12 for the 4th real-data run).
 INVOKE_LANES_ORCH = int(os.getenv("CARTOGRAPH_INVOKE_LANES_ORCH", "1"))
 INVOKE_LANES_ITER = int(os.getenv("CARTOGRAPH_INVOKE_LANES_ITER", "2"))
 INVOKE_LANES_RES  = int(os.getenv("CARTOGRAPH_INVOKE_LANES_RES",  "1"))
-INVOKE_LANES_SME  = int(os.getenv("CARTOGRAPH_INVOKE_LANES_SME",  "8"))
+INVOKE_LANES_SME  = int(os.getenv("CARTOGRAPH_INVOKE_LANES_SME",  "12"))
 
 # Claude model ids passed to `claude -p --model <id>`. On Bedrock (when
 # CLAUDE_CODE_USE_BEDROCK=1 is set) these MUST be Bedrock inference
