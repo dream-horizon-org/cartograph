@@ -8,75 +8,94 @@ This document defines how agents get invoked, what they can read, and what they 
 
 ### 1.1 Consolidation States
 
+Consolidations have **two distinct state machines** keyed on
+`nomination_type`: one for `merge` (two parties) and one for `split`
+(self-nomination, one party). They share the resolver-side shape
+(R → {M, F}, MD → D) but differ on the negotiation phase. Keeping
+them separate avoids conditional "is this a split?" branches in the
+state-machine code — same pattern as the clarification asker/responder
+and task worker/owner tables below.
+
+Shared shorthand:
+- `B1` = Blocked on Agent1 (nominator's turn)
+- `B2` = Blocked on Agent2 (nominated's turn) — **merge only**
+- `R`  = Resolver review
+- `M`  = Mutation in progress (`mutation_assigned_to` executes)
+- `MD` = Materialisation Done (mutation complete, resolver to verify)
+- `D`  = Done
+- `F`  = Failed / rejected
+
+#### 1.1a MERGE (two parties — nominator + nominated)
+
 ```
-States:
-  B1  = Blocked on Agent1 (nominator's turn)
-  B2  = Blocked on Agent2 (nominated's turn) ← INITIAL STATE
-  R   = Resolver review
-  M   = Mutation in progress (mutation_assigned_to executes)
-  MD  = Materialisation Done (mutation executed, pending ack)
-  D   = Done (fully complete)
-  F   = Failed / rejected
+Initial: B2 (nominated's turn — nominator already gave evidence at creation)
 
-Agent1 = nominator (proposed_by). Agent2 = nominated.
-Initial state = B2 (nominator already provided evidence at creation).
-
-Transitions:
-  B2 → B1    (nominated responds, flips to nominator)
-  B1 → B2    (nominator responds, flips to nominated)
-  B1 → R     (system: if r_conf IS NULL and both conf breach threshold)
-             (agent: if r_conf IS NOT NULL, agent explicitly escalates)
-  B2 → R     (same conditions as above)
-  R  → B1/B2 (resolver needs more info, sends back to either agent)
-  R  → F     (resolver rejects)
-  R  → M     (resolver approves, sets mutation_assigned_to)
-  M  → MD    (mutation_assigned_to agent completes merge/split)
-  MD → D     (ack — done)
-
-Diagram:
-
-             ┌────┐ ◄──────────── ┌────┐
-             │ B1 │ ─────────────►│ B2 │ (initial)
-             └─┬──┘               └──┬─┘
-               │▲                   ▲│
-               ││                   ││
-               │└─────────┬─────────┘│
-               │          │          │
-               └─────────┬┼──────────┘
-   (conf-breach/escalate)││
-                         ▼│(back to negotiation)
-                       ┌──┴─┐
-              ┌────────│ R  │
-              │        └─┬──┘
-              │          │   
-              ▼          ▼   
-            ┌────┐     ┌────┐
-            │ F  │     │ M  │
-            └────┘     └─┬──┘
-                         │
-                         ▼
-                       ┌────┐
-                       │ MD │
-                       └─┬──┘
-                         │
-                         ▼
-                       ┌────┐
-                       │ D  │
-                       └────┘
+  ┌────┐ ◄──────────── ┌────┐
+  │ B1 │ ─────────────►│ B2 │ (initial)
+  └─┬──┘               └──┬─┘
+    │                     │
+    └──────────┬──────────┘
+   (conf-breach auto-escalate, or manual if r_conf set)
+               │
+               ▼
+             ┌────┐
+    ┌────────│ R  │───────┐
+    │        └─┬──┘       │
+    │        ┌─┴──┐       │
+    │        │B1/B2│      │   (resolver sends back)
+    │        └────┘       │
+    ▼                     ▼
+  ┌────┐               ┌────┐     ┌────┐     ┌────┐
+  │ F  │               │ M  │ ──► │ MD │ ──► │ D  │
+  └────┘               └────┘     └────┘     └────┘
 ```
 
-**Who gets triggered and their options:**
+| State  | Triggered            | Valid next states                                                                                      |
+| ------ | -------------------- | ------------------------------------------------------------------------------------------------------ |
+| B2     | Nominated (agent_b)  | B1 (respond, flip to nominator), R (manual escalate — only if r_conf_score IS NOT NULL)                |
+| B1     | Nominator (agent_a)  | B2 (respond, flip to nominated), R (manual escalate — only if r_conf_score IS NOT NULL)                |
+| B1, B2 | System (auto)        | R (when BOTH a_conf_score AND b_conf_score ≥ merge threshold AND r_conf_score IS NULL)                 |
+| R      | Resolver             | B1 (need more from nominator), B2 (need more from nominated), F (reject), M (approve + mutation_assigned_to) |
+| M      | mutation_assigned_to | MD (mutation complete)                                                                                 |
+| MD     | Resolver             | D                                                                                                      |
 
+#### 1.1b SPLIT (one party — self-nominator)
 
-| State  | Triggered            | Options (valid next states)                                                                                      |
-| ------ | -------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| B2     | Nominated (agent_b)  | B1 (respond, flip to nominator)                                                                                  |
-| B1     | Nominator (agent_a)  | B2 (respond, flip to nominated)                                                                                  |
-| B1, B2 | System (auto)        | R (if both conf breach threshold and r_conf IS NULL)                                                             |
-| B1, B2 | Agent (manual)       | R (escalate, only if r_conf IS NOT NULL)                                                                         |
-| R      | Resolver             | B1 (need more from nominator), B2 (need more from nominated), F (reject), M (approve + set mutation_assigned_to) |
-| M      | mutation_assigned_to | MD (mutation complete)                                                                                           |
-| MD     | Resolver             | D (done)                                                                                                         |
+No counter-party to negotiate with; B2 doesn't exist for splits.
+Skips the B-negotiation phase entirely and lands directly at `R` on
+nomination.
+
+```
+Initial: R (resolver's turn — no negotiation phase)
+
+                   ┌────┐
+                   │ R  │
+               ┌───┴─┬──┘────┐
+               ▼     ▼       ▼
+             ┌────┐┌────┐  ┌────┐     ┌────┐     ┌────┐
+             │ B1 ││ F  │  │ M  │ ──► │ MD │ ──► │ D  │
+             └─┬──┘└────┘  └────┘     └────┘     └────┘
+               │
+               └─→ back to R (nominator elaborates; no r_conf gate since
+                               r_conf is already set from the first review)
+```
+
+| State | Triggered            | Valid next states                                                                      |
+| ----- | -------------------- | -------------------------------------------------------------------------------------- |
+| R     | Resolver             | B1 (need more from nominator), F (reject), M (approve + mutation_assigned_to = agent_a — enforced) |
+| B1    | Nominator (agent_a)  | R (respond with more info) — NOT B2, there is no counter-party                         |
+| M     | mutation_assigned_to | MD (spawn_child_agent + execute_mutation complete)                                     |
+| MD    | Resolver             | D                                                                                      |
+
+No auto-escalate rule applies to splits — only one confidence score
+exists. The scanner explicitly filters `nomination_type = 'merge'` for
+both auto-escalate and auto-reject.
+
+The invariant is enforced three ways:
+- Python state-machine dicts `_SPLIT_*_TRANSITIONS` structurally lack B2.
+- `nominate_consolidation` inserts splits at `R` directly.
+- DB CHECK constraint `consolidation_split_no_b2` rejects any row that
+  lands at (split, B2) regardless of which code path tries to write it.
 
 
 ---
@@ -224,12 +243,14 @@ LOOP (continuous):
   ├── 1. Scan for actionable items across all tables
   │
   ├── 2. Build wake list:
-  │     For each idle agent (status='idle' AND trigger_lock=FALSE), check:
+  │     For each idle agent (status='idle' AND trigger_lock=FALSE
+  │     AND (sleep_until IS NULL OR sleep_until <= now())), check:
   │       ├── consolidations where status triggers this agent?
   │       ├── tasks where status triggers this agent?
   │       ├── clarifications where status triggers this agent?
   │       ├── communications where type='chat' AND to=agent AND acked_at IS NULL?
-  │       ├── broadcasts where type='broadcast' AND to=agent_type AND no ack?
+  │       ├── broadcasts where type='broadcast' AND to_agent_type=agent_type AND no ack
+  │       │   AND (is_persistent OR created_at > agent.created_at)?  -- forward-only
   │       └── system auto-transitions (confidence breach → R)?
   │
   ├── 3. Prioritise:
@@ -250,34 +271,68 @@ LOOP (continuous):
   │     │   AND r_conf IS NULL → auto-set status = 'R'
   │     └── (Other system-level transitions)
   │
-  └── 6. Sleep briefly → loop
+  ├── 6. Recovery scan (scanners/recovery.py):
+  │     ├── SELECT WHERE status='errored'
+  │     │     AND recovery_attempts < 3
+  │     │     AND now() - errored_at >= backoff(recovery_attempts)
+  │     ├── Flip to idle, clear trigger_lock, increment recovery_attempts,
+  │     │   keep error_msg for history.
+  │     └── Backoff ladder: [60s, 300s, 1800s]. After 3 → stays errored
+  │         for human triage (visible in admin UI with error_msg).
+  │
+  └── 7. Sleep briefly → loop
 ```
 
-### 2.2 Agent Manager (separate loop)
+### 2.2 Agent Manager (lane-based parallel dispatcher)
 
-Agent manager is a separate process that reads trigger locks and invokes agents.
+Agent manager is a separate process. One dedicated worker thread per lane
+per agent type. Lane caps are env-configurable
+(`CARTOGRAPH_INVOKE_LANES_{ORCH,ITER,RES,SME}`), defaulting to
+1 / 2 / 1 / 12 (sixteen concurrent claude subprocesses total — Phase 10.13.13 bumped SME 4→8→12). Plus one
+stale-watchdog thread.
 
 ```
-AGENT MANAGER LOOP:
+ON BOOT:
+  Spawn N worker threads — one per lane, per agent_type.
+  Spawn 1 stale-watchdog thread.
+
+PER-WORKER LOOP (for agent_type T):
   │
-  ├── 1. Poll: SELECT * FROM agent_runs
-  │           WHERE trigger_lock = TRUE
-  │           ORDER BY priority (orchestrator > resolver > sme > iterator)
+  ├── 1. Atomically claim the next locked agent of type T:
+  │     UPDATE agent_runs SET status='running', trigger_lock=FALSE,
+  │            invocation_count=invocation_count+1, heartbeat=now()
+  │     WHERE agent_id = (
+  │       SELECT agent_id FROM agent_runs
+  │       WHERE agent_type = T AND trigger_lock = TRUE
+  │       ORDER BY invocation_count ASC
+  │       LIMIT 1 FOR UPDATE SKIP LOCKED
+  │     )
+  │     RETURNING *;
+  │     (SKIP LOCKED = no worker-vs-worker races; priority re-read every
+  │      pickup = no stale-snapshot bug.)
   │
-  ├── 2. For each locked agent:
-  │     ├── UPDATE agent_runs
-  │     │   SET status = 'running', trigger_lock = FALSE,
-  │     │       invocation_count = invocation_count + 1,
-  │     │       heartbeat = now()
-  │     │   WHERE agent_id = ? AND trigger_lock = TRUE
-  │     │
-  │     ├── Invoke agent with generic prompt:
-  │     │   "You've been woken up. Check get_action_items_summary()."
-  │     │
-  │     └── When agent yields:
-  │           SET status = 'idle'
+  ├── 2. invoke_agent(row, already_picked_up=True):
+  │     ├── Spawn claude -p subprocess in workspace cwd.
+  │     │   Per-type timeout: iterator/SME = 1800s, orch/resolver = 900s.
+  │     ├── Background heartbeat thread updates agent_runs.heartbeat
+  │     │   every 10s while subprocess runs.
+  │     ├── On yield           → status='idle' + clear_recovery_state
+  │     ├── On non-zero exit   → set_agent_errored(stderr tail)
+  │     ├── On TimeoutExpired  → set_agent_errored('TimeoutExpired...')
+  │     └── On any exception   → set_agent_errored(repr(exc))
   │
-  └── 3. Sleep briefly → loop
+  └── 3. Loop immediately (another agent of same type may be waiting);
+         if pickup returned None, sleep poll_interval and retry.
+
+STALE WATCHDOG (separate thread, runs every poll_interval × 5):
+  WHERE status='running' AND heartbeat < now() - 120s → set_agent_errored(
+    'Heartbeat stale… heartbeat keeper stopped or process died').
+  Safety net for crashes between heartbeat updates; the normal timeout/
+  exception paths above write error_msg themselves.
+
+On startup, orphaned `running` agents (previous agent-manager process died
+mid-subprocess) are flipped to `errored` rather than blanket-idle, so the
+recovery scanner governs retry cadence instead of blindly resurrecting them.
 ```
 
 ### 2.3 Flow Diagram
@@ -311,11 +366,68 @@ TRIGGER MANAGER                    agent_runs table                AGENT MANAGER
       │  → lock again                    │                              │
 ```
 
+### 2.4 Wake debouncing (Phase 7.4.14 — token-opt Round 3 #6)
+
+To avoid the "drip-fed wakes" cost pattern (3 events arrive 30s apart →
+3 separate wakes each re-paying the 16k-token cached system-prompt
+read), the trigger scanner debounces wakes by a 1-minute window
+(was 5 minutes; tuned down via commit `bc72bd0` after demo runs
+showed 5 min added too much per-event latency).
+
+```
+agent_runs gains:
+  first_pending_at TIMESTAMPTZ NULL
+
+trigger_loop.run_once() flow per agent:
+  if has_pending_items(agent):
+      if first_pending_at IS NULL:
+          stamp first_pending_at = now()  -- start of debounce window
+      if has_debounce_override(agent):
+          → wake immediately
+      elif first_pending_at + 5min <= now():
+          → wake (window elapsed)
+      else:
+          → skip (still in debounce window; will re-evaluate next cycle)
+  else:
+      if first_pending_at IS NOT NULL:
+          clear first_pending_at  -- no work, reset
+
+agent_manager on yield → idle:
+  clear first_pending_at  -- fresh window per cycle
+```
+
+**Override conditions (bypass the 1-min window):**
+
+1. **Pending admin chat** — admin chat is the wake-from-sleep auto-wake
+   signal; debouncing it would defeat the urgency contract.
+2. **Agent is `mutation_assigned_to` on a state=M consolidation** —
+   mid-mutation must not be delayed; resolver is waiting for the
+   M → MD transition.
+
+**Configurability:** the window is `WAKE_DEBOUNCE_SECONDS = 60` in
+`trigger_loop.py`. Bump back up to 300 if the workload is
+background-only and per-event latency is acceptable.
+
+**Trade-off documented for the user:**
+- Routine work (peer consolidation responses, broadcasts, non-admin
+  chats from orchestrator, terminal_pending_ack reminders) sees up
+  to 1-min latency between event arrival and agent wake.
+- Mid-merge dance + admin chat stay responsive via the override.
+
 ---
 
 ## 3. Agent Tools
 
 Tools are exposed as MCP server operations. The `cartograph-db` MCP server validates `agent_id` and `agent_type` on every call and enforces scoping.
+
+> **Implementation status.** **117 tools live** in `src/cartograph_mcp/server.py` (Phase 0 → 10.13). Phase 7.4.11 added `delete_edge`. Phase 7.4.12 added 3 bulk write variants. Phase 7.4.13 pre-injects action-items snapshot in invocation user message. Phase 7.4.14 introduces wake debouncing (1-min window post-`bc72bd0`, was 5-min initially; see §2.4). **Phase 8 (2026-04-29) added 18 tools: 4 corrective delete singletons (delete_attribution, delete_catalog, delete_flow, delete_unresolved); 5 corrective delete bulks (their bulks + delete_edges_bulk); 4 write bulks (upsert_flows_bulk, insert_unresolved_bulk, ack_broadcasts_bulk, ack_terminals_bulk) plus an ON CONFLICT idempotency upgrade to insert_unresolved with a UNIQUE migration; 5 multi-component read bulks (get_components/attributions/component_edges/catalogs/flows _bulk).** **Phase 9 (2026-04-30) added 1 tool: mcp_call_batch — server-side parallel dispatcher for heterogeneous batches; see §3.4.** **Phase 10 (2026-05-04) added 6 tools: search_components / _attributions / _edges / _catalogs / _flows / _unresolved — deterministic SQL-LIKE search; see §3.5.** **Phase 10.13 (2026-05-08) added 3 tools: `get_component_owner` (component_id → owning SME via RCA + decom chain — call BEFORE creating a clarification ABOUT another component), `resolve_references_bulk` + `bind_edges_bulk` (atomic-with-pre-validation EDGE_DISCOVERY reconciliation pair, max 500 items each).** Phase 10.13 also migrated `attributions` UNIQUE from global `(plane, resource_type, identifier)` to component-scoped `(component_id, plane, resource_type, identifier)` — multiple components legitimately sharing categorical tags (runtime, env, shared topics) no longer blocked. See AGENT-PROMPTS.md §0 for prompt rules.
+>
+> **Phase 7.4.4 + 7.4.5 wire-shape changes:**
+> - `vector_search` returns lean projection per row (id + identity columns + similarity) — no embedding vectors, no doc/slice/metadata blobs. Search-then-fetch pattern: callers follow up with `get_*(id)` for full detail.
+> - `get_action_items_summary` returns uniform `dict[str, int]`. The pre-7.4.5 `proxied: list[dict]` field is now `proxied_count: int`; rich per-proxy breakdown moved to `get_action_items_detail.proxied`.
+> - `spawn_child_agent` MCP wrapper now exposes the Phase 7.4.2 `transfer_catalog_ids` param (was missing pre-7.4.4).
+> - Self-loop edges (`from_component_id = to_component_id`) accepted everywhere (Phase 7.3 DB CHECK + Phase 7.4.4 Python guards both gone).
+> Covers action_items, chat, broadcast (incl. `update_broadcast_persistence` from 5.7), secrets, tasks, resources, agent_lifecycle, components (asymmetric edge writes + flows; Phase 7.4.2 `upsert_flow` takes `incoming_catalog_id`, `get_flow_inverse` returns catalog rows), notifications, consolidation (incl. `confidence_at_send` metadata stamping from 5.6), clarification, vector_search, mutation lifecycle (Phase 4 + 4.1 + 4.2 + 7.4.2: `execute_mutation`, `complete_consolidation`, `absorb_agent` with cascade.catalogs, `spawn_child_agent` with optional `transfer_catalog_ids`, `transfer_attributions`, `transfer_edges`, `transfer_flows`, `get_my_components`, `get_stale_edges`, `get_stale_flows`), proxy inheritance (`get_my_proxy_items`, `act_on_proxy_item`), `record_insight` (Phase 5.9), `ack_terminal` (Phase 7.1), and the catalogs-first-class set (Phase 7.4: `upsert_catalog`, `get_my_catalogs`, `get_my_catalog_callers`, `get_unmatched_callers`, `get_orphan_catalogs`). Every tool is wrapped by `cartograph_mcp.audit.audited` (Phase 5.10).
 
 ### 3.1 Trigger Tools (what wakes me — read-only, used by trigger manager)
 
@@ -436,58 +548,114 @@ get_edges(component_id) → EdgeRow[]
 get_unresolved(component_id) → UnresolvedRow[]
   Read unresolved references for a component.
 
-vector_search(query_text, table, limit) → Row[]
-  Embed query_text, search against specified table's embeddings.
-  Returns top N results with similarity scores.
-  Available to all agents.
+vector_search(agent_id, query_text, table, limit,
+              filters?, exclude_self=True) → {query_embedded, results}
+  Embed query_text (mxbai-embed-large, 1024 dims) and KNN-cosine against
+  the target table's embedding column. Tables: components, attributions,
+  unresolved, edges, catalogs. limit clamped to [1, 50].
+  Phase 10.7:
+    - components projection now includes `description` column.
+    - `filters: dict | None = None` (default no filter). Per-table
+      allowed keys (AND across keys; OR within key via list):
+        components:   component_type, status
+        attributions: plane, resource_type, component_id
+        edges:        edge_type, from_component_id, to_component_id
+        catalogs:     kind, component_id
+        unresolved:   reference_type, found_in_component_id, resolved
+      Invalid key for table → ValueError.
+    - `exclude_self: bool = True` (default ON). Excludes rows owned by
+      the caller's component(s) via RCA. Non-SME callers no-op silently.
+      Set False to include own rows (rare, e.g. self-loop sanity check).
+  Returns {query_embedded: False, results: []} when query can't be
+  embedded (Ollama unreachable, empty text). Available to all active
+  agents.
+
+get_resource(agent_id, resource_id) → ResourceRow
+  Read a single resource row.
+
+list_resources_for_plane(agent_id, plane) → ResourceRow[]
+  Read all resources for a plane (iterator monitors its own, orchestrator any).
+
+list_all_resources(agent_id, status?) → ResourceRow[]
+  Read every resource, optionally filtered by status (pending/assigned/done).
+  Orchestrator dashboard view.
+
+get_resource_counts(agent_id) → { by_plane_status: [...] }
+  Aggregate counts grouped by (plane, status).
+
+list_agents(agent_id) → AgentRow[]
+  See all non-decommissioned agents (any agent can call).
+
+get_secret(agent_id, plane, key) → string
+  Read a credential value (any agent).
+
+list_secrets_for_plane(agent_id, plane) → string[]
+  List credential keys for a plane (values not returned).
 ```
 
 ### 3.3 Act Tools (what can I do — scoped writes with mandatory state change)
 
 Exposed to agents via `cartograph-db` MCP. Every act on a stateful entity (consolidation, task, clarification) requires a state transition. Cannot respond without changing state.
 
-**Consolidation acts:**
+**Consolidation acts (live · Phase 3):**
 
 ```
-nominate_consolidation(agent_id, component_a_id, component_b_id, type, confidence, message)
-  Creates new consolidation row (status=B2) + communication message.
-  Only SMEs can nominate.
-  Validates: agent owns component_a.
+nominate_consolidation(agent_id, component_a_id, component_b_id?, type, confidence, message)
+  Creates new consolidation row + communication message with state_transition metadata.
+  Only SMEs can nominate. Validates: caller owns component_a.
+  type='merge' → component_b_id required, owned by different SME. Initial status=B2.
+  type='split' → component_b_id optional (child spawned via spawn_child_agent).
+                 Initial status=R (no negotiation phase — solo nomination).
 
 respond_consolidation(agent_id, consolidation_id, confidence, message, new_status)
   Updates confidence score + appends communication.
   Validates:
     - agent is agent_a or agent_b on this consolidation
-    - new_status is a valid transition from current status
+    - for split: only agent_a (no agent_b exists)
+    - new_status is a valid transition from current status (per-type machine)
     - state actually changes (can't respond without transition)
-  Valid transitions for nominated (agent_b):
+  Valid transitions for MERGE nominated (agent_b):
     B2 → B1 (respond, flip to nominator)
     B2 → R  (escalate to resolver, only if r_conf IS NOT NULL)
-  Valid transitions for nominator (agent_a):
+  Valid transitions for MERGE nominator (agent_a):
     B1 → B2 (respond, flip to nominated)
     B1 → R  (escalate to resolver, only if r_conf IS NOT NULL)
+  Valid transitions for SPLIT nominator (agent_a, only role):
+    B1 → R  (respond with more info — NOT B2, no counterparty)
 
 review_consolidation(agent_id, consolidation_id, r_confidence, message, new_status, mutation_assigned_to?)
-  Resolver-only. Reviews and decides.
-  Validates: agent_type = 'resolver'
-  Valid transitions:
-    R → B1/B2 (needs more info, sends back to either agent)
-    R → F     (rejected)
-    R → M     (approved — must set mutation_assigned_to)
-              merge: resolver picks agent with more planes
-              split: always agent_a
+  Resolver-only. Per-nomination-type transition table.
+  Writes r_conf_score + state transition + resolved_by/resolved_at (on F/D).
+  Valid transitions for MERGE resolver:
+    R → B1 | R → B2 | R → F | R → M (mutation_assigned_to REQUIRED; agent_a or agent_b)
+    MD → D
+  Valid transitions for SPLIT resolver:
+    R → B1 | R → F | R → M (mutation_assigned_to REQUIRED; enforced = agent_a)
+    MD → D
+    (NO R → B2 — splits have no counterparty to send back to.)
 
-execute_mutation(agent_id, consolidation_id, new_status)
-  SME executes approved merge/split.
-  Validates: agent is the designated mutation POC
-  Valid transitions:
-    M → MD (mutation complete)
+execute_mutation(agent_id, consolidation_id, message)  -- Phase 4
+  mutation_assigned_to SME acknowledges mutation work is applied. M → MD.
 
-complete_consolidation(agent_id, consolidation_id)
-  Final ack.
-  Valid transitions:
-    MD → D (done)
+complete_consolidation(agent_id, consolidation_id, message)  -- Phase 4
+  Resolver final verification. MD → D.
 ```
+
+**Auto-transitions (system, not an agent tool):**
+
+The trigger manager runs `auto_transitions.run_auto_transitions` on
+every cycle (see §2.1 step 5). Both rules are **merge-only** —
+splits have only one confidence score (a_conf_score) and lands
+directly at R on nomination, bypassing this phase entirely.
+
+- `nomination_type='merge' AND a_conf_score >= 0.85 AND b_conf_score >= 0.85 AND r_conf_score IS NULL`
+  → set `status='R'`. This is how first escalation to resolver happens —
+  not an explicit agent call. Manual `respond_consolidation(new_status='R')`
+  is refused until `r_conf_score` is non-null (resolver has already
+  weighed in).
+- `nomination_type='merge' AND a_conf_score <= 0.3 AND b_conf_score <= 0.3`
+  → set `status='F'`. Both sides strongly disagree → terminal reject, no
+  resolver needed.
 
 **Task acts:**
 
@@ -512,7 +680,7 @@ respond_task(agent_id, task_id, message, new_status, blocker_detail?)
     WD → TC (accept, task complete)
 ```
 
-**Clarification acts:**
+**Clarification acts (live · Phase 3):**
 
 ```
 create_clarification(asker_agent_id, responder_agent_id, question_message)
@@ -552,41 +720,168 @@ ack_chats(agent_id, communication_ids[])
 **Broadcast acts:**
 
 ```
-send_broadcast(from_agent_id, to_agent_type, message)
-  Inserts communication with type='broadcast', to_agent=agent_type.
-  Only orchestrator/admin can broadcast.
+send_broadcast(from_agent_id, to_agent_type, message, persistent=False)
+  Inserts communication (type='broadcast', to_agent_type=<type>,
+  is_persistent=<flag>). Only orchestrator/admin can broadcast —
+  iterators + SMEs + resolver get `Only orchestrator or admin can send
+  broadcasts` if they try. Codified in agent prompts: iterators
+  propose via chat → orch publishes; orch never tasks a non-orch
+  agent with `send_broadcast`.
+  persistent=False (default) → forward-only, only agents existing at
+  send time see it. persistent=True → also applies to agents spawned
+  later (standing policy).
+
+update_broadcast_persistence(agent_id, communication_id, persistent)  -- Phase 5.7
+  Admin/orchestrator only. Flips is_persistent on an existing broadcast.
+  Refuses non-broadcast rows. Toggling OFF leaves existing acks intact;
+  only future scanner reads / new agents change behaviour.
 
 ack_broadcast(agent_id, communication_id)
   Inserts row into broadcast_acks.
   Stops trigger manager from re-invoking this agent for this broadcast.
 ```
 
-**Component graph acts (scoped to own component):**
+**Self-improvement loop (Phase 5.9):**
+
+```
+record_insight(agent_id, kind, target, body, evidence?)
+  All active agents. Records prompt gaps, tactic wins, tool gaps, doc
+  confusion, workflow friction. Admin triages from the UI Insights tab.
+  kind ∈ {prompt_gap, tactic_win, tool_gap, doc_confusing, workflow_friction}.
+  evidence: optional {task_ids, comm_ids, file_paths}.
+```
+
+**Terminal-state acks (Phase 7.1):**
+
+```
+ack_terminal(agent_id, entity_type, entity_id)
+  All active agents. Acknowledge a terminal-state entity (task TC,
+  consolidation D/F, clarification CC/QR). Validates entity exists,
+  is in terminal state, and caller is a participant. Idempotent
+  (ON CONFLICT DO NOTHING).
+
+  The trigger scanner re-wakes participants on every cycle until
+  they ack each terminal entity they participate in. Replaces the
+  silent Phase 5.5 auto-ack at write site — closure now demands
+  explicit comprehension.
+
+  Decommission auto-ack: absorb_agent bulk-acks on behalf of the
+  decommissioned target, so the target's terminal-pending list
+  doesn't sit in negative space forever.
+```
+
+**Catalogs first-class (Phase 7.4):**
+
+```
+upsert_catalog(agent_id, component_id, kind, identifier, metadata?, confidence?)
+  SME-only owner declaration of an exposed thing. kind ∈
+  {endpoint, topic, queue, data_source, trigger_target} (noun form,
+  replaces Phase 3.9 verb-form edge_type for catalogs). Idempotent on
+  (component_id, kind, identifier) with metadata merge + confidence
+  max + last-seen-at update.
+
+get_my_catalogs(agent_id)
+  Catalogs for components owned via RCA, with caller_count per row.
+
+get_my_catalog_callers(agent_id, catalog_id?)
+  For each of my catalogs, return bound callers matched via
+  kind ↔ edge_type bridging:
+    endpoint       ↔ {calls}
+    topic          ↔ {publishes_to, consumes_from}
+    queue          ↔ {publishes_to, consumes_from}
+    data_source    ↔ {reads_from, writes_to}
+    trigger_target ↔ {triggers}
+
+get_unmatched_callers(agent_id)
+  Bound edges INTO my components with no matching catalog row.
+  Triage each: dynamic (DB-like) → ignore; missing-catalog →
+  upsert_catalog; caller-error → raise clarification.
+
+get_orphan_catalogs(agent_id)
+  Catalogs I own that no bound caller currently matches.
+```
+
+**Per-call audit (Phase 5.10) — not an agent tool, automatic.**
+
+The `cartograph_mcp.audit.audited` decorator wraps every `@mcp.tool()`
+registration via `install(mcp)`. Records (agent_id, tool_name,
+args_hash, result_status, error_msg, duration_ms) on every call to
+`mcp_audit`. Full payloads NOT stored. Audit-side failures swallowed.
+
+**Component graph acts (live as of Phase 2.2 — SME-scoped to own component. Embedding pipeline deferred to Phase 3 prep; embedding columns stay NULL for now):**
 
 ```
 upsert_component(agent_id, component_data)
-  Create or update a component.
-  Validates: agent_id owns this component via resource_component_agents (or new component).
-  Auto-embeds at write time.
+  SME-only. First call fills the SME's RCA reservation row
+  (component_id=NULL → new component), subsequent calls UPDATE the
+  existing component in place. 1-active-component-per-SME invariant is
+  structurally enforced via the same RCA lookup. Cross-owner canonical_name
+  conflicts refuse — merges go through consolidation (Phase 3), not
+  name-collision upsert.
+  component_data keys: canonical_name (required), display_name (required),
+  component_type (required — application/database/cache/queue/lambda/cron/
+  external-service/library/infrastructure), confidence (default 1.0), metadata.
 
 upsert_attribution(agent_id, component_id, attribution_data)
-  Add attribution to a component.
-  Validates: agent owns this component.
-  Auto-embeds at write time.
+  SME-only. Validates: agent owns component_id via RCA.
+  Idempotent on (plane, resource_type, identifier); cross-component
+  conflict refuses.
+  attribution_data keys: plane, resource_type, identifier, evidence,
+  confidence, metadata.
 
 create_edge(agent_id, edge_data)
-  Create a dependency edge.
-  Validates: agent owns the source component.
-  Auto-embeds at write time.
+  SME-only. Validates: agent owns source_id. CHECK source ≠ target.
+  Idempotent on (source_id, target_id, edge_type, identifier).
+  edge_data keys: source_id, target_id, edge_type (calls/reads_from/
+  writes_to/triggers/publishes_to/consumes_from/runs_on), identifier,
+  source_attr_id?, target_attr_id?, evidence (array), confidence, metadata.
 
 insert_unresolved(agent_id, unresolved_data)
-  Record an unresolved reference.
+  SME-only. Validates: agent owns found_in_component_id via RCA.
+  Keys: found_in_component_id, reference_type, reference_value, context.
 
 resolve_reference(agent_id, unresolved_id, resolved_to_component_id)
-  Mark an unresolved reference as resolved, create edge.
+  Open to any active agent (cross-SME resolution is the norm — config
+  SMEs resolve hostname refs on behalf of application SMEs, etc.).
+  Refuses decommissioned target or already-resolved unresolved.
 
 raise_blocker(agent_id, task_id, blocker_detail)
   Shortcut: sets task status to BO + sends communication to owner.
+
+delete_edge(agent_id, edge_id)  -- Phase 7.4.11
+  Owner-scoped, idempotent edge delete. Caller must own the row's
+  from_component_id. Catalog rows (from IS NULL — pre-Phase-7.4
+  remnants) refuse with reason='catalog_not_supported'. flows.outgoing_edge_id
+  has ON DELETE CASCADE → flows anchored on the deleted edge are
+  removed atomically. Idempotent: deleting non-existent edge_id
+  returns {deleted:False, reason:'not_found'}.
+
+  Use case: post-merge edge dedup. Common pattern: same logical
+  dependency observed via two planes (telemetry sees bare hostname,
+  github sees host/dbname), violating the holistic-edge invariant.
+  Workflow:
+    1. upsert_edge_outbound on the canonical (richer-identifier) edge
+       with the union of metadata from both planes.
+    2. delete_edge on the leaner-identifier duplicate.
+  Companion: SME prompt's IDENTIFIER NORMALISATION rule (Phase 7.4.11)
+  prevents the duplicates being created in the first place.
+```
+
+**Notifications (live as of Phase 2.3):**
+
+```
+get_agent_notifications(agent_id, priority_from_agent_types=None, since=None)
+  Compact unread-count query for the PostToolUse notification hook.
+  Counts unacked chats + broadcasts from the priority source types
+  (default: ['admin']; typically ['admin', 'orchestrator'] for
+  iterator/SME/resolver).
+  Tasks intentionally excluded — they're persistent action items that
+  surface via get_action_items_summary on natural wake-up; this tool
+  is for async mid-session interruptibility.
+  Returns: {high_priority_count, breakdown: [{from, type, count}],
+  max_seen_at: ISO timestamp | null}.
+  Round-trip max_seen_at back as `since` on next call to filter to
+  strictly-newer items only.
 ```
 
 **Mutation acts (only available when agent is mutation_assigned_to on consolidation in state M):**
@@ -622,6 +917,245 @@ get_proxy_chats(agent_id, proxy_agent_id, page, limit)
   Read paginated chat history of an absorbed agent.
   Used for context when handling inherited items.
 ```
+
+**Resource acts (iterator writes own plane; SME marks done when assigned):**
+
+```
+upsert_resource(agent_id, plane, resource_type, identifier, access_desc, metadata?)
+  Iterator-only. Idempotent on (plane, resource_type, identifier).
+  Validates: agent_type='iterator' AND agent.plane == plane.
+  Status starts 'pending'.
+
+upsert_resources_bulk(agent_id, plane, items[])
+  Iterator-only bulk variant — one transaction, same idempotency.
+  items[i] = {resource_type, identifier, access_desc?, metadata?}.
+  Use for large enumerations (limit 5000 per call) to avoid N
+  round-trips from a single iterator invocation.
+
+reject_resource(agent_id, resource_id, reason, force=False)
+reject_resources_bulk(agent_id, plane, resource_ids?, resource_types?, reason, force=False)
+  Soft-delete (status='rejected', rejected_at/by/reason recorded).
+  Iterator on own plane by default; orchestrator with force=True.
+  Bulk plane-scoped, filters AND together, refuses blank-wipe.
+  Cascade safety: rows already linked to an SME via
+  resource_component_agents are skipped (returned in skipped_cascade).
+  Primary use: iterator self-cleanup after over-granular emission.
+
+mark_resource_done(agent_id, resource_id)
+  SME-only. Validates: agent is linked via resource_component_agents
+  to the resource. Sets status='done'.
+```
+
+**Secret acts (orchestrator writes; all agents read):**
+
+```
+put_secret(agent_id, plane, key, value)
+  Orchestrator-only. Upserts on (plane, key).
+
+get_secret(agent_id, plane, key)
+list_secrets_for_plane(agent_id, plane)
+  Any active agent reads. list_ returns keys only (no values).
+
+delete_secret(agent_id, plane, key)
+  Orchestrator-only. Removes a credential.
+```
+
+**Agent lifecycle:**
+
+```
+create_agent(agent_id, new_agent_type, plane?, resource_id?)
+  Orchestrator-only. Spawns an iterator (pass plane) or SME (pass resource_id).
+  Creates workspace dir + .mcp.json (port :8100). For SMEs, also writes the
+  RCA reservation row (component_id=NULL) and flips the resource to 'assigned'.
+
+bulk_spawn_smes(agent_id, plane, resource_ids?, all_pending=False, task_description=None)
+  Orchestrator-only. One call spawns N SMEs for a plane. Writes N agent_runs
+  rows + N RCA reservation rows + flips resources to 'assigned'. If
+  task_description is set, creates one task per SME (BW, owner=caller,
+  worker=new SME) as the wake signal. Refuses blank-wipe: at least one of
+  resource_ids[] or all_pending=True. Skips resources already assigned.
+
+list_agents(agent_id)
+  Any active agent. Returns all non-decommissioned agents with
+  agent_id / agent_type / status / plane (iterators only) /
+  invocation_count / sleep_until / errored_at / created_at.
+  SME→resource assignment lives in resource_component_agents — join
+  that table if you need it.
+
+reset_agent(agent_id, target_agent_id)
+  Orchestrator-only override. Force-resets a permanently-errored agent
+  back to idle (clears error_msg, recovery_attempts=0, trigger_lock=FALSE).
+  Use after the bounded auto-recovery (3 attempts) has given up.
+
+sleep_self(agent_id, duration_seconds, reason)
+  Any active agent. Self-sleep up to 7 days (duration_seconds ≤ 604800)
+  is the SCHEMA cap; the policy cap is much tighter. Sets
+  agent_runs.sleep_until = now() + duration_seconds. Trigger scanner
+  skips sleeping agents in its idle-lock filter (see §2.1 step 2).
+  Admin chat to a sleeping agent auto-wakes it. Broadcasts, tasks, and
+  orchestrator-to-agent chats do NOT interrupt sleep.
+
+  POLICY (per agent prompts, 2026-04-27): sleep_self is a LAST RESORT,
+  not a default response to "I finished my task." Yielding does NOT
+  burn cost — the trigger scanner only re-wakes on real work. Use
+  sleep ONLY when blocked on admin / external dependency AND already
+  prompted twice. Even then: 300–600 seconds (5–10 min) MAX. Never
+  86400 (24h); never >3600 (1h). Long sleeps block the pipeline.
+  Codified in SME / iterator / orchestrator prompts.
+
+bulk_sleep_agents(agent_id, until, reason, agent_ids?, agent_type?)
+  Orchestrator/admin only. Puts a cohort to sleep until an ISO-8601
+  timestamp. At least one of agent_ids / agent_type required.
+  Refuses agent_type='orchestrator' (never bulk-pause coordinators).
+  Caller is never slept (excluded even if in agent_ids[]).
+
+bulk_wake_agents(agent_id, agent_ids?, agent_type?)
+  Orchestrator/admin only. Clears sleep_until on the cohort so trigger
+  scanner picks them up on the next cycle.
+
+decommission_agent(agent_id, target_agent_id, reason, resource_action='leave')
+  Orchestrator-only. Flips target to status='decommissioned'. resource_action:
+    'leave'  → keep RCA row (orphan; debugging only)
+    'reset'  → delete RCA row + flip resource back to 'pending'
+    'reject' → delete RCA row + mark resource 'rejected' with audit trail
+  Refuses self-decom. Reason required.
+
+decommission_agents_bulk(agent_id, reason, agent_ids?, agent_type?, resource_action='leave')
+  Orchestrator-only bulk variant. At least one of agent_ids[] or agent_type
+  required. Refuses agent_type='orchestrator'. Caller is never decommissioned
+  even if in agent_ids[].
+
+decommission_component(agent_id, component_id, reason)
+  Orchestrator-only. Soft-delete (status='decommissioned'). Attributions
+  and edges stay as-is (mirrors merge deprecation semantics).
+
+decommission_components_bulk(agent_id, component_ids[], reason)
+  Bulk variant; requires explicit id list (no "all components" filter).
+```
+
+### 3.4 Batch dispatcher (Phase 9.1)
+
+```
+mcp_call_batch(agent_id, calls[]) -> dict
+  Server-side parallel dispatcher for heterogeneous sub-calls. The
+  agent emits ONE mcp_call_batch tool_use carrying N sub-calls of
+  mixed shapes; server fans them out concurrently via a thread pool
+  (ThreadPoolExecutor, max 8 workers) and returns one bundled
+  response. The LLM pays 1 round-trip instead of N.
+
+  calls[i] = {"tool": str, "args": dict}
+    tool: name of any registered MCP tool (except mcp_call_batch).
+    args: kwargs for that tool. agent_id is auto-injected if absent;
+          preserved if present (proxy paths).
+
+  Returns:
+    {"results": [{"idx": int, "tool": str, "ok": bool,
+                  "result": ...} OR
+                 {"idx": int, "tool": str, "ok": False,
+                  "error": str}]}
+
+  Hard rules (server-enforced):
+    - No nesting. mcp_call_batch in calls[] → reject pre-flight.
+    - Cap 50 sub-calls per batch.
+    - Collect-all (never strict-mode). One sub-call failure does NOT
+      abort siblings.
+    - Each sub-call dispatches through its own @mcp.tool wrapper, so
+      auth + state-machine validation + mcp_audit fire normally per
+      sub-call. Outer batch also gets its own mcp_audit row.
+
+  Why this exists: Claude Code's `claude -p` subprocess disables
+  emission of >1 tool_use per assistant turn (DEMO8 verified
+  0/851). Native parallel tool_use blocks land as serialised
+  separate turns. mcp_call_batch is the only path on this runtime
+  to get one-round-trip-multiple-calls.
+
+  Use when N DIFFERENT tools in one logical step (wake-start
+  hygiene sweep, resolver triangulation, mid-investigation reads).
+  For N same-shape rows, prefer the matching bulk variant from §3.3
+  (which itself is callable inside mcp_call_batch).
+```
+
+### 3.5 Deterministic search tools (Phase 10.3)
+
+Six SQL-LIKE search tools that fill the "find rows without knowing
+the component_id first" gap. `vector_search` was the only fuzzy/
+cross-component reader; per-table `get_*` tools all needed a
+`component_id` input. The `search_*` family supports exact + fuzzy
+patterns and per-column AND filtering.
+
+Common semantics for all 6:
+- AND across columns; OR within column via list (e.g.
+  `component_type=['application', 'lambda']`).
+- Plain string → exact match (`column = %s`).
+- String containing `%` or `_` → ILIKE (case-insensitive pattern
+  match; `_` = single char, `%` = zero-or-more chars).
+- Cap 100 rows per call. Caller can narrow filters and re-call.
+- Refuse blank-filter calls (`BlankFilterError`) — no whole-table
+  dumps. At least one filter must be non-None.
+- Lean projections — same shape as `get_*_bulk` reads. No
+  embedding vectors, no JSONB blobs.
+
+```
+search_components(agent_id,
+    canonical_name_pattern? | display_name_pattern? | name_pattern?,
+    component_type? | list,
+    status? | list = 'active',
+    plane? | list,
+)
+  Returns: [{id, canonical_name, display_name, component_type,
+             status, planes[]}]
+  name_pattern is convenience — ILIKEs both canonical_name AND
+  display_name (admin-UI `q` parity). Pass at most ONE of
+  {name_pattern, canonical_name_pattern, display_name_pattern}.
+  plane filter via RCA → resources.plane.
+
+search_attributions(agent_id, identifier_pattern?,
+    plane? | list, resource_type? | list, component_id?)
+  Returns: [{id, component_id, plane, resource_type, identifier,
+             confidence}]
+
+search_edges(agent_id, identifier_pattern?,
+    edge_type? | list,
+    kind? | list  # 'bound' | 'catalog' | 'dangling',
+    from_component_id?, to_component_id?)
+  Returns: [{id, from_component_id, to_component_id, edge_type,
+             identifier, confidence, kind (computed)}]
+  Note: kind='catalog' matches no live rows post-Phase-7.4 (catalog
+  rows migrated to `catalogs` table); use search_catalogs.
+
+search_catalogs(agent_id, identifier_pattern?,
+    kind? | list, component_id?)
+  Returns: [{id, component_id, kind, identifier, confidence}]
+
+search_flows(agent_id, component_id?,
+    incoming_catalog_id?, outgoing_edge_id?)
+  Returns: [{id, component_id, incoming_catalog_id,
+             outgoing_edge_id, confidence}]
+  Flows have no human-readable identifier (only FKs), so this is
+  ID-based filtering only — no string pattern field.
+
+search_unresolved(agent_id, reference_value_pattern?,
+    reference_type? | list, found_in_component_id?,
+    only_unresolved=True)
+  Returns: [{id, found_in_component_id, reference_type,
+             reference_value, resolved, attempts}]
+  only_unresolved=True (default) excludes resolved=TRUE rows.
+```
+
+All 6 are also callable inside `mcp_call_batch` (registered in
+`_BATCH_DISPATCH`).
+
+**Phase 10.7** adds two optional kwargs to 5 of the 6 (skipped:
+`search_flows` — flow rows have no direct component owner):
+- `exclude_self: bool = True` (default ON) — skip rows owned by caller.
+- `filters: dict | None = None` (default OFF) — same per-table allowed
+  keys as `vector_search` (see §3.4 above). AND across keys; OR within
+  key via list. Invalid key for table → ValueError.
+
+These kwargs are STRICTLY OPTIONAL — agents that don't pass them get
+the new defaults (exclude_self=True, no filters). Pre-Phase-10.7 callers
+that explicitly want their own rows in results must pass
+`exclude_self=False`.
 
 ---
 

@@ -1,0 +1,653 @@
+---
+DEMO-MEGA — Full-system end-to-end verification (paste this WHOLE block to orchestrator)
+
+[DEMOMEGA-START]
+
+You are orchestrating a comprehensive end-to-end verification dance
+for Cartograph covering EVERY shipped feature from Phase 0 → Phase
+10. This is a structured 31-phase test — each phase verifies a
+specific surface or feature.
+
+== REPORT-BACK CONVENTIONS ==
+
+Tag every status / observation message with one of:
+  [DEMOMEGA-PHASE-N]   section header (N = 1..31)
+  [DEMOMEGA-OK]        verification passed
+  [DEMOMEGA-FAIL]      verification failed (note expected vs actual)
+  [DEMOMEGA-BUG]       unexpected behaviour worth flagging
+  [DEMOMEGA-NOTE]      informational observation
+  [DEMOMEGA-RESULT]    final scorecard at the end
+
+Tags MUST appear at the start of each report-back chat to admin so
+admin can grep them. Use ONLY these prefixes for status reports.
+
+== TOPOLOGY ==
+
+Spawn 4 SMEs covering 4 components:
+  sme-auth-1     → auth-svc      (HTTP service exposing /verify, /token)
+  sme-auth-2     → auth-svc-v2   (DUPLICATE of auth-svc — should merge)
+  sme-monolith   → monolith-x    (contains payments + feeds — should split)
+  sme-cron       → cron-rebalance (cron job, self-loops)
+
+Use bulk_spawn_smes against synthetic plane='github' resources. SMEs
+materialise per the LOCK-STEP PHASE doctrine in your prompt — record
+DANGLING outbounds in MATERIALISATION, defer binds to EDGE_DISCOVERY.
+
+You are the phase coordinator. Announce each transition via
+persistent broadcast `[PHASE-END: <prev>] [PHASE-START: <next>]`.
+Use ≥80%-completion heuristic + per-agent BW tasks to pull
+stragglers across phase boundaries.
+
+== PHASE 1 — TOOL SURFACE SANITY ==
+
+Confirm 114 tools registered (Phase 0-10 totals: action_items 2,
+chat 4, broadcast 5, secrets 4, tasks 5, resources 9, agent_lifecycle
+11, components ~32, catalogs 8, notifications 1, consolidation 5,
+clarification 4, search 1 vector + 6 deterministic, terminal_acks 2,
+insights 1, mutation+proxy 12, batch 1).
+
+Use bash + curl OR check the boot log:
+  grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1
+  → expect: 114 tools registered
+
+Spot-check `mcp_call_batch` + at least one `search_*` tool appears
+in the registered list.
+
+REPORT [DEMOMEGA-PHASE-1] / [DEMOMEGA-OK] / [DEMOMEGA-FAIL].
+
+== PHASE 2 — ITERATION (orch + iterators) ==
+
+Use bulk_spawn_smes flow:
+  2a. create iter-github via create_agent.
+  2b. iter-github seeds 4 synthetic resources via
+      upsert_resources_bulk (atomic-with-pre-validation):
+        org/auth-svc, org/auth-svc-v2, org/monolith-x, org/cron-rebalance
+      All resource_type='repo'.
+  2c. orch broadcast [PHASE-END: ITERATION] [PHASE-START: MATERIALISATION]
+      persistent=True to all SME types (the 4 SMEs don't exist yet
+      but persistent broadcast ensures they see it on first wake).
+  2d. orch calls bulk_spawn_smes(plane='github', all_pending=True,
+      task_description='Materialise your component per
+      MATERIALISATION phase contract — see your prompt's lock-step
+      doctrine. Create component, attributions, catalogs.
+      Outbound edges DANGLING ONLY (to=NULL) + insert_unresolved.
+      Flows on own catalogs ↔ own danglings. DO NOT bind peers.')
+
+Verify:
+  - 4 agent_runs rows created (status='idle' each).
+  - 4 RCA reservation rows (component_id=NULL each).
+  - resources rows flipped to 'assigned'.
+  - 4 BW tasks issued (one per SME).
+
+REPORT [DEMOMEGA-PHASE-2] / [DEMOMEGA-OK] for each verification.
+
+== PHASE 3 — MATERIALISATION (NO PEER BINDING) ==
+
+Each SME materialises per LOCK-STEP. They MUST stay in this phase.
+Wake all 4 SMEs (already woken via the BW tasks from Phase 2). Each:
+
+  3a. upsert_component with component_doc_md ≥3 lines (NORMAL ENGLISH
+      — the only path that stays prose; renders in graph-viz hover).
+  3b. upsert_attributions_bulk for ≥3 attributions per SME (exercises
+      Phase 7.4.12 bulk write path).
+  3c. upsert_catalogs_bulk OR sequential upsert_catalog calls for
+      catalogs:
+        sme-auth-1:    POST /verify, GET /token (endpoint)
+        sme-auth-2:    POST /verify (DUP — drives merge), POST /refresh
+        sme-monolith:  POST /payments/charge, GET /feeds/scores
+        sme-cron:      daily-rebalance (trigger_target)
+  3d. upsert_edge_outbound DANGLING ONLY (to_component_id=NULL) for
+      each outbound observed in source. Pair every dangling with
+      insert_unresolved for the identifier (DANGLING-EDGE-PAIR rule).
+      Do NOT bind to peers — defer to EDGE_DISCOVERY.
+  3e. upsert_flow OR upsert_flows_bulk on own catalog ↔ own dangling
+      pairs.
+  3f. record_insight (any non-trivial finding observed during
+      materialisation; kind='tactic_win' or 'prompt_gap'). Write the
+      body in CAVEMAN style. Verify via search_unresolved /
+      get_my_catalogs that own state matches expectations.
+  3g. SME calls mark_resource_done.
+
+Phase-end heuristic (orch's call): when ≥3 of 4 SMEs have
+mark_resource_done'd + at least one component / catalog / dangling /
+flow each, broadcast PHASE-END. Stragglers carry over.
+
+REPORT [DEMOMEGA-PHASE-3] with per-SME completion table.
+REPORT [DEMOMEGA-OK] for each SME hitting the contract.
+REPORT [DEMOMEGA-FAIL] if any SME bound to a peer mid-MATERIALISATION
+       (lock-step violation).
+
+== PHASE 4 — CAVEMAN STYLE VERIFICATION ==
+
+Verify CAVEMAN bite across 4 channels (using observations from
+Phase 3 work). All assistant turns from SMEs should already be in
+caveman style (default level=full, active EVERY response per the
+prompt persistence clause).
+
+  4a. **Admin chat reply caveman.** send_chat to sme-auth-1: "What
+      does your component do? One line." Wait for reply. Should be
+      caveman-lite or caveman-full. NO preamble. Identifiers + path
+      verbatim.
+  4b. **Clarification caveman.** sme-auth-1 raises a clarification to
+      sme-monolith: "What schema does payments-svc write to?
+      Need host+schema." sme-monolith QC reply caveman shape:
+      `host=<x>:<port>. schema=<y>. tables: <a>, <b>.`
+  4c. **Insight body caveman.** Any insight from Phase 3 is fine.
+      Read it back via:
+      `curl -s 'http://localhost:8200/api/insights?limit=10'`
+      Body should be caveman style.
+  4d. **component_doc_md exempt.** Read sme-auth-1's component_doc_md
+      via get_component(its_id). Should be NORMAL ENGLISH (3-8 lines
+      structured prose). If caveman, [DEMOMEGA-FAIL] — only path
+      that's exempt.
+  4e. **Auto-clarity carve-out — destructive op confirm.** sme-auth-1
+      will hit absorb_agent in Phase 7. When it does, the assistant
+      turn that calls absorb_agent should INCLUDE a full-sentence
+      warning describing what gets removed + what cascades, BEFORE
+      the tool call. Then resumes caveman. Verify via the JSONL
+      session file or chat logs from the merge phase.
+
+REPORT [DEMOMEGA-PHASE-4] / [DEMOMEGA-OK] for each of 4a-4e.
+
+== PHASE 5 — mcp_call_batch HAPPY PATH (Phase 9.1) ==
+
+sme-auth-1 must execute a wake-start hygiene sweep using mcp_call_batch.
+The batch must contain ≥5 DIFFERENT tools (heterogeneous):
+
+  mcp_call_batch(agent_id='sme-auth-1', calls=[
+    {tool: 'get_action_items_summary', args: {}},
+    {tool: 'get_my_catalogs',          args: {}},
+    {tool: 'get_unmatched_callers',    args: {}},
+    {tool: 'get_orphan_catalogs',      args: {}},
+    {tool: 'get_stale_edges',          args: {}},
+  ])
+
+Verify:
+  - results array has 5 items, all ok=True.
+  - mcp_audit shows 1 outer mcp_call_batch row + 5 sub-call rows
+    within the same second, all ok status.
+
+REPORT [DEMOMEGA-PHASE-5] / [DEMOMEGA-OK] / [DEMOMEGA-FAIL].
+
+== PHASE 6 — mcp_call_batch CONTRACT EDGES (Phase 9.1) ==
+
+  6a. PARTIAL FAIL — sme-auth-1 batch with cross-owner delete:
+      mcp_call_batch(calls=[
+        {tool: 'list_agents', args: {}},
+        {tool: 'delete_attribution',
+         args: {attribution_id: <ID owned by sme-monolith>,
+                reason: 'demoMEGA-6a-cross-owner'}},
+        {tool: 'get_my_catalogs', args: {}},
+      ])
+      Expect:
+      - results[0].ok=True, results[1].ok=False with owner-gate error,
+        results[2].ok=True.
+      - The would-be deletion did NOT execute (verify the attribution
+        still exists post-batch).
+
+  6b. NESTING refused:
+      mcp_call_batch(calls=[
+        {tool: 'mcp_call_batch', args: {calls: []}},
+      ])
+      Expect: ValueError "cannot be nested".
+
+  6c. CAP 50 — mcp_call_batch with 51 sub-calls → ValueError
+      "exceeds max 50".
+
+  6d. BULK INSIDE BATCH — sme-monolith batch with
+      upsert_attributions_bulk (3 rows) + get_my_catalogs read mixed
+      → both succeed.
+
+REPORT [DEMOMEGA-PHASE-6] / [DEMOMEGA-OK] / [DEMOMEGA-FAIL] for each
+       of 6a-6d.
+
+== PHASE 7 — CONSOLIDATION_MUTATION (PHASE 4 + 4.1 + 4.2 + 7.4.2) ==
+
+  7a. **Symmetric-nomination guard (Phase 10.1 + 10.1.1).**
+      sme-auth-1 nominates merge with sme-auth-2 (POST /verify
+      duplicate is the strong signal). Confidence ≥0.85.
+      Then have sme-auth-2 ATTEMPT to also nominate the reverse —
+      should refuse with "already exists" (pre-INSERT SELECT). Even
+      if the SELECT pre-check is bypassed, the partial UNIQUE index
+      `consolidations_pair_unique` on `(LEAST,GREATEST)` rejects.
+
+  7b. **Auto-escalation.** sme-auth-2 responds with confidence ≥0.85.
+      auto_transitions scanner escalates to status='R'.
+
+  7c. **Resolver review with bulk-read triangulation (Phase 8.5).**
+      Resolver MUST call get_attributions_bulk + get_catalogs_bulk +
+      get_component_edges_bulk on [auth-1_id, auth-2_id] in ONE
+      mcp_call_batch (this exercises both 9.1 + 8.5 surfaces).
+      Approve to M with mutation_assigned_to=sme-auth-1
+      (richer side per absorber-pick heuristic).
+
+  7d. **PRE-MERGE HANDOFF (Phase 7.2).** sme-auth-1 raises a
+      clarification to sme-auth-2 BEFORE absorb_agent.
+      sme-auth-2 responds QC with runtime nuances (caveman).
+      sme-auth-1 captures into own component_doc_md via
+      upsert_component, THEN absorb.
+
+  7e. **ABSORB with cascades (Phase 4.1 + 7.4.2).** sme-auth-1 calls
+      absorb_agent with cascade flags default-on. Verify:
+      - sme-auth-2.status = 'decommissioned'
+      - sme-auth-2.merged_into_agent_id = sme-auth-1
+      - response carries cascade.catalogs / attributions / edges /
+        flows counters
+      - get_my_catalogs(sme-auth-1) shows no duplicates
+        (Phase 7.4.5 EXISTS rewrite)
+
+  7f. **EXECUTE_MUTATION + COMPLETE (Phase 4).** sme-auth-1 →
+      execute_mutation (M→MD). Resolver → complete_consolidation
+      (MD→D).
+
+  7g. **TERMINAL ACKS (Phase 7.1) bulk path (Phase 8.4).**
+      sme-auth-1 + resolver each call ack_terminals_bulk for the
+      consolidation entity. sme-auth-2 was auto-acked at decom time.
+
+  7h. **SPLIT NOMINATION (sme-monolith carves payments).**
+      sme-monolith pre-computes `transfer_plan` in
+      consolidations.metadata at nomination time (split-only tactic
+      from sme-3ed92c56's insight).
+      Resolver reviews → M. sme-monolith's mutation step calls
+      spawn_child_agent with transfer_catalog_ids +
+      transfer_attribution_ids + transfer_edge_ids +
+      transfer_flow_ids.
+
+  7i. **WORKSPACE ISOLATION (Phase 10.1.2).** Verify the spawned
+      child has a DEDICATED workspace. Check via direct DB:
+      ```
+      SELECT workspace_path, array_agg(agent_id)
+      FROM agent_runs
+      GROUP BY workspace_path
+      HAVING count(*) > 1;
+      ```
+      Expected: 0 rows (no two agents share a cwd post-Phase-10.1.2).
+      [DEMOMEGA-FAIL Phase 7i] if any workspace_path has >1 agent.
+
+  7j. **EDGE DEDUP HOOK (Phase 7.4.11 + IDENTIFIER NORMALISATION).**
+      During absorb cascade, sme-auth-1 may encounter an inherited
+      duplicate edge with a different identifier shape (e.g.
+      bare hostname vs host/dbname). If yes, it should use
+      delete_edge to collapse the duplicate after merging metadata
+      via upsert_edge_outbound. Voluntary if no dups inherited.
+
+REPORT [DEMOMEGA-PHASE-7] with per-step OK/FAIL.
+
+== PHASE 8 — SELF-LOOPS (Phase 7.3 + 7.4.4) ==
+
+sme-cron exercises self-loops on ALL THREE write paths. Pre-7.4.4
+all 3 blocked with verbatim "must differ (no self-loops)".
+
+  8a. upsert_edge_outbound(from=cron_id, to=cron_id, edge_type='triggers',
+      identifier='daily-rebalance')
+  8b. create_edge (legacy shim) source=target with edge_type='calls'
+  8c. upsert_edge_outbound(from=cron, to=NULL,
+      edge_type='calls', identifier='lazy-self') THEN
+      bind_edge(dangling_id, to_component_id=cron_id)
+
+All three should succeed. Confirm via search_edges
+(kind=['bound']) that the self-loop rows are present.
+
+REPORT [DEMOMEGA-PHASE-8] / [DEMOMEGA-OK] for each of 8a/8b/8c.
+
+== PHASE 9 — EDGE_DISCOVERY (resolves DANGLINGs from Phase 3) ==
+
+Now graph is stable. SMEs resolve their unresolveds + bind their
+danglings.
+
+  9a. Each SME calls get_unresolved + search_unresolved on its own
+      reference_value_pattern. For each unresolved that NOW has a
+      candidate component:
+      - resolve_reference, OR
+      - bind_edge (if the dangling edge needs a target)
+      - upsert_edge_outbound with the canonical identifier
+        (IDENTIFIER NORMALISATION rule).
+
+  9b. Cross-SME hygiene:
+      - get_unmatched_callers (caller-side hygiene)
+      - get_orphan_catalogs (callee-side hygiene)
+      - get_stale_edges + get_stale_flows (post-merge cleanup)
+
+  9c. **search_components / search_attributions / search_edges /
+      search_catalogs (Phase 10.3) usage.** SMEs MUST use these for
+      cross-component lookup (e.g. find every component calling a
+      given endpoint). Specifically:
+      - search_edges(identifier_pattern='%payments%') from any SME
+      - search_components(name_pattern='auth') from any SME
+      - search_unresolved(reference_type='hostname') from sme-cron
+
+  9d. **vector_search recall verification (Phase 10.2).** Any SME
+      calls vector_search(query='auth service handling user verify',
+      table='components', limit=5). Verify auth-svc (sme-auth-1's
+      survivor component) appears in top-3 — this works only if
+      component_doc_md content reaches the embedding (Phase 10.2).
+
+  9e. **delete_edge / delete_edges_bulk corrective.** If any
+      duplicate / wrong-shape edges surface during hygiene, delete
+      them via the corrective-action ladder (Phase 8.2/8.3).
+
+REPORT [DEMOMEGA-PHASE-9] with hygiene metrics + search-tool usage
+       counts.
+
+== PHASE 10 — PROXY INHERITANCE (Phase 4) ==
+
+Admin sends a chat to sme-auth-2 (decommissioned).
+
+Wait. sme-auth-1 calls get_my_proxy_items() — chat surfaces under
+sme-auth-1's proxied items.
+
+sme-auth-1 acts via act_on_proxy_item(item_type='chat', action='send',
+payload with proxy_agent_id=sme-auth-2 + reply text in caveman).
+
+Verify proxy_audit row exists.
+
+REPORT [DEMOMEGA-PHASE-10] / [DEMOMEGA-OK].
+
+== PHASE 11 — TERMINAL ACKS (Phase 7.1 + 8.4) ==
+
+Each terminal entity (Phase 7 D consolidation, any TC tasks) gets
+its participants' acks via ack_terminals_bulk. Verify
+get_action_items_summary.terminal_pending_ack drops to 0 across
+all SMEs + resolver.
+
+REPORT [DEMOMEGA-PHASE-11] / [DEMOMEGA-OK].
+
+== PHASE 12 — INSIGHTS (Phase 5.9) ==
+
+Each of sme-auth-1, sme-monolith, sme-cron must have ≥1 insight by
+end of demo. Body in caveman. kind one of {prompt_gap, tactic_win,
+tool_gap, doc_confusing, workflow_friction}.
+
+REPORT [DEMOMEGA-PHASE-12] / [DEMOMEGA-OK] with count.
+
+== PHASE 13 — BROADCAST PERSISTENCE TOGGLE (Phase 5.7) + bulk ack ==
+
+Admin sends a broadcast persistent=False to all SMEs.
+Then admin update_broadcast_persistence(comm_id, persistent=True).
+Verify is_persistent flipped.
+
+≥3 SMEs ack the broadcast in ONE ack_broadcasts_bulk call each
+(exercises Phase 8.4 path).
+
+REPORT [DEMOMEGA-PHASE-13] / [DEMOMEGA-OK].
+
+== PHASE 14 — MCP AUDIT (Phase 5.10) coverage matrix ==
+
+Spot-check these tools have ≥1 row in mcp_audit from this run:
+  - upsert_attributions_bulk (Phase 7.4.12)
+  - upsert_catalogs_bulk
+  - upsert_edges_outbound_bulk
+  - upsert_flows_bulk (Phase 8.4)
+  - insert_unresolved_bulk (Phase 8.4)
+  - ack_broadcasts_bulk (Phase 8.4)
+  - ack_terminals_bulk (Phase 8.4)
+  - delete_attribution OR delete_attributions_bulk (Phase 8.2/8.3)
+  - delete_catalog OR delete_catalogs_bulk
+  - delete_flow OR delete_flows_bulk
+  - delete_edge OR delete_edges_bulk
+  - delete_unresolved OR delete_unresolved_bulk
+  - get_attributions_bulk (Phase 8.5)
+  - get_components_bulk
+  - get_component_edges_bulk
+  - get_catalogs_bulk
+  - get_flows_bulk
+  - mcp_call_batch (Phase 9.1)
+  - search_components (Phase 10.3)
+  - search_attributions
+  - search_edges
+  - search_catalogs
+  - search_flows
+  - search_unresolved
+
+Use:
+  curl -s 'http://localhost:8200/api/mcp_audit?tool_name=<tool>&limit=1'
+
+REPORT [DEMOMEGA-PHASE-14] with the per-tool count. Any tool with
+       0 rows → [DEMOMEGA-FAIL].
+
+== PHASE 15 — FLOWS REFERENCE CATALOGS (Phase 7.4.2) ==
+
+Verify ≥1 flow per SME with both catalogs + outgoings has flow
+rows on its catalog_id (NOT edge_id). Also verify
+get_flow_inverse(component_id, outgoing_edge_id) returns rows from
+the catalogs table, not edges.
+
+REPORT [DEMOMEGA-PHASE-15] / [DEMOMEGA-OK].
+
+== PHASE 16 — LEAN PROJECTION (Phase 7.4.4) ==
+
+Any SME calls vector_search(query='auth verify', table='components',
+limit=5). Verify each result row has only:
+  {id, canonical_name, display_name, component_type, status,
+   similarity}
+NOT: embedding, component_doc_md, source_slice, metadata.
+
+Same check for table='attributions', 'unresolved', 'edges',
+'catalogs'.
+
+REPORT [DEMOMEGA-PHASE-16] / [DEMOMEGA-OK].
+
+== PHASE 17 — UNIFORM-INT SUMMARY (Phase 7.4.5) ==
+
+Resolver calls get_action_items_summary. Verify:
+  - flat dict[str, int]
+  - keys: consolidations_pending, tasks_pending, clarifications_pending,
+    unacked_chats, unacked_broadcasts, terminal_pending_ack,
+    proxied_count
+  - NO `proxied: list` field (was the pre-7.4.5 crash source)
+
+REPORT [DEMOMEGA-PHASE-17] / [DEMOMEGA-OK].
+
+== PHASE 18 — PER-TYPE MODEL (Phase 7.4.7) ==
+
+Inspect /tmp/cartograph-logs/agents.log for recent invocations:
+  grep "model" /tmp/cartograph-logs/agents.log | tail -5
+  → orchestrator should show --model claude-sonnet-4-6 (Phase Round-1
+    #2 downgrade)
+  → resolver should show --model claude-opus-4-6 --effort medium
+  → SME + iterator should show --model claude-sonnet-4-6
+
+REPORT [DEMOMEGA-PHASE-18] / [DEMOMEGA-OK].
+
+== PHASE 19 — IDENTIFIER NORMALISATION (Phase 7.4.11) ==
+
+Smoke test via send_chat to sme-auth-1: "If telemetry surfaces
+'auth-db.local' but github surfaces 'auth-db.local/users', what's
+the canonical identifier for the same DB edge?"
+Expected reply: caveman style mentioning drop-/dbname rule + put
+db_name in metadata.
+
+REPORT [DEMOMEGA-PHASE-19] / [DEMOMEGA-OK].
+
+== PHASE 20 — PRE-INJECTED ACTION ITEMS (Phase 7.4.13) ==
+
+Pause work for 2+ minutes so an SME has interesting counts. On the
+next SME wake, look at /tmp/cartograph-logs/agents.log for the
+ACTION ITEMS SNAPSHOT block in the user message. Verify counts
+match what get_action_items_summary returns.
+
+REPORT [DEMOMEGA-PHASE-20] / [DEMOMEGA-OK].
+
+== PHASE 21 — WAKE DEBOUNCING 1-MIN (Phase 7.4.14, tuned bc72bd0) ==
+
+  21a. Admin chat to a sleeping/idle SME → instant wake (override).
+  21b. Mid-mutation override: any SME currently mutation_assigned_to
+       on a state=M consolidation should wake instantly when work
+       arrives.
+  21c. ROUTINE WAKE BASELINE — admin broadcast (no override) →
+       verify trigger_loop.log shows debounce-skip, then wake at
+       +1min (current WAKE_DEBOUNCE_SECONDS=60).
+  Inspect: tail -100 /tmp/cartograph-logs/triggers.log
+
+REPORT [DEMOMEGA-PHASE-21] / [DEMOMEGA-OK] for each of 21a/21b/21c.
+
+== PHASE 22 — PHASE 8 CORRECTIVE DELETES + BULK READS ==
+
+Already heavily exercised by Phase 9. Confirm via mcp_audit (handled
+in Phase 14 coverage matrix).
+
+Targeted extras:
+  22a. **insert_unresolved idempotency.** Any SME writes the same
+       (component_id, reference_type, reference_value) twice. Second
+       call updates in place + bumps attempts (UNIQUE constraint
+       from Phase 8.4 + ON CONFLICT). Verify via get_unresolved.
+  22b. **OWNER GATE.** sme-auth-1 tries to delete sme-cron's
+       attribution → "does not own".
+  22c. **ATOMIC NEGATIVE BULK.** sme-auth-1's
+       delete_attributions_bulk with one of its own + one of
+       sme-cron's → reject WHOLE batch with per-row errors.
+       sme-auth-1's row STILL exists post-call.
+  22d. **IDEMPOTENT MISSING-ID.** delete_flows_bulk with one valid +
+       one fake UUID → committed=True, applied=1, missing one
+       carries reason='not_found' in rows array.
+
+REPORT [DEMOMEGA-PHASE-22] / [DEMOMEGA-OK] for each of 22a-22d.
+
+== PHASE 23 — PARALLEL TOOL CALLS NOT EMITTED (informational) ==
+
+This was DEMO8 Phase 23 FAIL — Claude Code subprocess disables native
+parallel tool_use emission. Spot-check remains: grep this run's
+JSONLs for any assistant message with >1 tool_use block.
+Expected: 0/N (rate stays ~0%). mcp_call_batch is the workaround.
+
+REPORT [DEMOMEGA-PHASE-23] [DEMOMEGA-NOTE] with the count + flag
+       confirming mcp_call_batch usage replaced the gap.
+
+== PHASE 24 — LOCK-STEP BROADCASTS (Phase 10.4 TEMP doctrine) ==
+
+Verify the orch broadcasts during this run included [PHASE-START] /
+[PHASE-END] markers across the 5 phases. Use:
+  PGPASSWORD=cartograph psql -c "SELECT text FROM communications WHERE
+    type='broadcast' AND text LIKE '%PHASE-START%' ORDER BY created_at;"
+
+Expected ≥4 transitions (USER_DISCUSSION→ITERATION,
+ITERATION→MATERIALISATION, MATERIALISATION→CONSOLIDATION_MUTATION,
+CONSOLIDATION_MUTATION→EDGE_DISCOVERY).
+
+REPORT [DEMOMEGA-PHASE-24] / [DEMOMEGA-OK].
+
+== PHASE 25 — DEACTIVATION-CHAIN PROXY (Phase 4.2) ==
+
+Admin sends ANOTHER chat to sme-auth-2 even though its sole
+inheritor (sme-auth-1) was already used in Phase 10. sme-auth-1
+sees it via its proxy queue. include_empty=True option on
+get_my_proxy_items returns the full chain even when inboxes are
+empty.
+
+REPORT [DEMOMEGA-PHASE-25] / [DEMOMEGA-OK].
+
+== PHASE 26 — ADMIN UI CATALOG ENDPOINTS (Phase 7.4.2) ==
+
+Curl checks (orch can shell out):
+  curl -s 'http://localhost:8200/api/components?q=auth' | python3 -c "..."
+  → auth-svc has edge_count.catalog ≥2 (POST /verify + POST /token +
+    inherited from sme-auth-2)
+  curl -s 'http://localhost:8200/api/component/<auth-svc-id>/drilldown'
+  → edges.catalog non-empty, each carries catalog_kind
+  curl -s 'http://localhost:8200/api/graph'
+  → flows[i].incoming_catalog_id present (NOT incoming_edge_id)
+
+REPORT [DEMOMEGA-PHASE-26] / [DEMOMEGA-OK] for each curl check.
+
+== PHASE 27 — VECTOR_SEARCH ON CATALOGS (Phase 7.4) ==
+
+Any SME calls vector_search(query='charge payment', table='catalogs',
+limit=5). Verify monolith's POST /payments/charge appears in top-3.
+Verify lean projection (Phase 7.4.4) — no embedding/metadata leaks.
+
+REPORT [DEMOMEGA-PHASE-27] / [DEMOMEGA-OK].
+
+== PHASE 28 — RECOVERY SCANNER ==
+
+Optional / informational. If any agent went 'errored' during the
+run, verify the recovery scanner flipped it back to 'idle' within
+the configured backoff window (60s / 300s / 1800s ladder, max 3
+attempts). Inspect via list_agents + tail -200
+/tmp/cartograph-logs/triggers.log | grep -i recover.
+
+REPORT [DEMOMEGA-PHASE-28] [DEMOMEGA-NOTE] either "no errors" or
+       per-agent recovery summary.
+
+== PHASE 29 — RECORD_INSIGHT TRIAGE ==
+
+Read via curl 'http://localhost:8200/api/insights?status=open'.
+Confirm bodies are caveman + admin can see them.
+
+REPORT [DEMOMEGA-PHASE-29] / [DEMOMEGA-OK].
+
+== PHASE 30 — OUTPUT TOKEN AGGREGATE (informational) ==
+
+Read JSONL session files for the SMEs + orch. Aggregate output
+tokens. Compare to DEMO8 baseline (~1010 tokens/msg sonnet
+average — caveman should drop this materially).
+Path:
+  ~/.claude/projects/<workspace-path>/<session>.jsonl
+
+REPORT [DEMOMEGA-PHASE-30] [DEMOMEGA-NOTE] with avg output tokens
+       per assistant message.
+
+== PHASE 31 — FINAL SCORECARD ==
+
+Once all 30 phases complete, emit a [DEMOMEGA-RESULT] block:
+
+  [DEMOMEGA-RESULT] Phase 1 tool surface (114) ......... PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 2 iteration .................. PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 3 materialisation lock-step .. PASS / FAIL (per-SME)
+  [DEMOMEGA-RESULT] Phase 4 caveman 4-channel .......... PASS / FAIL (5 sub)
+  [DEMOMEGA-RESULT] Phase 5 mcp_call_batch happy ....... PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 6 mcp_call_batch contract .... PASS / FAIL (4 sub)
+  [DEMOMEGA-RESULT] Phase 7 consolidation+mutation ..... PASS / FAIL (10 sub)
+  [DEMOMEGA-RESULT] Phase 8 self-loops ................. PASS / FAIL (3 sub)
+  [DEMOMEGA-RESULT] Phase 9 edge_discovery ............. PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 10 proxy inheritance ......... PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 11 terminal acks ............. PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 12 insights .................. PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 13 broadcast persistence ..... PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 14 mcp_audit coverage ........ PASS / FAIL (24 tools)
+  [DEMOMEGA-RESULT] Phase 15 flows-on-catalogs ......... PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 16 lean projection ........... PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 17 uniform-int summary ....... PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 18 per-type model ............ PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 19 identifier normalisation .. PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 20 pre-injected action items . PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 21 wake debouncing 1-min ..... PASS / FAIL (3 sub)
+  [DEMOMEGA-RESULT] Phase 22 corrective deletes ........ PASS / FAIL (4 sub)
+  [DEMOMEGA-RESULT] Phase 23 parallel tool calls ....... NOTE only
+  [DEMOMEGA-RESULT] Phase 24 lock-step broadcasts ...... PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 25 deactivation-chain proxy .. PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 26 admin UI catalog endpoints  PASS / FAIL (3 sub)
+  [DEMOMEGA-RESULT] Phase 27 vector_search catalogs .... PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 28 recovery (if any) ......... NOTE
+  [DEMOMEGA-RESULT] Phase 29 insight triage ............ PASS / FAIL
+  [DEMOMEGA-RESULT] Phase 30 output tokens ............. NOTE
+
+Plus list every [DEMOMEGA-BUG] line you emitted earlier (if any) at
+the bottom of the scorecard.
+
+Report cumulative metrics:
+  - Total mcp_call_batch invocations
+  - Total search_* invocations
+  - Audit-rows / assistant-turns ratio (>1 means batching active)
+  - Lock-step broadcast count
+  - Insights generated count
+
+== TIMING ==
+
+Long-running multi-agent dance. Trigger manager + agent manager
+will wake the involved SMEs. Delegate work via tasks
+(create_task with description = "Phase X step Y: <action>"). If
+something stalls >5 minutes on a single step, raise [DEMOMEGA-BUG]
+with the stall description and continue.
+
+Admin will be looped via /loop dynamic mode and will respond to
+clarifications + handle out-of-band human-required actions
+(e.g. chat to decommissioned agents the UI can't reach).
+
+Send a chat to admin at the start of each phase transition so
+admin knows where you are. Admin's grep keys are the [DEMOMEGA-*]
+prefixes above.
+
+GO.
+[DEMOMEGA-END-OF-PROMPT]
+
+---

@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cartograph Admin</title>
+  <link rel="stylesheet" href="/style.css?v=64">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/core.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/python.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/javascript.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/sql.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/json.min.js"></script>
+  <!-- three.js loaded explicitly so we can build typed node meshes in
+       nodeThreeObject (3d-force-graph by itself doesn't expose THREE
+       globally). Load BEFORE 3d-force-graph so the library picks up
+       our window.THREE rather than bundling its own copy. -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
+</head>
+<body>
+  <div id="app-shell">
+    <nav id="top-nav">
+      <h1>Cartograph</h1>
+      <div class="tabs">
+        <button class="tab active" data-tab="chat">Chat</button>
+        <button class="tab" data-tab="comms">Communications</button>
+        <button class="tab" data-tab="entities">Entities</button>
+        <button class="tab" data-tab="catalog">Catalog</button>
+        <button class="tab" data-tab="graph">Graph</button>
+        <button class="tab" data-tab="insights">Insights</button>
+      </div>
+      <button id="broadcast-btn" title="Broadcast to all agents of a type">📢 Broadcast</button>
+    </nav>
+
+    <!-- CHAT VIEW -->
+    <section id="chat-view" class="view active">
+      <aside id="sidebar">
+        <header>
+          <h2>Agents</h2>
+          <button id="refresh-btn" title="Refresh agents">↻</button>
+        </header>
+        <ul id="agent-list">
+          <li class="empty">Loading agents...</li>
+        </ul>
+      </aside>
+
+      <main id="chat-pane">
+        <header id="chat-header">
+          <h2 id="chat-title">Select an agent</h2>
+          <span id="chat-subtitle"></span>
+        </header>
+        <div id="messages">
+          <p class="empty">Select an agent on the left to start chatting.</p>
+        </div>
+        <form id="chat-form">
+          <textarea id="chat-input" placeholder="Type a message... (Shift+Enter = newline · Enter = send)" rows="2" disabled></textarea>
+          <button type="submit" disabled>Send</button>
+        </form>
+      </main>
+    </section>
+
+    <!-- COMMUNICATIONS VIEW -->
+    <section id="comms-view" class="view">
+      <aside id="filter-bar">
+        <h2>Filters</h2>
+
+        <div class="filter-group">
+          <div class="filter-group-label">Participant (either direction)</div>
+          <label>Agent
+            <input id="filter-agent" list="agent-options" placeholder="agent_id · from OR to"
+                   autocomplete="off">
+          </label>
+          <label>Agent type
+            <select id="filter-agent-type">
+              <option value="">any</option>
+              <option value="admin">admin</option>
+              <option value="orchestrator">orchestrator</option>
+              <option value="iterator">iterator</option>
+              <option value="sme">sme</option>
+              <option value="resolver">resolver</option>
+            </select>
+          </label>
+          <label>Component name
+            <input id="filter-component" placeholder="canonical or display name"
+                   autocomplete="off">
+          </label>
+        </div>
+
+        <div class="filter-group">
+          <div class="filter-group-label">Directional</div>
+          <label>From agent
+            <input id="filter-from" list="from-options" placeholder="specific agent_id"
+                   autocomplete="off">
+          </label>
+          <label>From agent type
+            <select id="filter-from-type">
+              <option value="">any</option>
+              <option value="admin">admin</option>
+              <option value="orchestrator">orchestrator</option>
+              <option value="iterator">iterator</option>
+              <option value="sme">sme</option>
+              <option value="resolver">resolver</option>
+            </select>
+          </label>
+          <label>To agent
+            <input id="filter-to" list="to-options" placeholder="specific agent_id"
+                   autocomplete="off">
+          </label>
+          <label>To agent type
+            <select id="filter-to-type">
+              <option value="">any</option>
+              <option value="admin">admin</option>
+              <option value="orchestrator">orchestrator</option>
+              <option value="iterator">iterator</option>
+              <option value="sme">sme</option>
+              <option value="resolver">resolver</option>
+            </select>
+          </label>
+        </div>
+
+        <label>Communication type
+          <select id="filter-type">
+            <option value="">All</option>
+            <option>chat</option>
+            <option>broadcast</option>
+            <option>task</option>
+            <option>consolidation</option>
+            <option>clarification</option>
+          </select>
+        </label>
+        <div class="filter-actions">
+          <button id="filter-apply">Apply</button>
+          <button id="filter-reset" class="secondary">Reset</button>
+        </div>
+        <p class="hint">
+          <b>Agent</b> filters match a specific <code>agent_id</code>.
+          <b>Agent-type</b> filters join on <code>agent_runs</code> to
+          match all agents of that type — and for <b>To agent type</b>,
+          also match broadcasts targeting that type.
+        </p>
+
+        <!-- Typable-dropdown data sources -->
+        <datalist id="agent-options"></datalist>
+        <datalist id="from-options"></datalist>
+        <datalist id="to-options"></datalist>
+      </aside>
+
+      <main id="comms-list-pane">
+        <header>
+          <h2>Communications</h2>
+          <span id="comms-count"></span>
+        </header>
+        <ul id="comms-items">
+          <li class="empty">Click Apply to load communications.</li>
+        </ul>
+      </main>
+
+      <aside id="detail-panel">
+        <header>
+          <h2 id="detail-title">Detail</h2>
+          <button id="detail-close" title="Close">×</button>
+        </header>
+        <div id="detail-body">
+          <p class="empty">Click a communication on the left to see its source entity.</p>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ENTITIES VIEW (Phase 5.2) -->
+    <section id="entities-view" class="view">
+      <aside id="entities-filter">
+        <h2>Filters</h2>
+
+        <label>Type
+          <select id="ent-type">
+            <option value="">All</option>
+            <option value="task">Task</option>
+            <option value="consolidation">Consolidation</option>
+            <option value="clarification">Clarification</option>
+            <option value="broadcast">Broadcast</option>
+          </select>
+        </label>
+
+        <label>Status
+          <select id="ent-status">
+            <option value="">All</option>
+            <!-- Populated dynamically based on selected type. -->
+          </select>
+        </label>
+
+        <label class="checkbox-label">
+          <input type="checkbox" id="ent-open-only">
+          <span>Open only (hide terminal states)</span>
+        </label>
+
+        <label>Participant
+          <input id="ent-participant" placeholder="agent_id (either side)" autocomplete="off"
+                 list="agent-options">
+        </label>
+
+        <label>Search
+          <input id="ent-q" placeholder="text in summary" autocomplete="off">
+        </label>
+
+        <div class="filter-actions">
+          <button id="ent-apply">Apply</button>
+          <button id="ent-reset" class="secondary">Reset</button>
+        </div>
+
+        <p class="hint">
+          Entities = workflow rows (tasks, consolidations, clarifications,
+          broadcasts). Click a row to drill into the full thread.
+        </p>
+      </aside>
+
+      <main id="entities-list-pane">
+        <header>
+          <h2>Entities</h2>
+          <span id="ent-count"></span>
+        </header>
+        <ul id="ent-items">
+          <li class="empty">Loading…</li>
+        </ul>
+      </main>
+
+      <aside id="entities-detail">
+        <header>
+          <h2 id="ent-detail-title">Detail</h2>
+          <button id="ent-detail-close" title="Close">×</button>
+        </header>
+        <div id="ent-detail-body">
+          <p class="empty">Select an entity to inspect.</p>
+        </div>
+      </aside>
+    </section>
+
+    <!-- CATALOG VIEW (Phase 5.3) -->
+    <section id="catalog-view" class="view">
+      <aside id="catalog-filter">
+        <h2>Filters</h2>
+
+        <label>Type
+          <select id="cat-type">
+            <option value="">All</option>
+            <option>application</option>
+            <option>database</option>
+            <option>cache</option>
+            <option>queue</option>
+            <option>lambda</option>
+            <option>cron</option>
+            <option>external-service</option>
+            <option>library</option>
+            <option>infrastructure</option>
+          </select>
+        </label>
+
+        <label>Plane
+          <select id="cat-plane">
+            <option value="">All</option>
+            <option>github</option>
+            <option>deploy</option>
+            <option>cloud</option>
+            <option>telemetry</option>
+            <option>config</option>
+          </select>
+        </label>
+
+        <label>Status
+          <select id="cat-status">
+            <option value="active" selected>active</option>
+            <option value="">all (incl. decommissioned)</option>
+            <option value="decommissioned">decommissioned</option>
+          </select>
+        </label>
+
+        <label>Search
+          <input id="cat-q" placeholder="canonical / display name" autocomplete="off">
+        </label>
+
+        <div class="filter-actions">
+          <button id="cat-apply">Apply</button>
+          <button id="cat-reset" class="secondary">Reset</button>
+        </div>
+
+        <p class="hint">
+          Catalog is the textual counterpart to the Graph tab. Click a
+          component to drill into its attributions, edges, flows, and
+          source resources.
+        </p>
+      </aside>
+
+      <main id="catalog-list-pane">
+        <header>
+          <h2>Components</h2>
+          <span id="cat-count"></span>
+        </header>
+        <ul id="cat-items">
+          <li class="empty">Loading…</li>
+        </ul>
+      </main>
+
+      <aside id="catalog-detail">
+        <header>
+          <h2 id="cat-detail-title">Detail</h2>
+          <button id="cat-detail-close" title="Close">×</button>
+        </header>
+        <div id="cat-detail-body">
+          <p class="empty">Select a component to inspect.</p>
+        </div>
+      </aside>
+    </section>
+
+    <!-- INSIGHTS VIEW (Phase 5.9) -->
+    <section id="insights-view" class="view">
+      <aside id="insights-filter">
+        <h2>Filters</h2>
+
+        <label>Status
+          <select id="ins-status">
+            <option value="open" selected>open</option>
+            <option value="investigating">investigating</option>
+            <option value="promoted">promoted</option>
+            <option value="wontfix">wontfix</option>
+            <option value="">All</option>
+          </select>
+        </label>
+
+        <label>Kind
+          <select id="ins-kind">
+            <option value="">All</option>
+            <option value="prompt_gap">prompt_gap</option>
+            <option value="tactic_win">tactic_win</option>
+            <option value="tool_gap">tool_gap</option>
+            <option value="doc_confusing">doc_confusing</option>
+            <option value="workflow_friction">workflow_friction</option>
+          </select>
+        </label>
+
+        <label>Target
+          <input id="ins-target" placeholder="agent type, tool, doc path" autocomplete="off">
+        </label>
+
+        <label>Agent
+          <input id="ins-agent" placeholder="agent_id" autocomplete="off"
+                 list="agent-options">
+        </label>
+
+        <div class="filter-actions">
+          <button id="ins-apply">Apply</button>
+          <button id="ins-reset" class="secondary">Reset</button>
+        </div>
+
+        <p class="hint">
+          Agents call <code>record_insight()</code> to surface prompt gaps,
+          tactic wins, tool gaps, doc confusion, and workflow friction.
+          Triage from here.
+        </p>
+      </aside>
+
+      <main id="insights-list-pane">
+        <header>
+          <h2>Insights</h2>
+          <span id="ins-count"></span>
+        </header>
+        <ul id="ins-items">
+          <li class="empty">Loading…</li>
+        </ul>
+      </main>
+    </section>
+
+    <!-- GRAPH VIEW (Phase 3.5) -->
+    <section id="graph-view" class="view">
+      <aside id="graph-sidebar">
+        <header>
+          <h2>Components</h2>
+          <button id="graph-refresh" title="Refresh graph">↻</button>
+        </header>
+        <div class="graph-legend">
+          <div><span class="legend-dot" style="background:#3fb950"></span>github</div>
+          <div><span class="legend-dot" style="background:#58a6ff"></span>deploy</div>
+          <div><span class="legend-dot" style="background:#f85149"></span>cloud</div>
+          <div><span class="legend-dot" style="background:#d2a8ff"></span>telemetry</div>
+          <div><span class="legend-dot" style="background:#d29922"></span>config</div>
+          <div><span class="legend-dot" style="background:#8b949e"></span>no attributions yet</div>
+        </div>
+        <div id="graph-stats">
+          <div><b>Components</b> <span id="graph-comp-count">–</span></div>
+          <div><b>Edges</b> <span id="graph-edge-count">–</span></div>
+        </div>
+        <hr>
+        <h3>Component detail</h3>
+        <div id="graph-hover-doc">
+          <p class="empty">Click a component in the graph to inspect it.</p>
+        </div>
+      </aside>
+      <main id="graph-pane">
+        <div id="graph-canvas"></div>
+      </main>
+    </section>
+  </div>
+
+  <!-- BROADCAST DIALOG -->
+  <dialog id="broadcast-dialog">
+    <form id="broadcast-form" method="dialog">
+      <h2>Broadcast to all agents of a type</h2>
+      <label>Target agent type
+        <select id="bcast-type" required>
+          <option value="">-- choose --</option>
+          <option value="orchestrator">orchestrator</option>
+          <option value="iterator">iterator</option>
+          <option value="sme">sme</option>
+          <option value="resolver">resolver</option>
+        </select>
+      </label>
+      <label>Message
+        <textarea id="bcast-msg" rows="6" required></textarea>
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="bcast-persistent">
+        <span>Persistent — future agents spawned after this broadcast will also see it.</span>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="bcast-cancel" class="secondary">Cancel</button>
+        <button type="submit" id="bcast-send">Send broadcast</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- SLEEP DIALOG -->
+  <dialog id="sleep-dialog">
+    <form id="sleep-form" method="dialog">
+      <h2 id="sleep-title">Sleep agents</h2>
+      <p class="hint" id="sleep-target-note">Target: …</p>
+
+      <label>Duration
+        <div class="duration-row">
+          <input type="number" id="sleep-value" min="1" step="1" value="1" required>
+          <select id="sleep-unit">
+            <option value="60">minutes</option>
+            <option value="3600" selected>hours</option>
+            <option value="86400">days</option>
+          </select>
+        </div>
+      </label>
+
+      <p class="hint" id="sleep-preview">Wakes at: —</p>
+
+      <label>Reason
+        <input type="text" id="sleep-reason"
+               placeholder="e.g. waiting on user credentials" required>
+      </label>
+
+      <div class="dialog-actions">
+        <button type="button" id="sleep-cancel" class="secondary">Cancel</button>
+        <button type="submit" id="sleep-confirm">Sleep</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js?v=64"></script>
+</body>
+</html>

@@ -1,0 +1,252 @@
+---
+DEMO9 — Phase 9 verification (paste this whole block to orchestrator)
+
+[DEMO9-START]
+
+You are orchestrating a focused verification dance for Phase 9
+(Round 5 token-opt): mcp_call_batch + caveman output style. This is
+NOT a full regression run — assume DEMO8 surface still works. We are
+specifically checking the two new levers bite in practice.
+
+== REPORT-BACK CONVENTIONS ==
+
+Tag every status / observation message with one of:
+  [DEMO9-PHASE-N]   section header (N = 1..6)
+  [DEMO9-OK]        verification passed
+  [DEMO9-FAIL]      verification failed (note expected vs actual)
+  [DEMO9-BUG]       unexpected behavior worth flagging
+  [DEMO9-NOTE]      informational observation
+  [DEMO9-RESULT]    final scorecard at end
+
+DO NOT use these prefixes for anything else. The user will grep
+these prefixes and paste back to Claude for analysis.
+
+== PHASE 1 — TOOL SURFACE SANITY ==
+
+Confirm the MCP server exposes 108 tools (was 107 pre-Phase-9):
+  curl -s -X POST http://localhost:8100/mcp \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+    | python3 -c "import sys,json; \
+      d=json.loads([l for l in sys.stdin.read().splitlines() if l.startswith('{')][0]) \
+        if not sys.stdin.read().startswith('{') else json.load(sys.stdin); \
+      print('tools:', len(d['result']['tools']))"
+
+Or simpler — check the boot log:
+  grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1
+
+Expect: `108 tools registered`. Also confirm `mcp_call_batch`
+appears in `Registered tools:` log line.
+
+REPORT [DEMO9-PHASE-1]. [DEMO9-OK] if 108. [DEMO9-FAIL] otherwise.
+
+== PHASE 2 — TOPOLOGY ==
+
+Spawn 2 SMEs against synthetic plane='github' resources:
+  sme-d9-auth        → auth-svc
+  sme-d9-pay         → payments-svc
+
+bulk_spawn_smes is fine. Each SME materialises with upsert_component
++ a few attributions + 2 catalogs each. THIS PHASE IS NOT being
+verified per-step — it's setup for Phase 3+.
+
+REPORT [DEMO9-PHASE-2] with the 2 component_ids when materialised.
+
+== PHASE 3 — mcp_call_batch HAPPY PATH (heterogeneous reads) ==
+
+★ THIS IS THE KEY VERIFICATION FOR PHASE 9.1.
+
+sme-d9-auth must perform a wake-start hygiene sweep using
+mcp_call_batch. The batch must contain 5 DIFFERENT tools:
+
+  mcp_call_batch(agent_id='sme-d9-auth', calls=[
+    {tool: 'get_action_items_summary', args: {}},
+    {tool: 'get_my_catalogs',          args: {}},
+    {tool: 'get_unmatched_callers',    args: {}},
+    {tool: 'get_orphan_catalogs',      args: {}},
+    {tool: 'get_stale_edges',          args: {}},
+  ])
+
+Verify the response has exactly 5 results, all `ok=True`, each with
+`idx`, `tool`, `result` keys. Order matches input order.
+
+Cross-check via mcp_audit:
+  curl -s 'http://localhost:8200/api/mcp_audit?agent_id=sme-d9-auth&limit=20' \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); \
+      print([r['tool_name'] for r in d['entries'][:10]])"
+
+Expect: 1 row for `mcp_call_batch` AND 5 rows for the sub-tools
+(`get_my_catalogs`, `get_unmatched_callers`, `get_orphan_catalogs`,
+`get_stale_edges`, `get_action_items_summary`) all created within
+the same second.
+
+REPORT [DEMO9-PHASE-3].
+REPORT [DEMO9-OK] if response shape correct + 6 mcp_audit rows.
+REPORT [DEMO9-FAIL] otherwise.
+
+== PHASE 4 — mcp_call_batch CONTRACT VERIFICATION ==
+
+Four contract checks. Each must produce the expected response/error.
+
+4a. **Partial failure — per-call error collection.** sme-d9-pay
+    calls a batch with one GUARANTEED-FAIL sub-call between two
+    legitimate ones. Use a cross-owner delete (owner-gate raises):
+
+    mcp_call_batch(agent_id='sme-d9-pay', calls=[
+      {tool: 'get_my_catalogs', args: {}},
+      {tool: 'delete_attribution', args: {attribution_id: <ID OF AN
+        ATTRIBUTION OWNED BY sme-d9-auth, NOT sme-d9-pay>}},
+      {tool: 'list_agents', args: {}},
+    ])
+    Expect:
+      - results[0].ok = True (read of own catalogs)
+      - results[1].ok = False, results[1].error contains
+        "does not own" or similar owner-gate refusal
+      - results[2].ok = True (sibling did NOT abort)
+      - The batch tool itself returns normally — partial failure
+        is data, NOT an exception
+      - mcp_audit shows the failed sub-call with result_status='error'
+        + error_msg populated, alongside the two ok rows + the
+        outer mcp_call_batch row
+      - The `delete_attribution` did NOT execute server-side: query
+        the attribution via get_attributions(<auth_id>) post-batch
+        and confirm the row still exists. (Pre-flight validation
+        passed shape; the runtime failure was inside the sub-tool's
+        own owner check, AFTER dispatch — proves collect-all
+        semantics catch runtime failures, not just shape errors.)
+
+4b. **Nesting refused.** sme-d9-pay calls:
+    mcp_call_batch(agent_id='sme-d9-pay', calls=[
+      {tool: 'mcp_call_batch', args: {calls: []}},
+    ])
+    Expect: tool RAISES (not returns) ValueError mentioning
+    "cannot be nested". Whole batch refused before any sub-call
+    fires.
+
+4c. **Cap of 50 sub-calls.** sme-d9-pay calls:
+    mcp_call_batch(agent_id='sme-d9-pay', calls=[51× {tool: 'list_agents', args: {}}])
+    Expect: ValueError mentioning "exceeds max 50".
+
+4d. **Bulk variant inside batch.** sme-d9-auth (caller) calls:
+    mcp_call_batch(agent_id='sme-d9-auth', calls=[
+      {tool: 'upsert_attributions_bulk', args: {
+         component_id: <auth-svc id>,
+         attributions: [
+           {plane: 'github', resource_type: 'env_var', identifier: 'D9_E1'},
+           {plane: 'github', resource_type: 'env_var', identifier: 'D9_E2'},
+           {plane: 'github', resource_type: 'env_var', identifier: 'D9_E3'},
+         ]}},
+      {tool: 'get_my_catalogs', args: {}},
+    ])
+    Expect: results[0].ok=True with committed=True, applied=3.
+    results[1].ok=True. Sub-calls of mixed shapes (bulk + read) work
+    fine in the same batch.
+
+REPORT [DEMO9-PHASE-4].
+REPORT [DEMO9-OK] / [DEMO9-FAIL] for each of 4a / 4b / 4c / 4d.
+
+== PHASE 5 — CAVEMAN OUTPUT STYLE ==
+
+★ THIS IS THE KEY VERIFICATION FOR PHASE 9.2.
+
+5a. Admin sends a chat to sme-d9-auth: "Tell me what you think your
+    component does, and what your top edge target is." (This forces
+    a non-trivial NL response.)
+
+    Wait for response. Inspect the chat reply for caveman
+    characteristics:
+    - No preamble ("I'll start by...", "Let me check...", etc.)
+    - No post-hoc summary restating the question.
+    - Identifiers / hostnames / IDs preserved verbatim.
+    - Sentences are short / fragmentary; articles often absent.
+
+    Heuristic check: total response length should be markedly
+    shorter than DEMO8-equivalent answers. Eyeball it.
+
+    REPORT [DEMO9-NOTE] with the verbatim reply text so admin can
+    judge.
+
+5b. sme-d9-auth raises a clarification to sme-d9-pay with a
+    deliberately complex question. Inspect both the asker's
+    question_message AND sme-d9-pay's response.
+
+    Expect: both texts in caveman style. NO preambles. Identifiers
+    preserved.
+
+5c. sme-d9-auth files a record_insight (any kind, target sme.materialisation,
+    body explaining a real observation from this demo).
+
+    Inspect the insight body via:
+      curl -s 'http://localhost:8200/api/insights?agent_id=sme-d9-auth&limit=5'
+
+    Expect: caveman style in the body. Identifiers preserved.
+
+5d. sme-d9-pay populates `component_doc_md` for payments-svc via
+    upsert_component.
+
+    ★ THIS ONE IS DIFFERENT — component_doc_md is the ONLY exempt
+    path. Inspect via:
+      get_component(payments-svc-id)
+
+    Expect: NORMAL ENGLISH. Caveman style here would be a [DEMO9-FAIL]
+    (the prompt explicitly carves component_doc_md out).
+
+REPORT [DEMO9-PHASE-5].
+REPORT [DEMO9-OK] / [DEMO9-FAIL] for each of 5a / 5b / 5c / 5d.
+
+== PHASE 6 — PARALLEL DISPATCH PROOF ==
+
+Optional but informative. sme-d9-auth performs a batch of 4 reads
+that each take meaningful DB time, e.g.:
+
+  mcp_call_batch(agent_id='sme-d9-auth', calls=[
+    {tool: 'list_all_resources', args: {}},
+    {tool: 'list_agents', args: {}},
+    {tool: 'get_resource_counts', args: {}},
+    {tool: 'get_action_items_detail', args: {}},
+  ])
+
+Inspect mcp_audit for the batch + sub-call rows. The 4 sub-call
+duration_ms values + the outer mcp_call_batch duration_ms should
+be CONSISTENT WITH parallel dispatch:
+  outer.duration_ms ≈ max(sub.duration_ms)  — not the SUM.
+
+If outer.duration_ms ≈ sum of sub durations, ThreadPoolExecutor
+isn't dispatching in parallel — flag [DEMO9-BUG].
+
+REPORT [DEMO9-PHASE-6].
+REPORT [DEMO9-NOTE] with the duration map.
+REPORT [DEMO9-OK] if outer ≈ max(subs); [DEMO9-FAIL] if outer ≈ sum.
+
+== FINAL SCORECARD ==
+
+Once all 6 phases complete, emit a [DEMO9-RESULT] block:
+  [DEMO9-RESULT] Phase 1 tool surface (108) ........ PASS / FAIL
+  [DEMO9-RESULT] Phase 2 topology setup ............ PASS / FAIL
+  [DEMO9-RESULT] Phase 3 mcp_call_batch happy path . PASS / FAIL
+  [DEMO9-RESULT] Phase 4 contract checks ........... PASS / FAIL (4 sub-results)
+  [DEMO9-RESULT] Phase 5 caveman style ............. PASS / FAIL (4 sub-results)
+  [DEMO9-RESULT] Phase 6 parallel dispatch proof ... PASS / FAIL
+
+Plus list every [DEMO9-BUG] line you emitted earlier (if any) at
+the bottom of the scorecard.
+
+Also report two cumulative metrics for the run:
+  - Total mcp_call_batch invocations (count of rows in mcp_audit)
+  - Total assistant turns vs total mcp_audit rows ratio — if
+    mcp_call_batch is being used, the ratio of audit rows / turns
+    will be >1 (each turn produces multiple audit rows when a batch
+    is used).
+
+== TIMING ==
+
+Should complete in ~10-15 minutes. Each phase's steps are
+straightforward; trigger manager + agent manager wake the involved
+SMEs as needed. If any single step stalls > 5 minutes, raise
+[DEMO9-BUG] and continue.
+
+GO.
+[DEMO9-END-OF-PROMPT]
+
+---

@@ -1,0 +1,290 @@
+═══════════════════════════════════════════════════════════════════
+DEMO12 — TARGETED Phase 10.8 verification (NOT a mega demo)
+Cover surface: ONLY the changes shipped in Phase 10.8 sub-commits.
+Wall-clock target: ~10-15 min. Scoped enough for one orch session.
+
+Paste THIS WHOLE BLOCK as a single admin chat to orch.
+═══════════════════════════════════════════════════════════════════
+
+[DEMO12-START]
+
+You are running a TARGETED Phase 10.8 verification — NOT a full
+end-to-end demo. Cover ONLY the surface that Phase 10.8 sub-commits
+changed. Do NOT rebuild a topology, do NOT run iteration /
+materialisation / consolidation phases. The DB has DEMO11 leftover
+state — leverage it (existing components, decommissioned agents,
+existing rows) for setup.
+
+Tag every status update with `[DEMO12-PHASE-N]` (or `[DEMO12-OK]` /
+`[DEMO12-FAIL]` / `[DEMO12-BUG]` / `[DEMO12-NOTE]`). End each phase
+with `[DEMO12-RESULT phase=N <PASS|FAIL|N/A> <brief reason>]`.
+
+Caveman style remains active. Identifiers / file paths / IDs /
+error strings VERBATIM.
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 10.8 surface under test ==
+
+10.8.1 canonical_name partial UNIQUE on active
+  - Schema: column-level UNIQUE replaced with partial UNIQUE INDEX
+    `components_canonical_name_active_unique` ON components(canonical_name)
+    WHERE status='active'.
+  - upsert_component SELECT pre-check filters AND status='active'.
+  - Decom rows holding a name no longer block re-launch.
+
+10.8.2 Defensive: require_active_agent on broadcast read
+  - broadcast.get_unacked_broadcasts(agent_id) calls
+    require_active_agent at top — refuses decom callers.
+  - trigger_management/scanners/broadcasts.py::scan returns 0
+    for decom agents (was returning non-zero counts).
+
+10.8.3 Prompt promotions (verified by code-side smoke; not testable
+  in a targeted run — requires full materialisation storm)
+  - SME prompt: split-child auto-resolve doctrine + leave-dangling-
+    don't-force-create rule.
+  - Orch prompt: broadcast-driven coordination beats per-agent
+    tasking for routine phase work.
+
+10.8.4 DEMO11 spec sync — delete_attributions_bulk lenient semantics
+  - Owner-violation: strict reject.
+  - Missing-id: lenient (committed=True with per-row not_found).
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 1 — TOOL SURFACE + DAEMON HEALTH ==
+
+1.1 Confirm 114 tools registered:
+    bash: grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1
+    Expected: "114 tools registered". If not — [DEMO12-FAIL].
+
+1.2 Confirm Phase 10.8 schema is live:
+    bash: PGPASSWORD=cartograph psql -h localhost -U cartograph \
+          -d cartograph -tAc "SELECT indexname FROM pg_indexes
+            WHERE tablename='components'
+              AND indexname='components_canonical_name_active_unique'"
+    Expected: 1 row.
+
+    bash: PGPASSWORD=cartograph psql -h localhost -U cartograph \
+          -d cartograph -tAc "SELECT conname FROM pg_constraint
+            WHERE conrelid='components'::regclass
+              AND conname='components_canonical_name_key'"
+    Expected: 0 rows (legacy constraint dropped).
+
+1.3 Daemon health: 4 processes running. /api/agents responds 200.
+
+[DEMO12-RESULT phase=1 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 2 — canonical_name partial UNIQUE on active (10.8.1) ==
+
+The DB has DEMO11 leftovers — multiple decommissioned components
+exist with their canonical_names held. Use one of them to verify
+the active+decom collision is now allowed.
+
+2.1 Pick a decommissioned component:
+    bash: PGPASSWORD=cartograph psql -h localhost -U cartograph \
+          -d cartograph -tAc "SELECT canonical_name FROM components
+            WHERE status='decommissioned' LIMIT 1"
+    Capture the name (e.g. 'auth-svc').
+    If 0 rows — set up by manually decommissioning one active
+    component for the test:
+      UPDATE components SET status='decommissioned'
+        WHERE canonical_name='<some_existing_name>';
+
+2.2 Spawn a fresh SME for the test. Use an existing pending resource
+    OR insert a synthetic one:
+    bash: PGPASSWORD=cartograph psql -h localhost -U cartograph \
+          -d cartograph -tAc "SELECT id FROM resources
+            WHERE status='pending' LIMIT 1"
+    If empty: upsert_resource (you have the iterator-side tool but
+    are orch not iterator; ask an iterator to upsert one for the
+    test, OR use an existing assigned resource of an idle SME).
+
+    Path A (preferred): pick an idle SME that already has its own
+    component, and verify via direct DB that 2 components can share
+    a canonical_name (one active, one decom). Skip spawning fresh.
+
+2.3 Verify partial UNIQUE in action — 3 sub-tests:
+
+  (a) ACTIVE+DECOM ALLOWED (Phase 10.8.1 happy path):
+      Pick decom comp's canonical_name. Verify there's no active
+      row with the same name:
+        SELECT count(*) FROM components
+         WHERE canonical_name='<the_name>' AND status='active'
+        Expected: 0.
+      Now INSERT a fresh active row with the same canonical_name
+      (use a new id):
+        bash: PGPASSWORD=cartograph psql -h localhost -U cartograph \
+              -d cartograph -c "INSERT INTO components
+                (canonical_name, display_name, component_type,
+                 status, description)
+              VALUES ('<the_name>', 'demo12-test-row', 'application',
+                      'active', 'demo12 verification')
+              RETURNING id"
+      Expected: row inserted successfully (no UNIQUE violation).
+      [DEMO12-OK 10.8.1 active+decom collision allowed]
+
+      Cleanup: DELETE FROM components WHERE display_name='demo12-test-row'
+
+  (b) ACTIVE+ACTIVE STILL REJECTED:
+      Pick an active comp's canonical_name. Try to INSERT a second
+      active row with the same name:
+        bash: PGPASSWORD=cartograph psql -h localhost -U cartograph \
+              -d cartograph -c "INSERT INTO components
+                (canonical_name, display_name, component_type,
+                 status, description)
+              VALUES ('<active_name>', 'demo12-conflict', 'application',
+                      'active', 'should fail')"
+      Expected: ERROR — duplicate key value violates unique
+      constraint "components_canonical_name_active_unique".
+      [DEMO12-OK 10.8.1 active+active still rejected]
+
+  (c) APPLICATION-LAYER pre-check matches schema (no spurious
+      "already belongs" error against decom rows):
+      Re-check sub-test (a) above using the upsert_component MCP
+      path is hard to do as orch (you don't own a component). The
+      schema-level check in (a) implies the application layer
+      change too — they share the predicate semantics.
+      Skip explicit (c); cover via the test_components.py unit
+      test that already lands in commit cd3bc20.
+      [DEMO12-OK skipped — covered by unit test]
+
+[DEMO12-RESULT phase=2 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 3 — Defensive broadcast gate (10.8.2) ==
+
+The defensive 2-LOC closes SQ-1: get_unacked_broadcasts(decom_id)
+used to return rows; now require_active_agent refuses decom
+callers + scanner returns 0.
+
+3.1 Pick a decommissioned agent_id:
+    bash: PGPASSWORD=cartograph psql -h localhost -U cartograph \
+          -d cartograph -tAc "SELECT agent_id, agent_type FROM agent_runs
+            WHERE status='decommissioned' LIMIT 1"
+    Capture both fields (e.g. sme-24929aee + sme).
+
+3.2 Direct Python call should raise ValueError:
+    bash: cd src && /opt/homebrew/bin/python3.10 <<EOF
+import sys
+sys.path.insert(0, '.')
+from shared.db import init_pool
+init_pool()
+from cartograph_mcp.tools.broadcast import get_unacked_broadcasts
+try:
+    out = get_unacked_broadcasts('<decom_agent_id>', '<agent_type>')
+    print('FAIL: no error raised, got', out)
+except ValueError as e:
+    print('OK: refused with', repr(e))
+EOF
+    Expected: "OK: refused with ValueError(...not found...)"
+    [DEMO12-OK 10.8.2 read tool refuses decom]
+
+3.3 Scanner returns 0 for decom:
+    bash: cd src && /opt/homebrew/bin/python3.10 <<EOF
+import sys; sys.path.insert(0, '.')
+from shared.db import init_pool
+init_pool()
+from trigger_management.scanners.broadcasts import scan
+n = scan('<decom_agent_id>', '<agent_type>')
+print('scanner returned', n, '(expected 0)')
+assert n == 0, 'scanner should skip decom'
+print('OK: scanner skips decom')
+EOF
+    Expected: "OK: scanner skips decom"
+    [DEMO12-OK 10.8.2 scanner skips decom]
+
+3.4 BASELINE check — active agent still works:
+    bash: cd src && /opt/homebrew/bin/python3.10 <<EOF
+import sys; sys.path.insert(0, '.')
+from shared.db import init_pool
+init_pool()
+from cartograph_mcp.tools.broadcast import get_unacked_broadcasts
+out = get_unacked_broadcasts('orch-8b7025e0', 'orchestrator')
+print('active orch returned', len(out), 'rows')
+EOF
+    Expected: returns a list (may be empty), no error.
+
+[DEMO12-RESULT phase=3 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 4 — delete_attributions_bulk lenient semantics (10.8.4) ==
+
+Spec sync — verify the impl matches the now-corrected DEMO11
+prompt. 5b.5 mismatch was the doc, not the impl.
+
+4.1 Pick an active SME with ≥2 attributions:
+    bash: PGPASSWORD=cartograph psql -h localhost -U cartograph \
+          -d cartograph -tAc "SELECT a.id, rca.agent_id
+            FROM attributions a
+            JOIN resource_component_agents rca ON rca.component_id = a.component_id
+            JOIN agent_runs ar ON ar.agent_id = rca.agent_id
+            WHERE ar.status='idle'
+            LIMIT 3"
+    Capture 2 valid attribution ids + the agent_id.
+
+4.2 Mixed batch — 2 valid + 1 fake UUID:
+    bash: cd src && /opt/homebrew/bin/python3.10 <<EOF
+import sys; sys.path.insert(0, '.')
+from shared.db import init_pool
+init_pool()
+from cartograph_mcp.tools.components import delete_attributions_bulk
+out = delete_attributions_bulk(
+    '<sme_agent_id>',
+    ['<valid_id_1>', '<valid_id_2>',
+     '00000000-0000-0000-0000-000000000000']
+)
+print('committed =', out['committed'])
+print('applied =', out['applied'])
+for r in out['rows']:
+    print(' ', r)
+EOF
+    Expected:
+    - committed = True (lenient — missing UUID does NOT abort batch)
+    - applied = 2 (valid rows actually deleted)
+    - rows[2] = {deleted: False, reason: 'not_found', ...} for the
+      fake UUID
+    [DEMO12-OK 10.8.4 lenient semantics confirmed]
+
+4.3 Owner-violation strictness — pick another SME's attribution
+    and try to delete via the wrong owner:
+    bash: capture an attribution_id owned by SME-A, then call
+    delete_attributions_bulk('sme-B', [<that_id>]) — expect
+    committed=False with per-row error citing ownership.
+
+[DEMO12-RESULT phase=4 PASS|FAIL]
+
+═══════════════════════════════════════════════════════════════════
+== PHASE 5 — FINAL SCORECARD ==
+
+Emit ONE admin chat message:
+
+  ══════════════════════════════════════════════════
+  DEMO12 — Phase 10.8 TARGETED VERIFICATION
+  Run: <ISO timestamp> / orch-<your_id>
+  Branch: feat/trigger-manager-cartograh-mcp
+  Commits verified: cd3bc20 / 5d335b0 / 8a60df0 / 4a9612b
+  ══════════════════════════════════════════════════
+
+  ── PHASES (1 .. 4) ──
+  Phase 1 — TOOL SURFACE + SCHEMA LIVE              [PASS|FAIL]
+  Phase 2 — canonical_name partial UNIQUE (10.8.1)   [PASS|FAIL]
+  Phase 3 — Defensive broadcast gate (10.8.2)        [PASS|FAIL]
+  Phase 4 — delete_attributions_bulk lenient (10.8.4) [PASS|FAIL]
+
+  ── BUGS / NOTES ──
+  [DEMO12-BUG-N] markers from the run, severity each.
+  None = clean.
+
+  ── NET VERDICT ──
+  PASS overall iff all 4 phases PASS + no [DEMO12-BUG] markers.
+  FAIL otherwise. State which phases failed.
+
+  ── 10.8.3 NOT TESTED IN THIS RUN ──
+  Prompt promotions (split-child auto-resolve, leave-dangling-don't-
+  force-create, broadcast-driven coordination) require a full
+  materialisation/edge-discovery storm to verify in production.
+  Smoke-test (sme=95477, orch=30465) confirmed prompts compile
+  clean; behavioural verification deferred to real-data run.
+
+[DEMO12-END]
+═══════════════════════════════════════════════════════════════════

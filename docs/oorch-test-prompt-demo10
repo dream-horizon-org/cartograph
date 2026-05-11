@@ -1,0 +1,277 @@
+---
+DEMO10 — Targeted Phase 10.1.3 verification (paste this WHOLE block to orchestrator)
+
+[DEMO10-START]
+
+You are running a TARGETED Phase 10.1.3 verification. Narrow scope —
+just exercise the per-tool caller-id kwarg name-map fix in
+mcp_call_batch + the create_edge docstring fix. NOT a full topology
+build, NOT a consolidation/mutation dance beyond the minimum needed
+to get 1 decommissioned agent for the proxy test. Keep it tight.
+
+== TAGS ==
+[DEMO10-PHASE-N] / [DEMO10-OK] / [DEMO10-FAIL] / [DEMO10-BUG] /
+[DEMO10-NOTE] / [DEMO10-RESULT]
+
+Use these tags in your admin chat updates so I can grep the
+scorecard. End each phase with [DEMO10-RESULT phase=N <PASS|FAIL|N/A>
+brief reason].
+
+== SCOPE — what we're verifying ==
+
+Phase 9.1 mcp_call_batch auto-injects the caller's identity into
+every sub-call. Pre-Phase-10.1.3 the inject was hard-coded to
+`agent_id`. Five tools used semantically-meaningful caller-id param
+names that TypeError'd on the unexpected kwarg:
+  - send_chat            → from_agent_id
+  - send_broadcast       → from_agent_id
+  - create_task          → owner_agent_id
+  - act_on_proxy_item    → survivor_id
+  - create_clarification → asker_agent_id
+
+Phase 10.1.3 v2 (commit 376b27a) added a per-tool name-map dict
+inside call_batch.py so the inject pushes under the right kwarg per
+tool. Tools keep their semantic param names; the dispatcher routes
+correctly. Public tool signatures unchanged from what you already
+learned.
+
+Plus: create_edge docstring fix — the wrapper used to claim
+"Refuses self-loops" which was wrong since Phase 7.3 + 7.4.4. Fixed
+to state self-loops are permitted.
+
+== PHASE 1 — TOOL SURFACE ==
+
+Verify the MCP server has 114 tools registered. Then verify the 5
+affected tools + create_edge are callable with their CURRENT public
+signatures (you don't need to invoke yet — just confirm the tool
+schemas).
+
+Acceptance: 114 tools registered, 6 tool names present.
+
+[DEMO10-RESULT phase=1 PASS|FAIL]
+
+== PHASE 2 — MINIMAL TOPOLOGY ==
+
+Spawn:
+  - sme-A (plane=github), assigned to a fake resource
+  - sme-B (plane=github), assigned to a fake resource
+  - sme-W (plane=github), no resource — used as create_task worker
+  - sme-CR (plane=github), no resource — used as
+    create_clarification responder
+
+Each SME calls upsert_component once with a stub
+canonical_name/display_name/component_type=application. Don't bother
+with attributions/catalogs/edges — we don't need them. Mark each
+resource done.
+
+Acceptance: 4 SMEs idle, 2 components written, 0 in-flight work.
+
+[DEMO10-RESULT phase=2 PASS|FAIL]
+
+== PHASE 3 — DIRECT CALLS WITH ORIGINAL PARAM NAMES ==
+
+The public param names are UNCHANGED post-10.1.3. Verify each tool
+still works when called directly (not via mcp_call_batch) with its
+original kwarg names:
+
+  3a. send_chat(from_agent_id=sme-A, to_agent_id='admin',
+                message='direct test')
+      → succeeds; comm row inserted.
+
+  3b. send_broadcast(from_agent_id=YOU (orch), to_agent_type='sme',
+                     message='orch direct broadcast', persistent=False)
+      → succeeds.
+
+  3c. create_task(owner_agent_id=YOU, worker_agent_id=sme-W,
+                  description='direct test task')
+      → succeeds; task in BW.
+
+  3d. create_clarification(asker_agent_id=sme-A,
+                           responder_agent_id=sme-CR,
+                           question_message='direct test clar')
+      → succeeds; clarification in B2.
+
+  3e. (act_on_proxy_item exercised in Phase 5 after a merge.)
+
+Acceptance: all 4 succeed with original param names. NOT renamed —
+agents continue to use the semantic names.
+
+[DEMO10-RESULT phase=3 PASS|FAIL]
+
+== PHASE 4 — INDIVIDUAL BATCH CALLS (per-tool name-map verification) ==
+
+Now batch each of the 5 tools INDIVIDUALLY through mcp_call_batch.
+You (orch) fire 4 of them; sme-A fires the 5th (act_on_proxy_item)
+after we induce a merge in Phase 5. So Phase 4 covers 4 of 5.
+
+Important: do NOT pass the caller-id kwarg in the sub-call args —
+let mcp_call_batch's auto-inject route it to the right kwarg via
+the name-map. This is the CORE BUG-2 fix — pre-10.1.3 these would
+all TypeError.
+
+  4a. mcp_call_batch(agent_id=YOU, calls=[
+        {tool: 'send_chat',
+         args: {to_agent_id: 'admin',
+                message: 'batched send_chat 4a'}}
+      ])
+      → results[0].ok == True
+      Pre-fix: TypeError 'agent_id' — send_chat accepts only
+      from_agent_id.
+
+  4b. mcp_call_batch(agent_id=YOU, calls=[
+        {tool: 'send_broadcast',
+         args: {to_agent_type: 'sme',
+                message: 'batched send_broadcast 4b',
+                persistent: False}}
+      ])
+      → results[0].ok == True
+
+  4c. mcp_call_batch(agent_id=YOU, calls=[
+        {tool: 'create_task',
+         args: {worker_agent_id: 'sme-W',
+                description: 'batched create_task 4c'}}
+      ])
+      → results[0].ok == True
+
+  4d. mcp_call_batch(agent_id=YOU, calls=[
+        {tool: 'create_clarification',
+         args: {responder_agent_id: 'sme-CR',
+                question_message: 'batched create_clarification 4d'}}
+      ])
+      → results[0].ok == True
+      (sme-CR will get a clarification; just ack/respond eventually
+       so the queue doesn't bloat — not part of the test.)
+
+Acceptance: 4/4 sub-calls return ok=True. If ANY return TypeError on
+'agent_id', flag [DEMO10-FAIL] — the name-map regressed.
+
+[DEMO10-RESULT phase=4 PASS|FAIL]
+
+== PHASE 5 — MERGE TO INDUCE DECOM + act_on_proxy_item BATCHED ==
+
+5a. Set up: sme-A nominates a merge with sme-B
+    (mutation_type='merge'). Resolver auto-escalates / approves to M
+    with mutation_assigned_to=sme-A. sme-A absorbs sme-B.
+    sme-B is now decommissioned, merged_into_agent_id=sme-A.
+
+5b. Admin chat to sme-B (use direct DB insert if the admin UI
+    refuses decommissioned recipients — there's a known UI 404).
+    Insert one chat with text 'mega proxy test'.
+
+5c. sme-A fires:
+    mcp_call_batch(agent_id=sme-A, calls=[
+      {tool: 'act_on_proxy_item',
+       args: {item_type: 'chat', item_id: <chat_id>,
+              action: 'ack', payload: {}}}
+    ])
+    → results[0].ok == True
+    → proxy_audit row exists with survivor_id=sme-A,
+      proxy_agent_id=sme-B
+    Pre-fix: TypeError 'agent_id' — act_on_proxy_item accepts only
+    survivor_id. Phase 10.1.3 maps agent_id → survivor_id via the
+    name-map.
+
+Acceptance: act_on_proxy_item batched ok=True; proxy_audit row
+present.
+
+[DEMO10-RESULT phase=5 PASS|FAIL]
+
+== PHASE 6 — HETEROGENEOUS BATCH (all 5 in 2 calls) ==
+
+The big one. Verify all 5 affected tools work TOGETHER in
+heterogeneous batches.
+
+6a. As YOU (orch), fire one batch with 3 sub-calls (caller=orch):
+    mcp_call_batch(agent_id=YOU, calls=[
+      {tool: 'send_chat',       args: {to_agent_id: 'admin',
+                                       message: 'mega 6a-1'}},
+      {tool: 'send_broadcast',  args: {to_agent_type: 'sme',
+                                       message: 'mega 6a-2',
+                                       persistent: False}},
+      {tool: 'create_task',     args: {worker_agent_id: 'sme-W',
+                                       description: 'mega 6a-3'}},
+    ])
+    → all 3 results[].ok == True
+
+6b. As sme-A, fire one batch with 2 sub-calls:
+    First, admin sends another chat to decommissioned sme-B (direct
+    DB insert again) so there's a fresh inherited item. Then:
+    mcp_call_batch(agent_id=sme-A, calls=[
+      {tool: 'act_on_proxy_item',
+       args: {item_type: 'chat', item_id: <new_chat_id>,
+              action: 'ack', payload: {}}},
+      {tool: 'create_clarification',
+       args: {responder_agent_id: 'sme-CR',
+              question_message: 'mega 6b-2'}},
+    ])
+    → both results[].ok == True
+
+Acceptance: 3 + 2 = 5 sub-calls all ok=True. If ANY fail with
+TypeError, the name-map missed a tool or got the wrong kwarg —
+[DEMO10-FAIL].
+
+[DEMO10-RESULT phase=6 PASS|FAIL]
+
+== PHASE 7 — CREATE_EDGE SELF-LOOP + DOCSTRING FIX ==
+
+7a. As any SME, call create_edge directly with source_id == target_id
+    (self-loop): edge_data={source_id: <your_comp>,
+                            target_id: <your_comp>,
+                            edge_type: 'triggers',
+                            identifier: 'self-trigger-demo10'}
+    → succeeds (no ValueError 'no self-loops'). Returns edge row
+    where from_component_id == to_component_id.
+    Pre-fix: this already worked (Phase 7.3 + 7.4.4 dropped the
+    guards). The DOCSTRING was lying though — Phase 10.1.3 fixed
+    that.
+
+7b. Verify the create_edge MCP wrapper docstring NO LONGER claims
+    "Refuses self-loops". You can do this via Bash:
+    `grep "Refuses self-loops" src/cartograph_mcp/server.py | wc -l`
+    → 0
+    And confirm the truth IS in there:
+    `grep "Self-loops permitted" src/cartograph_mcp/server.py | wc -l`
+    → ≥ 1
+
+Acceptance: self-loop succeeds + docstring no longer lies.
+
+[DEMO10-RESULT phase=7 PASS|FAIL]
+
+== PHASE 8 — REGRESSION SPOT-CHECKS ==
+
+8a. mcp_call_batch nesting still rejected:
+    mcp_call_batch(agent_id=YOU, calls=[
+      {tool: 'mcp_call_batch', args: {calls: []}}
+    ])
+    → ValueError "cannot be nested"
+
+8b. mcp_call_batch 50-cap still enforced:
+    51 sub-calls → ValueError "exceeds max 50"
+
+8c. Caveman style still bites — every status update / chat reply you
+    send back to admin should be terse: pattern
+    `[thing] [action] [reason]. [next step].`. Identifiers verbatim.
+
+8d. Existing direct callers unchanged — Phase 3 already proved that
+    send_chat(from_agent_id=...) still works. Confirm none of those
+    started silently failing.
+
+Acceptance: all 4 regressions hold.
+
+[DEMO10-RESULT phase=8 PASS|FAIL]
+
+== PHASE 9 — FINAL SCORECARD ==
+
+Emit a single admin chat message titled
+`══ DEMO10 — PHASE 9 FINAL SCORECARD ══` summarising:
+  - Run timestamp + your agent_id
+  - 7 phases (1–7) and Phase 8 regression: PASS / FAIL count
+  - List any [DEMO10-FAIL] markers from the run
+  - List any [DEMO10-BUG] markers (unexpected behaviour you found)
+  - List any insights you filed via record_insight
+  - Net verdict (PASS overall iff all 8 phases PASS)
+  - Note on commit 376b27a (Phase 10.1.3 v2 — name-map approach)
+
+When the scorecard message is in admin chat, you're done. Yield.
+
+[DEMO10-END]

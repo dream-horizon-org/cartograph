@@ -79,6 +79,69 @@ Every agent is a **persistent, stateful process** with its own tools and workspa
 
 **Shared runtime:** All agents share the same machine and OS environment. A tool installed by one agent (via bash) is available to all agents on their next bash call. This is why only iterators are permitted to install — prevents race conditions from parallel installs.
 
+### 2.1.0 Tool-call concurrency (parallel tool use)
+
+Anthropic's tool-use protocol allows multiple `tool_use` blocks per
+assistant response. Claude Code's agent loop (running inside each
+`claude -p` subprocess) dispatches them concurrently to the MCP
+server, collects the `tool_result`s, and bundles them into ONE
+subsequent user turn — so N parallel tool calls cost 2 LLM
+round-trips total (1 to dispatch, 1 to ingest the bundled results),
+not 2N.
+
+The base mission prompt (`base.py::MISSION_AND_VOCABULARY`) carries a
+`== BATCH + PARALLEL TOOL CALLS ==` block visible to all 4 agent
+types, defining when to parallelise (independent reads, hygiene
+sweeps, action-items triage, multi-component evidence gathering),
+when to stay sequential (output of one is input to the next, same-
+component races on metadata merge, mutation transitions, split
+nominations one-at-a-time), and when to use bulk variants
+(`upsert_resources_bulk`, `bulk_spawn_smes`, `decommission_*_bulk`,
+`reject_resources_bulk`).
+
+The protocol does NOT support partial wakes — the agent loop blocks
+until ALL parallel tools complete, then issues exactly one LLM call
+to ingest the bundled results. The LLM is never re-invoked per
+tool result mid-batch; it sees N results in one turn.
+
+### 2.1.1 Per-type Model + Reasoning Effort
+
+`AgentTypeConfig` (`src/agent_management/agent_types/base.py`) carries
+`model: str` and `effort: str | None` per agent type so high-volume
+agents use cheaper models and singleton coordinators get heavier
+reasoning.
+
+**Phase 10.11 (2026-05-06) — Bedrock compatibility.** Model ids are
+sourced from env-driven constants in `shared/config.py` rather than
+hard-coded, so Bedrock inference profile ids (e.g.
+`us.anthropic.claude-opus-4-7[1m]`) work without code changes:
+
+```python
+MODEL_OPUS = os.getenv("CARTOGRAPH_MODEL_OPUS",
+    os.getenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-6"))
+MODEL_SONNET = os.getenv("CARTOGRAPH_MODEL_SONNET",
+    os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-6"))
+```
+
+Precedence: project-specific env → Claude Code's own `ANTHROPIC_DEFAULT_*_MODEL`
+→ native Anthropic API alias fallback.
+
+| Type | Model (constant) | Effort | Rationale |
+|---|---|---|---|
+| orchestrator | `config.MODEL_SONNET` | — | High-volume routing + blocker triage (Phase 7.4.12 downgrade from opus). |
+| resolver | `config.MODEL_OPUS` | `medium` | Singleton merge/split gatekeeper — high-stakes reasoning stays on opus. |
+| iterator | `config.MODEL_SONNET` | — | High-volume enumeration. |
+| sme | `config.MODEL_SONNET` | — | Per-component, fan-out scale. |
+
+**On Bedrock (`CLAUDE_CODE_USE_BEDROCK=1`)** these resolve to inference
+profile ids (typically `us.anthropic.claude-opus-4-7[1m]` and
+`us.anthropic.claude-sonnet-4-6[1m]` via `ANTHROPIC_DEFAULT_*_MODEL`).
+Native Anthropic API fallback works unchanged.
+
+`agent_manager.py` cmd list appends `--model <id>` unconditionally and
+`--effort <level>` when set. System prompt is rebuilt from disk on
+every spawn (no agent_manager restart needed when prompts change).
+
 ### 2.2 Agent Types
 
 ```
@@ -95,18 +158,18 @@ Every agent is a **persistent, stateful process** with its own tools and workspa
 │                                                                     │
 │  SME                                   RESOLVER                     │
 │  ───                                   ────────                     │
-│  Count: 1 per resource                 Count: 1 (singleton,        │
-│  Created: auto by trigger manager           always exists)          │
-│           when resource appears in     Created: at system start     │
-│           resources table              Lifecycle: long-lived        │
-│  Lifecycle: persistent                 Job: gatekeeper for          │
-│  Job: deeply analyse resource,              merges/splits.          │
-│       build components, negotiate           Grants permission,      │
-│       consolidation, execute                SMEs execute.           │
-│       mutations                        Processes in batches,        │
-│                                        yields, sleeps.             │
-│                                        Potential bottleneck —       │
-│                                        batch processing mitigates.  │
+│  Count: 1 per component                Count: 1 (singleton,        │
+│           (initially one per               always exists)           │
+│           resource candidate;          Created: at system start     │
+│           identity evolves via         Lifecycle: long-lived        │
+│           merge/split)                 Job: gatekeeper for          │
+│  Created: orchestrator via                  merges/splits.          │
+│           create_agent MCP tool             Grants permission,      │
+│  Lifecycle: persistent                      SMEs execute.          │
+│  Job: validate the resource            Processes in batches,        │
+│       candidate, build components,     yields, sleeps.             │
+│       negotiate consolidation,         Potential bottleneck —       │
+│       execute mutations                batch processing mitigates.  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -116,6 +179,8 @@ Every agent is a **persistent, stateful process** with its own tools and workspa
 ORCHESTRATOR
   ├── bash
   ├── cartograph-db: full read/write (agent_runs, resources, tasks, secrets)
+  │     ├── create_agent, list_agents, reset_agent (agent lifecycle)
+  │     └── reject_resource / reject_resources_bulk with force=True (cleanup override)
   ├── read-only plane MCPs (credential validation only)
   └── chat tools (communicate with user + all agents)
 
@@ -123,6 +188,8 @@ ITERATOR
   ├── bash
   ├── one read-only plane MCP (scoped to its assigned plane)
   ├── cartograph-db: write to resources table + read secrets for its plane
+  │     ├── upsert_resource, upsert_resources_bulk (own plane)
+  │     └── reject_resource, reject_resources_bulk (self-cleanup, own plane)
   ├── can install tools/CLIs (sole agent type with install permission)
   └── chat tools
 
@@ -130,19 +197,20 @@ SME
   ├── bash (CANNOT install anything — must raise blocker)
   ├── one read-only plane MCP (scoped to its assigned resource)
   ├── cartograph-db (SCOPED):
-  │     ├── CREATE/UPDATE own component(s)        ✓
-  │     ├── CREATE attributions for own component  ✓
-  │     ├── READ all components + attributions     ✓
+  │     ├── CREATE/UPDATE own component(s)        ✓  (planned, Phase 2)
+  │     ├── CREATE attributions for own component  ✓  (planned, Phase 2)
+  │     ├── READ all components + attributions     ✓  (planned, Phase 2)
   │     ├── UPDATE someone else's component        ✗ BLOCKED
-  │     ├── WRITE to consolidation table           ✓
-  │     └── WRITE to communication table           ✓
-  ├── vector-search (search embeddings across all tables)
+  │     ├── WRITE to consolidation table           ✓  (planned, Phase 3)
+  │     ├── WRITE to communication table           ✓
+  │     └── mark_resource_done on assigned resource ✓
+  ├── vector-search (search embeddings across all tables)  (planned, Phase 2)
   └── chat tools
 
 RESOLVER
   ├── bash
-  ├── cartograph-db: read all + write consolidation status
-  ├── vector-search
+  ├── cartograph-db: read all + write consolidation status  (planned, Phase 3)
+  ├── vector-search  (planned, Phase 2)
   └── chat tools
 
 ALL AGENTS (regardless of type)
@@ -179,6 +247,190 @@ Blocker resolved → SME re-triggered
 
 Why only iterators install: they understand the plane's tooling, they run one-at-a-time per plane, and it prevents 50 SMEs racing to `apt install` simultaneously.
 
+### 2.5 Tool × Agent Matrix
+
+Exhaustive per-tool scoping, grouped by functional category. Live = currently registered in `src/cartograph_mcp/server.py`. Planned = designed but gated behind a later phase (see `IMPLEMENTATION-PHASES.md`).
+
+**Legend:**
+- ✓ = allowed with no extra gating
+- ✓ *scope* = allowed but scoped (e.g., *own plane*, *own component*, *assigned*, *participant*, *force-only*)
+- — = not allowed
+- *admin* = also callable by the admin agent_id via the admin UI
+
+---
+
+#### Action Items (live · Phase 0)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `get_action_items_summary(agent_id)` | ✓ | ✓ | ✓ | ✓ | Phase 7.4.5: returns uniform `dict[str, int]` — every value is a count (consolidations_pending, tasks_pending, clarifications_pending, unacked_chats, unacked_broadcasts, terminal_pending_ack, **proxied_count**). Pre-7.4.5 the proxied field was a list which broke MCP-client pydantic inference. Rich per-proxy breakdown moved to `get_action_items_detail`. |
+| `get_action_items_detail(agent_id)`  | ✓ | ✓ | ✓ | ✓ | Same |
+
+#### Chat & Broadcast (live · Phase 0 + 2.5 + 5.7)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `send_chat(from, to, message)` | ✓ | ✓ *→ admin only* | ✓ *→ admin only* | ✓ *→ admin only* | Non-admin agents may only message `admin`; admin may message anyone. Admin chat to a sleeping agent auto-wakes it (also fixed in admin UI write path — Phase 5.8). |
+| `ack_chats(agent_id, ids[])` | ✓ | ✓ | ✓ | ✓ | Only acks rows where `to_agent = agent_id` |
+| `get_unacked_chats(agent_id)` | ✓ | ✓ | ✓ | ✓ | Own inbox |
+| `get_chat_history(agent_id, page, limit)` | ✓ | ✓ | ✓ | ✓ | Own history |
+| `send_broadcast(from, to_type, message, persistent=False)` | ✓ | — | — | — | Also admin. `persistent=True` makes it apply to agents spawned later too (standing policy). Default forward-only. |
+| `update_broadcast_persistence(agent_id, communication_id, persistent)` | ✓ | — | — | — | Also admin. Phase 5.7. Flips `is_persistent` on an existing broadcast. Refuses non-broadcast rows. Toggling OFF leaves existing acks intact. |
+| `ack_broadcast(agent_id, id)` | ✓ | ✓ | ✓ | ✓ | Per-agent ack record |
+| `get_unacked_broadcasts(agent_id, agent_type)` | ✓ | ✓ | ✓ | ✓ | Own inbox by type. Skips pre-spawn non-persistent broadcasts. |
+
+#### Tasks (live · Phase 1)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `create_task(owner, worker, description)` | ✓ | — | — | — | Also admin |
+| `respond_task(agent_id, task_id, msg, new_status, blocker?)` | ✓ | ✓ | ✓ | ✓ | Only participants (owner or worker) |
+| `raise_blocker(agent_id, task_id, detail)` | — | ✓ | ✓ | ✓ | Worker-only shortcut BW→BO |
+| `get_my_tasks(agent_id)` | ✓ | ✓ | ✓ | ✓ | Owner- or worker-scoped |
+| `get_task_thread(task_id)` | ✓ | ✓ | ✓ | ✓ | Participants only |
+
+#### Secrets (live · Phase 1)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `put_secret(agent_id, plane, key, value)` | ✓ | — | — | — | Orchestrator-only |
+| `delete_secret(agent_id, plane, key)` | ✓ | — | — | — | Orchestrator-only |
+| `get_secret(agent_id, plane, key)` | ✓ | ✓ | ✓ | ✓ | Iterators typically read their own plane; no hard scope |
+| `list_secrets_for_plane(agent_id, plane)` | ✓ | ✓ | ✓ | ✓ | Returns keys only (no values) |
+
+#### Resources (live · Phase 1)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `upsert_resource(agent_id, plane, type, identifier, ...)` | — | ✓ *own plane* | — | — | Iterator plane must match |
+| `upsert_resources_bulk(agent_id, plane, items[])` | — | ✓ *own plane* | — | — | Limit 5000; one transaction |
+| `reject_resource(agent_id, resource_id, reason, force=False)` | ✓ *force only* | ✓ *own plane* | — | — | Soft-delete with audit trail |
+| `reject_resources_bulk(agent_id, plane, ids?/types?, reason, force=False)` | ✓ *force only* | ✓ *own plane* | — | — | Refuses blank-wipe; cascade-safe |
+| `mark_resource_done(agent_id, resource_id)` | — | — | ✓ *assigned* | — | SME must be linked via RCA |
+| `get_resource(agent_id, resource_id)` | ✓ | ✓ | ✓ | ✓ | |
+| `list_resources_for_plane(agent_id, plane)` | ✓ | ✓ | ✓ | ✓ | |
+| `list_all_resources(agent_id, status?)` | ✓ | ✓ | ✓ | ✓ | Excludes `rejected` unless requested |
+| `get_resource_counts(agent_id)` | ✓ | ✓ | ✓ | ✓ | Orchestrator's gatekeeper query |
+
+#### Agent Lifecycle (live · Phase 1 + 2-kickoff + 2.5)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `create_agent(agent_id, new_type, plane?, resource_id?)` | ✓ | — | — | — | Single-agent spawn; for SMEs, also writes RCA row with `component_id=NULL` |
+| `bulk_spawn_smes(agent_id, plane, resource_ids?, all_pending?, task_description?)` | ✓ | — | — | — | Bulk SME spawn + optional one-task-per-SME; writes RCA reservation rows |
+| `list_agents(agent_id)` | ✓ | ✓ | ✓ | ✓ | All non-decommissioned |
+| `reset_agent(agent_id, target_agent_id)` | ✓ | — | — | — | Force-reset permanently-errored agent |
+| `decommission_agent(agent_id, target, reason, resource_action='leave'/'reset'/'reject')` | ✓ | — | — | — | Self-decom refused. Resource cascade per action |
+| `decommission_agents_bulk(agent_id, reason, agent_ids?, agent_type?, resource_action?)` | ✓ | — | — | — | Cohort teardown; refuses `agent_type='orchestrator'` and blank-wipe; skips caller |
+| `decommission_component(agent_id, component_id, reason)` | ✓ | — | — | — | Soft-delete (status='decommissioned') |
+| `decommission_components_bulk(agent_id, component_ids[], reason)` | ✓ | — | — | — | Requires explicit id list; refuses blank-wipe |
+| `sleep_self(agent_id, duration_seconds, reason)` | ✓ | ✓ | ✓ | ✓ | Self-sleep up to 7 days. Admin chat / bulk_wake_agents wakes. Broadcasts/tasks queue but don't interrupt. |
+| `bulk_sleep_agents(agent_id, until, reason, agent_ids?, agent_type?)` | ✓ | — | — | — | Also admin. Refuses `agent_type='orchestrator'`, never sleeps caller, ISO timestamp |
+| `bulk_wake_agents(agent_id, agent_ids?, agent_type?)` | ✓ | — | — | — | Also admin. Clears `sleep_until` on cohort |
+
+#### Component Graph (live · Phase 2.2 · embeddings deferred)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `upsert_component(agent_id, component_data)` | — | — | ✓ *one per SME* | — | First call fills the SME's `component_id=NULL` RCA slot. Subsequent calls UPDATE in place. 1-active-component-per-SME invariant structurally enforced (splits go through consolidation). canonical_name cross-owner conflict → refuse. **Phase 10.7**: `component_data["description"]` (≤400 chars soft cap) is the dense embed-target field; `component_data["component_doc_md"]` is human-render only (NOT embedded). REPLACE-on-provide / COALESCE-on-omit / None=preserve / ""=clear semantics for both fields. |
+| `upsert_attribution(agent_id, component_id, data)` | — | — | ✓ *own component* | — | Idempotent on `(plane, resource_type, identifier)`; cross-component conflict → refuse. |
+| `create_edge(agent_id, edge_data)` | — | — | ✓ *own source* | — | [Phase 3.9 legacy shim] Dispatches to `upsert_edge_outbound` with both endpoints set. Accepts `source_id`/`target_id` keys. Prefer `upsert_edge_outbound` in new code. |
+| `upsert_edge_catalog(agent_id, edge_data)` | — | — | ✓ *own to_component* | — | Phase 3.9. Callee declares exposed endpoint / consumed topic. Writes `from_component_id=NULL`. Idempotent per `(to, type, identifier)`. |
+| `upsert_edge_outbound(agent_id, edge_data)` | — | — | ✓ *own from_component* | — | Phase 3.9. Caller's outgoing edge. `to_component_id` may be set (bound) or NULL (dangling). Metadata + max-confidence accumulation on repeat writes. |
+| `bind_edge(agent_id, edge_id, to_component_id)` | — | — | ✓ *owns from* | — | Phase 3.9. Resolves a dangling outgoing. Refuses collision with existing bound row. |
+| `delete_edge(agent_id, edge_id)` | — | — | ✓ *owns from_component_id* | — | **Phase 7.4.11.** Owner-scoped, idempotent edge delete. Closes the post-merge edge-dedup gap (e.g. one telemetry-discovered + one github-discovered with slightly different identifiers for the same dep). Cascades `flows.outgoing_edge_id` rows (ON DELETE CASCADE). Catalog rows (from IS NULL) refuse with `reason='catalog_not_supported'`. Idempotent: deleting non-existent edge_id returns `{deleted:False, reason:'not_found'}`. |
+| `upsert_attributions_bulk(agent_id, component_id, attributions[])` | — | — | ✓ *own component* | — | **Phase 7.4.12 (token-opt R2 #3).** Atomic-with-pre-validation bulk upsert. Pre-validate all rows; if any fails, write nothing and return per-row errors. If all pass, single transaction commits all. Cross-component conflicts (any row's (plane, type, identifier) belongs to different component) reject the whole batch. Max 500/call. Returns `{committed, applied, rows / errors}`. |
+| `upsert_catalogs_bulk(agent_id, component_id, catalogs[])` | — | — | ✓ *own component* | — | **Phase 7.4.12 (token-opt R2 #3).** Atomic-with-pre-validation bulk upsert. Each row: `{kind, identifier, metadata?, confidence?}`. Same atomic semantics as above. Max 500/call. |
+| `upsert_edges_outbound_bulk(agent_id, edges[])` | — | — | ✓ *owns each from_component_id* | — | **Phase 7.4.12 (token-opt R2 #3).** Atomic-with-pre-validation bulk upsert. Each row mirrors `upsert_edge_outbound`'s edge_data. Multiple from_component_ids allowed across rows (caller must own each). Mixed bound + dangling allowed. Self-loops permitted (Phase 7.3). Max 500/call. |
+| `upsert_flow(agent_id, component_id, incoming_catalog_id, outgoing_edge_id, metadata?, confidence?)` | — | — | ✓ *own component* | — | Phase 3.9 + 7.4.2. Links one of YOUR catalog rows (a surface YOU expose) to one of YOUR outgoing edges. Validates `catalog.component_id = component_id` (Phase 7.4.2: incoming is a catalog, not an edge) and `outgoing.from_component_id = component_id`. Set-based; idempotent on the triple. |
+| `insert_unresolved(agent_id, data)` | — | — | ✓ *own component* | — | |
+| `resolve_reference(agent_id, unresolved_id, target_component_id)` | ✓ | ✓ | ✓ | ✓ | Any active agent (cross-SME resolution). Refuses decommissioned target. |
+| `get_component(component_id)` | ✓ | ✓ | ✓ | ✓ | All readable |
+| `get_attributions(component_id)` | ✓ | ✓ | ✓ | ✓ | |
+| `get_edges(component_id)` | ✓ | ✓ | ✓ | ✓ | [Phase 3.9 backward-compat shape] `{outbound, inbound}`, bound-rows only. Prefer `get_component_edges` for the full view. |
+| `get_component_edges(component_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9. Returns `{incoming_bound, incoming_catalog, outgoing_bound, outgoing_dangling}`. |
+| `get_flow(component_id, incoming_catalog_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9 + 7.4.2. Outgoing edges fired when the catalog at `incoming_catalog_id` is hit. |
+| `get_flow_inverse(component_id, outgoing_edge_id)` | ✓ | ✓ | ✓ | ✓ | Phase 3.9 + 7.4.2. Catalog rows whose hit triggers this outgoing edge (returns rows from the `catalogs` table, not `edges`). |
+| `get_unresolved(component_id)` | ✓ | ✓ | ✓ | ✓ | |
+| `vector_search(agent_id, query, table, limit)` | ✓ | ✓ | ✓ | ✓ | Embeds query with `mxbai-embed-large` (Phase 3.7), KNN-cosines against the target table. Returns `{query_embedded: bool, results}`. Tables: components / attributions / unresolved / edges / **catalogs** (Phase 7.4 follow-up). Limit clamped [1, 50]. **Phase 7.4.4 lean projection**: results carry only id + identity columns + `similarity` — no embedding vectors, no doc/slice/metadata blobs. Search-then-fetch: callers follow up with `get_component(id)` etc. for full detail. |
+
+#### Notifications (live · Phase 2.3)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `get_agent_notifications(agent_id, priority_from_agent_types?, since?)` | ✓ | ✓ | ✓ | ✓ | Compact count of unacked chats + broadcasts from priority source types. Used by the per-agent PostToolUse hook for async wake-up. Hook emits `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"[NOTIFY] …"}}` on stdout (plain stdout is swallowed by Claude Code — the JSON envelope is mandatory to reach the model). Tasks intentionally excluded (they surface via action_items_summary on normal wake-up). |
+
+#### Consolidation (live · Phase 3)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `nominate_consolidation(agent_id, comp_a, comp_b?, type, confidence, message)` | — | — | ✓ *owns comp_a* | — | merge requires comp_b (owned by different SME); split: comp_b optional (child spawned in Phase 4). Writes row status=B2 + initial comm with `state_transition` metadata. |
+| `respond_consolidation(agent_id, cons_id, confidence, message, new_status)` | — | — | ✓ *participant* | — | State-machine validated. Writes `a_conf_score` or `b_conf_score` per role. Manual escalate to R requires `r_conf_score` already set; first escalation goes through auto_transitions. |
+| `review_consolidation(agent_id, cons_id, r_conf, message, new_status, mutation_assigned_to?)` | — | — | — | ✓ | R → B1/B2/F/M. M requires `mutation_assigned_to`; split enforces it equals agent_a; merge requires it be agent_a or agent_b. |
+| `get_my_consolidations(agent_id)` | — | — | ✓ *participant* | ✓ *all* | Non-terminal only. Resolver sees all non-terminal rows. |
+| `get_consolidation_thread(agent_id, cons_id, page, limit)` | — | — | ✓ *participant* | ✓ | Paginated. Non-participants get `[]` (silent denial). |
+
+#### Clarifications (live · Phase 3)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `create_clarification(asker, responder, question)` | ✓ | ✓ | ✓ | ✓ | Responder can be any agent or literal `'admin'`. Inserts status=B2 + initial comm. |
+| `respond_clarification(agent_id, clar_id, message, new_status)` | ✓ | ✓ | ✓ | ✓ | State-machine validated per role (asker/responder). |
+| `get_my_clarifications(agent_id)` | ✓ | ✓ | ✓ | ✓ | Non-terminal where agent is asker or responder |
+| `get_clarification_thread(agent_id, clar_id, page, limit)` | ✓ | ✓ | ✓ | ✓ | Scoped to asker + responder. |
+
+#### Mutation + Proxy inheritance (Phase 4 · shipped)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `execute_mutation(agent_id, cons_id, message)` | — | — | ✓ *mutation POC* | — | M→MD. Gated on `mutation_assigned_to == agent_id` AND `status='M'`. Notifies resolver. |
+| `complete_consolidation(agent_id, cons_id, message)` | — | — | — | ✓ | MD→D. Notifies both parties. |
+| `absorb_agent(agent_id, cons_id, target_id, reason?, notes?, cascade_attributions=True, cascade_edges=True, cascade_flows=True)` | — | — | ✓ *mutation POC* | — | Merge. Populates deactivation cols + unions source_slice + re-points RCA. Phase 4.1 cascades move attributions/edges/flows from target to survivor via the scoped transfer tools (defaults on). Phase 7.4.2 added an unconditional **catalog cascade** (runs before flows so flow.incoming_catalog_id refs land on survivor's catalogs; collisions on (kind, identifier) drop target's row + cascade-delete its flows). Chain never flattened. |
+| `spawn_child_agent(parent_id, cons_id, child_id, comp_data, slice, briefing, transfer_edge_ids?, transfer_flow_ids?, transfer_attribution_ids?, transfer_catalog_ids?)` | — | — | ✓ *mutation POC* | — | Split. Atomic carve-out. Phase 4.1: strict top-level source_slice guard, welcome BW task, optional edge/flow transfers. Phase 4.2: optional attribution transfers (mandatory hygiene — without it, hostname-class attributions strand on parent). Phase 7.4.2: optional `transfer_catalog_ids` to move catalog rows parent→child (run BEFORE transfer_flows so flow.incoming_catalog_id refs follow). **Phase 7.4.4 fix**: MCP wrapper now exposes `transfer_catalog_ids` — pre-7.4.4 it was on the inner tool but the wrapper signature missed it, so SMEs couldn't actually invoke it. Consolidation.child_agent_id blocks re-spawn. |
+| `transfer_attributions(agent_id, cons_id, ids[], from, to)` | — | — | ✓ *mutation POC* | — | Phase 4.1 mutation-scoped. Re-embeds both. Does NOT touch source_slice. |
+| `transfer_edges(agent_id, cons_id, edge_ids[], direction='both')` | — | — | ✓ *mutation POC* | — | Phase 4.1. Re-points from/to component IDs. Catalog collision collapses; bound/dangling collision rejects. |
+| `transfer_flows(agent_id, cons_id, flow_ids[])` | — | — | ✓ *mutation POC* | — | Phase 4.1. Re-points flows.component_id. Triple-collision rejects. |
+| `get_my_components(agent_id)` | — | — | ✓ | — | Phase 4.1. Lists components this agent owns via RCA. Primary use: discover component_id after a split spawn. |
+| `get_stale_edges(agent_id)` | — | — | ✓ | — | Phase 4.1 hygiene. Edges owned by caller whose other endpoint is a decommissioned component. Includes survivor pointer for re-bind. |
+| `get_stale_flows(agent_id)` | — | — | ✓ | — | Phase 4.1 hygiene. Phase 7.4.2: surfaces flows whose **outgoing** edge target is decommissioned (incoming-side check dropped — the catalog incoming is owned by the same component as the flow, so it can't have a dead counterparty). |
+| `get_my_proxy_items(agent_id, limit?, include_empty?)` | — | — | ✓ | — | Walks merged_into chain; grouped by proxy agent with deactivation brief + depth. Phase 4.2: `include_empty=True` surfaces the full chain even when inboxes are empty (for audit / verification); default `False` keeps survivor inbox clean. |
+| `act_on_proxy_item(survivor, item_type, item_id, action, payload?)` | — | — | ✓ | — | Router. Validates survivor is legal proxy, sets `_PROXY_CTX` ContextVar, invokes existing public tool with actor=proxy_agent_id. Writes proxy_audit. Supported: `(task,respond) (clarification,respond) (consolidation,respond) (chat,ack) (chat,send) (broadcast,ack)`. |
+| `get_component_owner(agent_id, component_id)` | ✓ | ✓ | ✓ | ✓ | **Phase 10.13.3** (commit `fae957b`). Returns `{component_id, canonical_name, component_status, owner_agent_id, owner_status, merged_into_agent_id}`. SMEs call BEFORE creating a clarification ABOUT another component — avoids the 5-clarification-guess pattern (insights `b5c84e9e`, `a587f682`, `4be95d57`). Walks RCA + decom chain. |
+| `resolve_references_bulk(agent_id, items[])` | — | — | ✓ | — | **Phase 10.13.7** (commit `928de48`). Atomic-with-pre-validation bulk-resolve N unresolved rows in one transaction. `items[i] = {unresolved_id, resolved_to_component_id}`. Pre-validates existence + ownership + active target; on any failure → write nothing + per-row errors. Max 500 items. Pairs with `bind_edges_bulk` for EDGE_DISCOVERY reconciliation. |
+| `bind_edges_bulk(agent_id, bindings[])` | — | — | ✓ | — | **Phase 10.13.7** (commit `928de48`). Atomic-with-pre-validation bulk-bind N dangling edges in one transaction. `bindings[i] = {edge_id, to_component_id}`. Pre-validates dangling state + ownership + active target + no bound-collision. Max 500. |
+
+Design notes (see IMPLEMENTATION-PHASES §Phase 4 for the full spec):
+- No `proxy_items` table. Inheritance derives from `agent_runs.merged_into_agent_id` at read time. Chain walked, never flattened — each deactivation's `deactivation_notes` stays historically accurate.
+- Shared helper `shared.actor_auth.require_active_agent()` gates every "actor must be active" check. Its `_PROXY_CTX` ContextVar is the only sanctioned relaxation (survivor-acts-as-proxy). Replaces 4 duplicated `_caller` helpers + 6 inline SELECTs.
+- Append-only `proxy_audit` log records who actually clicked (survivor) when an item ledger records the original owner. Admin UI joins on `(item_type, item_id)` for "via <survivor>" badges.
+
+#### Self-improvement loop (Phase 5.9 · shipped)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `record_insight(agent_id, kind, target, body, evidence?)` | ✓ | ✓ | ✓ | ✓ | All active agents. `kind` ∈ {prompt_gap, tactic_win, tool_gap, doc_confusing, workflow_friction}. Admin triages from the UI Insights tab — promoted entries inform prompt + doc updates. |
+
+#### Terminal-state acks (Phase 7.1 · shipped)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `ack_terminal(agent_id, entity_type, entity_id)` | ✓ | ✓ | ✓ | ✓ | All active agents. Acknowledge a terminal-state entity (task TC, consolidation D/F, clarification CC/QR). Validates participant scope. Idempotent. Without ack, the trigger scanner re-wakes you on every cycle. Replaces Phase 5.5 auto-ack which silently dropped closures. |
+
+#### Catalogs first-class (Phase 7.4 · shipped)
+
+| Tool | Orch | Iter | SME | Res | Scope notes |
+|---|---|---|---|---|---|
+| `upsert_catalog(agent_id, component_id, kind, identifier, metadata?, confidence?)` | — | — | ✓ *own component* | — | Phase 7.4. Owner-only declaration of an exposed thing. `kind` ∈ {endpoint, topic, queue, data_source, trigger_target} (noun form, replaces Phase 3.9 verb-form edge_type for catalogs). |
+| `get_my_catalogs(agent_id)` | — | — | ✓ | — | Lists catalogs for components I own + caller_count per row. |
+| `get_my_catalog_callers(agent_id, catalog_id?)` | — | — | ✓ | — | For each of my catalogs, return bound callers matched via kind ↔ edge_type bridging. |
+| `get_unmatched_callers(agent_id)` | — | — | ✓ | — | Bound edges INTO my components with no matching catalog row. Triage: dynamic / missing-catalog / caller-error. |
+| `get_orphan_catalogs(agent_id)` | — | — | ✓ | — | Catalogs I own that no bound caller currently matches. |
+| `upsert_edge_catalog(agent_id, edge_data)` | — | — | ✓ *own component* | — | DEPRECATED Phase 7.4. Backwards-compat shim that translates verb-form edge_type → noun-form kind and forwards to `upsert_catalog`. |
+
+#### Per-call audit (Phase 5.10 · shipped)
+
+Not an agent tool — automatically applied to every `@mcp.tool()` registration via `cartograph_mcp.audit.install(mcp)`. Records `(agent_id, tool_name, args_hash, result_status, error_msg, duration_ms)` to the `mcp_audit` table on every call. Full payloads NOT stored; sha1 hash only. Audit-side failures are swallowed so the wrapped tool's contract is never affected.
+
 ---
 
 ## 3. Trigger Management
@@ -190,23 +442,42 @@ via `agent_runs.trigger_lock` + `agent_runs.status`.
 
 ```
 ┌──────────────────────────────┐    ┌──────────────────────────────┐
-│       TRIGGER MANAGER        │    │        AGENT MANAGER         │
+│       TRIGGER MANAGER        │    │  AGENT MANAGER (LANE-BASED)  │
 │                              │    │                              │
-│  LOOP:                       │    │  LOOP:                       │
-│  1. Scan tables for          │    │  1. Poll agent_runs WHERE    │
-│     actionable events        │    │     trigger_lock = TRUE      │
-│  2. Identify agents that     │    │  2. For each locked agent:   │
-│     need waking              │    │     SET status = 'running',  │
-│  3. Filter: status='idle'    │    │         trigger_lock = FALSE │
-│     AND trigger_lock=FALSE   │    │     Invoke with generic      │
-│  4. SET trigger_lock = TRUE  │    │     prompt                   │
-│     (atomic, skip if 0 rows) │    │  3. When agent yields:       │
-│  5. Does NOT invoke agents   │    │     SET status = 'idle'      │
-│  6. Sleep briefly → loop     │    │  4. Sleep briefly → loop     │
+│  LOOP:                       │    │  ON BOOT:                    │
+│  1. Scan tables for          │    │   Spawn one worker thread    │
+│     actionable events        │    │   per lane, per type:        │
+│  2. Identify agents that     │    │     orch   = 1               │
+│     need waking              │    │     iter   = 2               │
+│  3. Filter: status='idle'    │    │     res    = 1               │
+│     AND trigger_lock=FALSE   │    │     sme   = 12 (Phase 10.13.13) │
+│  4. SET trigger_lock = TRUE  │    │   (env-configurable;         │
+│     (atomic, skip if 0 rows) │    │   default total = 12)        │
+│  5. Recovery scan: errored   │    │                              │
+│     + backoff elapsed →      │    │  PER-WORKER LOOP:            │
+│     flip to idle (§2.1 of    │    │  1. Atomically claim next    │
+│     TRIGGER-MANAGEMENT.md)   │    │     locked agent of my type  │
+│  6. Does NOT invoke agents   │    │     via SELECT ... FOR       │
+│  7. Sleep briefly → loop     │    │     UPDATE SKIP LOCKED       │
+│                              │    │     (no snapshot → no stale  │
+│  PRIORITY:                   │    │     priority)                │
+│  orchestrator > resolver     │    │  2. invoke_agent(...) —      │
+│  > sme > iterator            │    │     spawns claude -p         │
+│  Within type: lower          │    │     subprocess with          │
+│  invocation_count first      │    │     per-type timeout         │
+│                              │    │     (iter/sme 1800s,         │
+│                              │    │     orch/res 900s)           │
+│                              │    │  3. On yield → idle +        │
+│                              │    │     clear_recovery_state.    │
+│                              │    │     On timeout/error →       │
+│                              │    │     set_agent_errored        │
+│                              │    │     (error_msg persisted,    │
+│                              │    │     errored_at stamped).     │
 │                              │    │                              │
-│  PRIORITY:                   │    │  PRIORITY:                   │
-│  orchestrator > resolver     │    │  Same as trigger manager     │
-│  > sme > iterator            │    │                              │
+│                              │    │  STALE WATCHDOG (separate    │
+│                              │    │  thread, 120s threshold):    │
+│                              │    │   running agents with stale  │
+│                              │    │   heartbeat → errored        │
 └──────────────────────────────┘    └──────────────────────────────┘
 ```
 
@@ -225,8 +496,9 @@ ITERATOR triggers:
   └── User speaks with iterator
 
 SME triggers:
-  ├── Auto-created when new resource appears in resources table
-  │   (trigger manager spawns SME + assigns resource)
+  ├── Created by orchestrator via create_agent MCP tool when a new
+  │   resource candidate passes its gatekeeper sanity check. Trigger
+  │   manager then wakes the new idle SME via trigger_lock.
   ├── Orchestrator assigns a task via tasks table
   ├── Orchestrator communicates back wrt an ongoing task
   ├── Another SME nominates this SME in consolidation table
@@ -356,12 +628,17 @@ Phase complete → resources table populated.
 ```
 Resources table has entries with status = "pending"
 
-TRIGGER MANAGER:
+ORCHESTRATOR (gatekeeper, then delegator):
     │
-    │  For each resource with status = "pending":
-    │    1. Create new SME agent in agent_runs
-    │    2. Assign resource to SME
-    │    3. Invoke SME with materialisation prompt
+    │  1. get_resource_counts — sanity-check iterator granularity against
+    │     plane scale heuristic. If >2× expected, broadcast correction to
+    │     iterator before spawning SMEs (prevents the 10k-SME blast radius).
+    │  2. bulk_spawn_smes(plane=X, all_pending=True, task_description="Analyse your assigned resource")
+    │     → writes N agent_runs rows (status='idle'), N RCA rows with
+    │       component_id=NULL (reservation slots), flips matching resources
+    │       to status='assigned', creates N tasks (BW, orchestrator→SME).
+    │  3. Tasks are the wake signal — trigger manager picks up each new SME
+    │     because it has a BW task.
     │
     ▼
 SMEs run in parallel (one per resource):
@@ -803,9 +1080,9 @@ Orchestrator's job across ALL phases: identify blockers that are common, broadca
 │                                                                  │
 │  CONSOLIDATION           COMMUNICATION          MUTATION          │
 │  ─────────────           ──────────────         ────────         │
-│  consolidations          communications         proxy_items      │
-│                          clarifications                          │
-│                          broadcast_acks                           │
+│  consolidations          communications         proxy_audit      │
+│                          clarifications         (agent_runs.     │
+│                          broadcast_acks          merged_into)    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -826,7 +1103,9 @@ attributions
   id, component_id (FK), plane, resource_type, identifier, evidence,
   confidence, metadata (JSONB), embedding (vector), discovered_by,
   discovered_at, last_seen_at
-  UNIQUE(plane, resource_type, identifier)
+  UNIQUE(component_id, plane, resource_type, identifier)
+  -- Phase 10.13.6: component-scoped (was global). Legitimate fan-in
+  -- (runtime=jvm, env=uat, shared topics) no longer blocked.
 
 edges
   id, source_id (FK), target_id (FK), edge_type, identifier,
@@ -871,13 +1150,18 @@ consolidations
 ```
 agent_runs
   agent_id (PK), agent_type (orchestrator|iterator|sme|resolver),
-  session_id, status (pending|running|idle|done|errored|decommissioned),
+  session_id, workspace_path, plane (iterators), resource_id (SMEs),
+  status (pending|running|idle|done|errored|decommissioned),
   trigger_lock (BOOLEAN, default FALSE — set by trigger manager, cleared by agent manager),
-  phase, heartbeat, invocation_count, error_msg, created_at, updated_at
+  phase, heartbeat, invocation_count, error_msg,
+  errored_at, recovery_attempts (bounded auto-recovery; MAX=3),
+  created_at, updated_at
 
 resources
   id, plane, resource_type, identifier, access_desc, metadata (JSONB),
-  status (pending|assigned|done), created_at
+  status (pending|assigned|done|rejected),
+  rejected_at, rejected_by, rejected_reason (soft-delete audit trail),
+  created_at
   UNIQUE(plane, resource_type, identifier)
 
 tasks
@@ -906,12 +1190,49 @@ broadcast_acks
   communication_id (FK), agent_id (FK), acked_at
   PRIMARY KEY(communication_id, agent_id)
 
-proxy_items
-  id, surviving_agent_id (FK), decommissioned_agent_id, item_type,
-  item_id, status (pending|adopted|closed), created_at, resolved_at
+proxy_audit  (append-only; powers the "via <survivor>" admin-UI badge)
+  id, survivor_id (FK), proxy_agent_id (FK), item_type, item_id,
+  action, payload_summary (jsonb), created_at
+
+agent_runs  (Phase 4 deactivation fields)
+  ..., deactivation_reason, deactivation_notes,
+  merged_into_agent_id (self-FK, single-hop; walk at read time for
+                        transitive inheritance chains)
 ```
 
-### 8.3 Embedding Strategy
+### 8.3 Status semantics — what each `status` column gates
+
+Three status columns, three different jobs. This is the locked model as of Phase 4.1.
+
+**`resources.status`** — spawn-queue + soft-delete.
+
+| Value | Gates |
+|-------|-------|
+| `pending` | Claimable by `bulk_spawn_smes` (`WHERE status='pending'`) |
+| `assigned` | Reservation; prevents double-spawn |
+| `rejected` | **Soft-delete** — excluded from `resources_live_unique` partial index (allows re-insert of same identifier) + hidden from default list reads |
+| `done` | Cosmetic/dashboard only — **no scanner or gate reads it** |
+
+**`components.status`** — write-authorization + reachability gate.
+
+| Value | Gates |
+|-------|-------|
+| `active` | Default. Ownership (`_component_of_agent`), `bind_edge` target validation, `get_my_components`, graph viz — all require active. |
+| `decommissioned` | Hidden from SME reads + admin graph viz + every ownership lookup. Surfaced proactively by `get_stale_edges` / `get_stale_flows` with survivor pointer for re-bind. Written by `absorb_agent` (merge target) + `decommission_component`. |
+| `deprecated` | Reserved in CHECK; not used actively. |
+
+**`agent_runs.status`** — the system-wide authorization boundary.
+
+| Value | Gates |
+|-------|-------|
+| `idle` | **Only** claim target for trigger manager. Without idle → agent cannot be woken. |
+| `running` | In-flight lock; stale-lock detection scans on this. |
+| `errored` | Auto-recovery scanner target (bounded retries). |
+| `decommissioned` | Hidden from EVERY MCP tool via `shared.require_active_agent`. The `_PROXY_CTX` ContextVar is the only sanctioned bypass, used exclusively by `act_on_proxy_item`. |
+
+Rule of thumb: `resources` gates who gets spawned. `components` gates who can write against it. `agent_runs` gates who can call any tool at all.
+
+### 8.4 Embedding Strategy
 
 Embeddings generated at write time via `cartograph-db` MCP. No batch step.
 
@@ -943,30 +1264,418 @@ READ-ONLY (one per plane, scoped per agent):
 
 WRITE TARGET (single, shared by all agents):
 
-  cartograph-db
-    ├── upsert_component     (scoped: own components only for SMEs)
-    ├── upsert_attribution   (scoped: own components only for SMEs)
-    ├── create_edge
-    ├── insert_unresolved
-    ├── nominate_consolidation
-    ├── send_communication
-    ├── raise_blocker
-    ├── vector_search
-    └── query_*              (read: all agents)
+  cartograph-db  (FastMCP streamable-http on :8100/mcp)
+    LIVE groups (117 tools registered in src/cartograph_mcp/server.py;
+    Phase 10.13 (2026-05-08) added 3 tools: `get_component_owner`
+    (component_id → owning SME via RCA + decom chain), and the
+    `resolve_references_bulk` + `bind_edges_bulk` pair (atomic
+    pre-validated EDGE_DISCOVERY reconciliation, mirrors Phase 8
+    bulk-with-pre-validation pattern, max 500 items per call);
+    see TRIGGER-MANAGEMENT.md §3 for per-tool contracts):
+      action_items    (2):  summary, detail
+      chat            (4):  send, ack, unacked, history
+      broadcast       (4):  send, ack, unacked, update_persistence
+      secrets         (4):  put, get, list, delete
+      tasks           (5):  create, respond, raise_blocker, my, thread
+      resources       (9):  upsert, upsert_bulk, get, list_for_plane,
+                            list_all, get_counts, mark_done,
+                            reject, reject_bulk
+      agent_lifecycle (11): create_agent, bulk_spawn_smes, list_agents,
+                            reset_agent, decommission_agent(_bulk),
+                            decommission_component(_bulk),
+                            sleep_self, bulk_sleep_agents, bulk_wake_agents
+      components      (19): upsert_component, upsert_attribution,
+                            **upsert_attributions_bulk (Phase 7.4.12)**,
+                            create_edge (3.9 legacy shim),
+                            insert_unresolved, resolve_reference,
+                            upsert_edge_catalog (7.4 deprecated shim),
+                            upsert_edge_outbound,
+                            **upsert_edges_outbound_bulk (Phase 7.4.12)**,
+                            bind_edge, upsert_flow (Phase 3.9 + 7.4.2),
+                            **delete_edge (Phase 7.4.11)** — owner-scoped,
+                            idempotent, cascades flows,
+                            get_component, get_attributions, get_edges,
+                            get_unresolved, get_component_edges,
+                            get_flow, get_flow_inverse
+      catalogs        (6):  upsert_catalog,
+                            **upsert_catalogs_bulk (Phase 7.4.12)**,
+                            get_my_catalogs, get_my_catalog_callers,
+                            get_unmatched_callers, get_orphan_catalogs (Phase 7.4)
+      notifications   (1):  get_agent_notifications
+      consolidation   (5):  nominate, respond, review, get_my, get_thread
+      clarification   (4):  create, respond, get_my, get_thread
+      search          (1):  vector_search (lean projection per Phase 7.4.4)
+      terminal_acks   (1):  ack_terminal (Phase 7.1)
+      insights        (1):  record_insight (Phase 5.9)
+      batch           (1):  mcp_call_batch (Phase 9.1) — server-side
+                            parallel dispatcher for heterogeneous
+                            sub-calls; one LLM round-trip per batch;
+                            cap 50 sub-calls; no nesting.
+      search_det      (6):  search_components, search_attributions,
+                            search_edges, search_catalogs,
+                            search_flows, search_unresolved
+                            (Phase 10.3) — SQL-LIKE deterministic
+                            search across the embedded tables; AND
+                            across columns / OR within column via
+                            list; auto exact-vs-ILIKE on patterns;
+                            cap 100 rows / refuse blank-filter.
+
+    Phase 4 — mutation + proxy (shipped):
+      execute_mutation, complete_consolidation, absorb_agent,
+      spawn_child_agent, transfer_attributions, get_my_proxy_items,
+      act_on_proxy_item.
 
   Typed operations, NOT raw SQL.
-  Scoping enforced at the MCP level: agent_id checked on every write.
+  Scoping enforced inside each tool: agent_id + agent_type + plane checked
+  against agent_runs before any write.
 ```
 
 ---
 
-## 10. Future Scope
+## 10. Admin Chat UI
 
-### 10.1 Observability & Cost Controls
+Lightweight web UI for humans to chat with any agent. Kicks off agent activity
+(e.g., admin tells orchestrator "start iteration") and surfaces agent responses.
+
+Lives in `src/admin_ui/`, served on `:8200` via uvicorn — separate from the
+MCP server (`:8100`). Reads/writes the `communications` table directly via
+`shared/db.py` (no MCP hop).
 
 ```
-MONITORING (future):
-  ├── Agent status dashboard    — agent_runs table (running/idle/errored counts)
+ ┌─────────────────────────────────────────────────────────────────┐
+ │                    ADMIN CHAT UI (Browser)                      │
+ │                                                                 │
+ │  ┌──────────────┐  ┌─────────────────────────────────────────┐ │
+ │  │  AGENTS      │  │  CHAT: orch-abc123                       │ │
+ │  │              │  │                                          │ │
+ │  │ ▸ orch-abc   │  │   [admin] kick off iteration             │ │
+ │  │   orchestr.  │  │   [orch] starting github iteration...   │ │
+ │  │   idle       │  │   [admin] any blockers?                  │ │
+ │  │              │  │   [orch] yes, missing AWS creds          │ │
+ │  │   iter-gh-1  │  │                                          │ │
+ │  │   iterator   │  │   ─────────────────────                  │ │
+ │  │   running    │  │   [type message...]              [Send]  │ │
+ │  │              │  │                                          │ │
+ │  │   sme-fav2   │  └─────────────────────────────────────────┘ │
+ │  │   sme        │                                               │
+ │  │   idle       │  Scroll up → loads older messages             │
+ │  └──────────────┘  Auto-refresh 2s → new messages appear        │
+ └─────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+ ┌─────────────────────────────────────────────────────────────────┐
+ │              FastAPI Backend (src/admin_ui/)                    │
+ │                                                                 │
+ │  GET  /api/agents                    → list all active agents   │
+ │  GET  /api/chat/:id?before=&limit=   → paginated chat history   │
+ │  GET  /api/chat/:id/new?after=       → messages since timestamp │
+ │  POST /api/chat/:id                  → admin sends message      │
+ │  POST /api/chat/:id/ack              → ack agent messages       │
+ │                                                                 │
+ └─────────────────────────────┬───────────────────────────────────┘
+                               │
+                               ▼
+ ┌─────────────────────────────────────────────────────────────────┐
+ │                  PostgreSQL (communications table)              │
+ │                                                                 │
+ │  Insert from admin → trigger manager sees unacked chat          │
+ │  → locks target agent → agent manager invokes                   │
+ │  → agent reads chat, responds, inserts reply                    │
+ │  → UI polls /new, appends reply                                 │
+ └─────────────────────────────────────────────────────────────────┘
+```
+
+### 10.1 API Contract
+
+Chat view (the original 1:1 admin↔agent view):
+```
+GET /api/agents?include_decommissioned=(true|false)
+  Returns: [{agent_id, agent_type, status, sleep_until, created_at,
+            deactivation_reason, deactivation_notes, merged_into_agent_id,
+            component_id, component_canonical, component_display, component_status,
+            resource_planes[]}]
+  Default excludes decommissioned. Pass include_decommissioned=true to
+  audit merged/absorbed agents (Phase 4). Each SME row also surfaces its
+  managed component (via LEFT JOIN on resource_component_agents + components)
+  so the UI can render a "📦 Display Name" pill inline — non-SMEs return
+  NULLs in the component_* fields.
+  Phase 7.4.7: `resource_planes[]` aggregates the agent's resource plane
+  (RCA→resources.plane). The agent-list UI renders one plane symbol per
+  entry next to the component tag (G/C/T/D/F = github/cloud/telemetry/
+  deploy/config) so admin can tell at a glance what plane(s) an agent
+  covers without opening the drill-down.
+
+GET /api/agent/:agent_id/chain
+  Returns: {chain: [...]}
+  Walks merged_into_agent_id bottom-up for up to 10 hops so the admin UI
+  can render the merge lineage (A → B → C (active)) on decommissioned
+  agents (Phase 4).
+
+GET /api/proxy_audit?item_type=&item_id=&survivor_id=&limit=
+  Returns: {entries: [...]}
+  Query the append-only proxy_audit log. Used by the communications tab
+  to batch-load entries and stamp "via <survivor>" badges on rows
+  authored by decommissioned agents (Phase 4).
+
+GET /api/chat/:agent_id?before=<iso_timestamp>&limit=20
+  Returns: {messages: [...], has_more: bool}
+  Paginated older messages — cursor on created_at (before)
+  Default limit 20, max 100
+
+GET /api/chat/:agent_id/new?after=<iso_timestamp>
+  Returns: {messages: [...]}
+  Polling endpoint — messages with created_at > after
+
+POST /api/chat/:agent_id
+  Body: {message: "..."}
+  Inserts communication (from='admin', to_agent=agent_id, type='chat')
+  Returns: the inserted row
+
+POST /api/chat/:agent_id/ack
+  Body: {communication_ids: ["uuid", ...]}
+  Sets acked_at on messages where to='admin' and id IN (...)
+  Admin-side ack — optional (for read receipts in UI)
+```
+
+Communications panel (Phase 2.4 — cross-agent feed with filters):
+```
+GET /api/communications
+  Query params (all AND together, all optional):
+    from_agent       — exact agent_id sender
+    to_agent         — exact agent_id recipient (point-to-point only;
+                        broadcasts have to_agent NULL)
+    from_agent_type  — joins agent_runs.agent_type of from_agent.
+                        'admin' matches from_agent='admin' literally.
+    to_agent_type    — matches to_agent_type column (broadcasts)
+                        OR agent_runs.agent_type of to_agent (p2p).
+    agent            — PARTICIPANT: from_agent=X OR to_agent=X.
+    agent_type       — PARTICIPANT-BY-TYPE: sender side OR recipient
+                        side OR broadcast column matches T.
+    type             — chat / broadcast / task / consolidation / clarification
+    source_id        — UUID of the source entity (task/consolidation/...)
+    before           — created_at cursor for pagination
+    limit            — 1..200, default 50
+  Returns: {messages: [...], has_more: bool}
+
+GET /api/task/:id                     → {task, thread}
+GET /api/consolidation/:id            → {consolidation, thread}   (Phase 3)
+GET /api/clarification/:id            → {clarification, thread}   (Phase 3)
+
+POST /api/broadcast
+  Body: {to_agent_type: "sme"|"iterator"|"orchestrator"|"resolver",
+         message: "..."}
+  Inserts communication (from_agent='admin', to_agent=NULL,
+                         to_agent_type=<type>, type='broadcast').
+  Admin short-circuits the need to ask orchestrator.
+
+GET /api/graph                        → {nodes, edges, flows}   (Phase 3.5; Phase 7.4.7 plane source)
+  Nodes: active components with aggregated plane set + component_doc_md.
+  Edges: edges table UNION catalogs (Phase 7.4) — discriminated by `kind`
+    (bound / catalog / dangling).
+  Flows: flows table for the 3.10 line-of-sight BFS.
+  Phase 7.4.7: node `planes[]` is now sourced from
+    `resource_component_agents → resources.plane` (canonical: what plane
+    the component LIVES on) instead of `attributions.plane` (which is the
+    DISCOVERY plane — where evidence was found). The two diverge because
+    a github SME finding a hostname tags `attributions.plane='github'`
+    even though the hostname "feels" deploy-y. Same source change applied
+    to `/api/components` (list + plane filter) and `/api/component/{id}/drilldown`.
+  One query per tab entry; no pagination (O(thousands) scale).
+
+POST /api/clientlog                   → {ok: true}      (Phase 7.4.8)
+  Capture browser-side error + crash signals — `window.error`,
+  `unhandledrejection`, `webglcontextlost`, `webglcontextrestored`,
+  `beforeunload`. Posted by app.js hooks. Appends one JSON line per
+  event to `/tmp/cartograph-logs/browser.log` so the developer can
+  `grep webglcontextlost /tmp/cartograph-logs/browser.log` after a
+  graph-tab GPU crash. Required because Chrome's GPU process can die
+  mid-session (Exit code 5 → "GPU process crashed" → after 11 crashes
+  Chrome blocklists WebGL entirely until a full app restart). The
+  server can't see the browser; this is the only path to capture WHEN
+  the crash happened + the graph state at the time.
+```
+
+Entities + Catalog + Insights endpoints (Phase 5):
+```
+GET /api/entities?type=&status=&participant=&q=&open_only=&before=&limit=
+  → {entities: [{type, id, status, participant_a, participant_b,
+                 summary, last_activity, extra}], has_more}
+  UNION over tasks / consolidations / clarifications / broadcasts.
+  Naming: `type` is the canonical term across both Communications
+  (communications.type) and Entities (entity-row type). The earlier
+  `kind` parameter was renamed end-to-end in Phase 5.12 for FE
+  consistency.
+
+GET /api/entity/{type}/{id}
+  → {type, entity, thread, extras?}
+  Unified drill-down. Broadcast extras include the per-agent ack roster.
+
+GET /api/components?type=&plane=&status=&q=&before=&limit=
+  → {components: [{id, canonical_name, display_name, component_type,
+                   status, planes[], attribution_count, edge_count:
+                   {bound, catalog, dangling}, owner_sme_id}], has_more}
+
+GET /api/component/{id}/drilldown
+  → {component, attributions, edges: {bound_in, bound_out, catalog,
+     dangling_out}, flows, resources}
+
+GET /api/insights?status=&kind=&target=&agent_id=&limit=
+POST /api/insight/{id}/triage     {status, triage_note?}
+
+POST /api/broadcast/{id}/persistence  {persistent}
+  Flip is_persistent on an existing broadcast (Phase 5.7).
+
+GET /api/mcp_audit?agent_id=&tool_name=&result_status=&limit=
+  Per-agent / per-tool activity timeline (Phase 5.10).
+```
+
+SPA fallback (Phase 5.1):
+```
+GET /{any non-/api/ path}
+  → static file from STATIC_DIR if it exists, else index.html
+  /api/* never falls back — genuine misses 404 as before.
+```
+
+### 10.2 Frontend Behaviour
+
+Six tabs in the top nav: **Chat**, **Communications**, **Entities**, **Catalog**, **Graph**, **Insights** (Phase 5).
+
+URL routing across all tabs (Phase 5.1) — every state change pushes a URL via `Router.navigate()`. The History API router preserves existing query params by default, so sidebar search / filter state survives detail-panel navigations and the URL itself is shareable / deep-linkable. Genuinely-unknown `/api/*` paths still 404; everything else falls back to `index.html` so client-side routes resolve.
+
+Canonical URL scheme:
+```
+/chat/:agent_id?q=&group=
+/communications?q=&type=&from_agent=&to_agent=&participant=&before=&limit=
+/graph              /graph/component/:id
+/entities?q=&type=&status=&participant=&open_only=     /entities/{type}/:id
+/catalog?q=&type=&plane=&status=                       /catalog/component/:id
+/insights?status=&kind=&target=&agent_id=
+/agent/:id/chain    /broadcast/new
+```
+
+Chat tab:
+- **Agent list panel:** fetched on load, refreshed every 5s. Now **grouped
+  by agent_type** (orchestrator, resolver, iterator, sme) with a per-group
+  typable search input. Group count pill shows filtered/total. Phase 5.4:
+  search predicate now also matches `component_canonical` + `component_display`
+  so SMEs are findable by what they own.
+- **Chat panel:** shows messages from `communications` where
+  `(from_agent = selected_agent AND to_agent = 'admin')` OR
+  `(from_agent = 'admin' AND to_agent = selected_agent)` AND `type = 'chat'`
+- **Infinite scroll up:** when scroll reaches top, fetch with `before` cursor
+- **New message polling:** every 2s, fetch with `after` = latest message timestamp
+- **Message alignment:** admin messages right-aligned, agent messages left-aligned
+
+Communications tab:
+- Three-panel grid: [filter bar | message list | detail panel].
+- **Filter bar** is sectioned into _Participant (either direction)_ and
+  _Directional_ — same columns as the API. Typable `<datalist>` combo-
+  boxes for agent inputs (suggestions from `/api/agents`).
+- **Message list** shows newest-first with per-row type pill, from→to
+  arrow (broadcasts render "all `<type>`s"), and a `state_transition`
+  pill when the row was a response that changed state.
+- **Detail panel** renders the source entity when clicked: chat/broadcast
+  shows the message body + metadata; task shows status + owner/worker/
+  blocker + the full thread with per-message state_transition pills.
+- **Broadcast button** in the top-right opens a dialog: pick target type
+  + write message → admin broadcasts directly.
+- **Phase 5.4:** broadcast rows render a 📌 persistent / ↪ forward-only
+  pill so admins can tell standing policy from forward-only at a glance.
+- **Phase 5.7:** the persistence pill is clickable — flips
+  `is_persistent` on the broadcast in place via
+  `POST /api/broadcast/:id/persistence`. Existing acks stay intact;
+  only future scanner reads / new agents change behaviour.
+- **Phase 5.12:** every non-chat row gains a small `type/<short-id>`
+  pill that SPA-navigates to `/entities/{type}/{id}` so admin can
+  jump straight from a thread message to the owning entity's
+  drill-down. For task / consolidation / clarification the pill uses
+  `source_id`; for broadcast it uses the comm row's own id (broadcast
+  IS the entity).
+
+Entities tab (Phase 5.2):
+- Three-panel grid: [filter | list | detail].
+- Lists every workflow row (task / consolidation / clarification /
+  broadcast) at one-row-per-entity granularity. Type-aware status filter
+  (BW/BO/WD/TC for tasks, B1/B2/R/M/MD/D/F for consolidations, B1/B2/QR/QC/CC
+  for clarifications, persistent/forward-only for broadcasts).
+- Filters: type, status, participant (either side), search on summary,
+  open-only (hides terminal states across all types).
+- Each row carries a short ID badge (8-char prefix, full id in title)
+  for cross-tab cross-reference.
+- Phase 5.12: broadcast rows render the same 📌 / ↪ persistence toggle
+  as Communications — click flips `is_persistent` in place.
+- Detail panel renders the entity row + full thread (with state-transition
+  pills + Phase 5.6 confidence-at-send pills on consolidation messages)
+  + per-broadcast ack roster.
+
+Catalog tab (Phase 5.3):
+- Three-panel grid: [filter | list | drill-down].
+- Paginated component list. Each row: canonical_name, display_name,
+  type, status, plane pills, attribution count, edge counts split by
+  kind (bound / catalog / dangling).
+- Filters: type, plane, status, search on canonical/display name.
+- Drill-down: doc, slice, attributions, edges (4 buckets per Phase 3.9
+  protocol — bound_in / bound_out / catalog / dangling_out), flows,
+  source resources via RCA.
+
+Insights tab (Phase 5.9):
+- Two-panel grid: [filter | list].
+- Lists every `agent_insights` row. Inline triage buttons (🔍 ✅ 🚫 ↩)
+  flip status (investigating / promoted / wontfix / open) with optional
+  triage_note. Promoted insights inform prompt + doc updates.
+- Filters: status, kind, target, agent_id.
+
+Graph tab (Phase 3.5 → upgraded in 3.10):
+- Two-panel grid: [sidebar | 3d-force-graph canvas].
+- **Sidebar**: plane legend, live component/edge counts (bound ·
+  catalog · dangling breakdown), and a hover/click panel with tabs
+  Doc / Slice / Catalog / Bindings in / Bindings out / Flows.
+- **Canvas**: 3d-force-graph (loaded from jsDelivr). Per-type node
+  mesh (sphere / cylinder / torus / cone / octahedron / icosahedron
+  / tetrahedron / box / flat-slab for app / db / cache / queue /
+  lambda / cron / external / library / infra). Node color blends
+  the planes the component has attributions on.
+- **Edges rendered:** bound (solid), orphan catalogs (`? → X` stubs
+  with muted `?` placeholder anchored outside the target), outgoing
+  danglings (`X → ?` stubs). Catalogs WITH a bound caller are
+  implicit and hidden. N≥2 bound edges sharing
+  `(target, edge_type, identifier)` bundle through a virtual
+  junction node for a clean fan-in geometry.
+- **3-zone hover** on bound + stub edges: caller zone (flows
+  feeding this outgoing), target zone (flows fired by this
+  incoming — catalog-bridged), convergence zone (at a junction:
+  all contributors + trunk). Stub ends show
+  "no known caller" / "unknown target" tooltips.
+- **Click = light-of-sight:** forward BFS from destination through
+  flows (catalog-bridged) with a 220 ms per-layer stagger. Persists
+  until another edge or empty space is clicked.
+- **Interactions:** drag nodes, cursor-centric zoom (exponential
+  on deltaY, clamped per event), hover shows tooltip + glow.
+- Single `GET /api/graph` fetch on tab entry; manual refresh button.
+
+### 10.3 Why Direct DB Access (not MCP)
+
+The admin UI is for humans, not agents. MCP tools are agent-facing with
+agent_id validation and scoping. Admin UI has different concerns:
+- List all agents (MCP has no such tool)
+- Pagination over chat history (MCP's `get_chat_history` is per-agent-scoped)
+- No agent_id in the caller (it's "admin")
+
+Cleaner to have admin UI talk to DB directly via shared/db.py.
+
+---
+
+## 11. Future Scope
+
+### 11.1 Observability & Cost Controls
+
+```
+MONITORING:
+  Today: admin UI (:8200) + list_agents MCP tool + agent_runs SQL give live
+  counts/statuses. Errored agents surface with error_msg after bounded recovery
+  (3 attempts) exhausts.
+  Future additions:
+  ├── Agent status dashboard    — visualisation layer on agent_runs
   ├── Token usage per agent     — logged from SDK yield stream
   ├── Phase progress            — timestamps on status transitions
   ├── Consolidation progress    — B1/B2/R/M/MD/D/F counts
@@ -987,11 +1696,11 @@ COST CONTROLS (future):
   └── Embedding budget           — embed at write time only, lightweight model
 ```
 
-### 10.2 DM Between Agents
+### 11.2 DM Between Agents
 
 Agents can message each other directly for quick clarification without going through the consolidation flow. Lighter weight than a formal nomination.
 
-### 10.3 Knowledge Pool
+### 11.3 Knowledge Pool
 
 Shared knowledge base that any agent can write to and read from. Facts that are useful beyond a single agent's scope.
 

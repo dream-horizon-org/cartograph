@@ -1,10 +1,13 @@
 cartograph-db:
-  url: http://localhost:3002
-github-reader:
-  url: http://localhost:3001
-cloud-reader:
-  url: http://localhost:3003
-telemetry-reader:
-  url: http://localhost:3004
-config-reader:
-  url: http://localhost:3005
+  url: http://localhost:8100
+last9-reader:
+  url: http://127.0.0.1:8101/mcp
+# Plane-specific read-only MCPs — not yet implemented (Phase 4+)
+# github-reader:
+#   url: http://localhost:3001
+# cloud-reader:
+#   url: http://localhost:3003
+# telemetry-reader:
+#   url: http://localhost:3004
+# config-reader:
+#   url: http://localhost:3005
