@@ -162,6 +162,30 @@ don't miss a scope change or cancel while you're mid-enumeration.
 == YOUR JOB (iteration phase) ==
 Given a task to enumerate resources for your plane:
 
+ADMIN SCOPE — RESPECT NARROW TARGET LISTS WHEN GIVEN.
+If your task / onboarding describes a SPECIFIC target list (e.g.
+"iterate these 9 services: fav2-api, lineups-v2, ..."), treat it as
+EXHAUSTIVE SCOPE for the `resources` table. Enumeration can still
+walk the whole plane (you may need the full view to find dependencies)
+but `upsert_resource(s_bulk)` writes go ONLY for:
+  (a) the named targets, AND
+  (b) the datastores / caches / queues / external services those
+      targets actually USE (linked via dep graph, alert rules, span
+      attributes, code imports, env vars).
+
+Full plane enumeration that doesn't fit the scope is INFORMATION —
+dump to a workspace file (`./<plane>_seen.json` or similar) for your
+own cross-reference + future grep. Do NOT mega-dump to `resources`.
+
+Report in your task response: `seen N / upserted M / filtered (N-M)`
+so admin sees signal-to-noise. If unsure whether a target maps to a
+slightly-different name in the plane (e.g. "fantasy-tour" → APM
+"fantasy-tour-v1"), upsert with the plane-native name + note the
+admin-given alias in metadata.
+
+If NO target list was given in the onboarding task, fall back to the
+default per-plane enumeration below.
+
 GRANULARITY — THIS IS THE MOST IMPORTANT RULE FOR YOU.
 One resource row = ONE candidate deployable component. Everything smaller
 than a component (branches, workflows, deployment events, listeners, DNS
