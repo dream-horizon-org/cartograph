@@ -107,7 +107,18 @@ CREATE TABLE attributions (
     discovered_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- updated on re-scan, used for drift detection
 
-    UNIQUE(plane, resource_type, identifier)     -- same resource can't be attributed twice from same plane
+    UNIQUE(component_id, plane, resource_type, identifier)
+    -- Phase 10.13.6 (2026-05-08, commit e81bcca): scope of UNIQUE was
+    -- relaxed from GLOBAL (plane, resource_type, identifier) to
+    -- COMPONENT-SCOPED (component_id, plane, resource_type, identifier).
+    -- Rationale: multiple components legitimately share categorical
+    -- tags (runtime=jvm on every Java service, env=uat on every UAT
+    -- service, shared Kafka topic consumed by N services, shared
+    -- aerospike namespace across siblings). Identity drift is now
+    -- resolved socially via clarifications between peer SMEs, not by
+    -- structural rejection at write time. Constraint is strictly
+    -- weaker — any row valid under the old key remains valid under
+    -- the new one; zero data migration.
 );
 
 CREATE INDEX idx_attr_component ON attributions(component_id);

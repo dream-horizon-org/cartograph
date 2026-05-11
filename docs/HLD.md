@@ -395,6 +395,9 @@ Exhaustive per-tool scoping, grouped by functional category. Live = currently re
 | `get_stale_flows(agent_id)` | — | — | ✓ | — | Phase 4.1 hygiene. Phase 7.4.2: surfaces flows whose **outgoing** edge target is decommissioned (incoming-side check dropped — the catalog incoming is owned by the same component as the flow, so it can't have a dead counterparty). |
 | `get_my_proxy_items(agent_id, limit?, include_empty?)` | — | — | ✓ | — | Walks merged_into chain; grouped by proxy agent with deactivation brief + depth. Phase 4.2: `include_empty=True` surfaces the full chain even when inboxes are empty (for audit / verification); default `False` keeps survivor inbox clean. |
 | `act_on_proxy_item(survivor, item_type, item_id, action, payload?)` | — | — | ✓ | — | Router. Validates survivor is legal proxy, sets `_PROXY_CTX` ContextVar, invokes existing public tool with actor=proxy_agent_id. Writes proxy_audit. Supported: `(task,respond) (clarification,respond) (consolidation,respond) (chat,ack) (chat,send) (broadcast,ack)`. |
+| `get_component_owner(agent_id, component_id)` | ✓ | ✓ | ✓ | ✓ | **Phase 10.13.3** (commit `fae957b`). Returns `{component_id, canonical_name, component_status, owner_agent_id, owner_status, merged_into_agent_id}`. SMEs call BEFORE creating a clarification ABOUT another component — avoids the 5-clarification-guess pattern (insights `b5c84e9e`, `a587f682`, `4be95d57`). Walks RCA + decom chain. |
+| `resolve_references_bulk(agent_id, items[])` | — | — | ✓ | — | **Phase 10.13.7** (commit `928de48`). Atomic-with-pre-validation bulk-resolve N unresolved rows in one transaction. `items[i] = {unresolved_id, resolved_to_component_id}`. Pre-validates existence + ownership + active target; on any failure → write nothing + per-row errors. Max 500 items. Pairs with `bind_edges_bulk` for EDGE_DISCOVERY reconciliation. |
+| `bind_edges_bulk(agent_id, bindings[])` | — | — | ✓ | — | **Phase 10.13.7** (commit `928de48`). Atomic-with-pre-validation bulk-bind N dangling edges in one transaction. `bindings[i] = {edge_id, to_component_id}`. Pre-validates dangling state + ownership + active target + no bound-collision. Max 500. |
 
 Design notes (see IMPLEMENTATION-PHASES §Phase 4 for the full spec):
 - No `proxy_items` table. Inheritance derives from `agent_runs.merged_into_agent_id` at read time. Chain walked, never flattened — each deactivation's `deactivation_notes` stays historically accurate.
@@ -1100,7 +1103,9 @@ attributions
   id, component_id (FK), plane, resource_type, identifier, evidence,
   confidence, metadata (JSONB), embedding (vector), discovered_by,
   discovered_at, last_seen_at
-  UNIQUE(plane, resource_type, identifier)
+  UNIQUE(component_id, plane, resource_type, identifier)
+  -- Phase 10.13.6: component-scoped (was global). Legitimate fan-in
+  -- (runtime=jvm, env=uat, shared topics) no longer blocked.
 
 edges
   id, source_id (FK), target_id (FK), edge_type, identifier,
@@ -1260,7 +1265,12 @@ READ-ONLY (one per plane, scoped per agent):
 WRITE TARGET (single, shared by all agents):
 
   cartograph-db  (FastMCP streamable-http on :8100/mcp)
-    LIVE groups (114 tools registered in src/cartograph_mcp/server.py;
+    LIVE groups (117 tools registered in src/cartograph_mcp/server.py;
+    Phase 10.13 (2026-05-08) added 3 tools: `get_component_owner`
+    (component_id → owning SME via RCA + decom chain), and the
+    `resolve_references_bulk` + `bind_edges_bulk` pair (atomic
+    pre-validated EDGE_DISCOVERY reconciliation, mirrors Phase 8
+    bulk-with-pre-validation pattern, max 500 items per call);
     see TRIGGER-MANAGEMENT.md §3 for per-tool contracts):
       action_items    (2):  summary, detail
       chat            (4):  send, ack, unacked, history

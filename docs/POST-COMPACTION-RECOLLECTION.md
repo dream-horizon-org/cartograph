@@ -87,10 +87,10 @@ Run cost: **$86.29 total** ($62.99 SME, $15.68 orch, $6.19 res, $1.43 iter). 2,3
 
 - **Working dir:** `/Users/venkata.manohar/release-agent/docs/service-dependency/cartograph`
 - **Active branch:** `feat/trigger-manager-cartograh-mcp`
-- **HEAD:** `b79bafc` (docs: sync for Phase 10.12). After this doc-sync commit lands, HEAD advances to the new sync commit.
-- **Runtime:** AWS Bedrock (`CLAUDE_CODE_USE_BEDROCK=1`); models resolve via `ANTHROPIC_DEFAULT_{OPUS,SONNET}_MODEL` (opus-4-7[1m] / sonnet-4-6[1m]).
-- **Live DB state:** in-progress 3rd real-data run — 36 agents, 32 components, 26 resources, 291 flows, 56 OPEN insights.
-- **Uncommitted:** `src/mcp_servers.yaml` has `last9-reader` addition (127.0.0.1:8101/mcp) — pending decision on committed vs local override.
+- **HEAD:** `541ecc3` (docs: recall date + HEAD bump for post-compact resume). Phase 10.13 SHIPPED across 9 sub-commits ending at `5cdc3e7`. After the next doc-sync commit lands (Phase 10.13 propagation to HLD/SCHEMA/TRIGGER-MGMT/AGENT-PROMPTS), HEAD advances to the new sync commit.
+- **Runtime:** AWS Bedrock (`CARTOGRAPH_AGENT_SETTINGS_PATH` toggle — see §2). Token rotated 2026-05-11; orch liveness verified post-rotation.
+- **Live DB state (pre-wipe):** in-progress 3rd real-data run — 28 idle agents + 8 decom, 32 components, 26 resources, 291 flows, 56 OPEN insights. **About to be wiped for the 4th real-data attempt** (snapshot taken; workspaces backed up to `src/workspaces.bak.pre-realdata4.<ts>/`).
+- **Uncommitted:** none. `src/mcp_servers.yaml`'s `last9-reader` entry was promoted to checked-in earlier.
 
 Recent commits, newest first:
 ```
@@ -649,8 +649,8 @@ Pass if all 5 renamed tools work both direct + in batch.
 
 ## 15. Re-hydration checklist (do in order post-compaction)
 
-1. **`git log --oneline -25`** — confirm `e1574bb` is HEAD on `feat/trigger-manager-cartograh-mcp`.
-2. **`grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`** — should show `114 tools`. If not, MCP server isn't running; restart per §2.
+1. **`git log --oneline -25`** — confirm Phase 10.13 sub-commits (`6af36e0` → `5cdc3e7`) are on `feat/trigger-manager-cartograh-mcp`.
+2. **`grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1`** — should show `117 tools` (Phase 10.13 added `get_component_owner`, `resolve_references_bulk`, `bind_edges_bulk`). If not, MCP server isn't running; restart per §2.
 3. **Read this doc fully.**
 4. **Read the 7 canonical docs** (HLD / SCHEMA / TRIGGER-MANAGEMENT / AGENT-PROMPTS / IMPLEMENTATION-PHASES / ONE-PAGER / PROMPT-ENHANCEMENTS). User will tell you if they want a particular ordering.
 5. **Check the 3 memory files** at `~/.claude/projects/-Users-venkata-manohar-release-agent-docs-service-dependency/memory/` (auto-loaded).
