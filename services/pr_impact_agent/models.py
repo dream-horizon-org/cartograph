@@ -93,6 +93,17 @@ class NewEndpoint(BaseModel):
     evidence: Optional[str] = None
 
 
+class LlmUsage(BaseModel):
+    model: Optional[str] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cache_creation_input_tokens: Optional[int] = None
+    cache_read_input_tokens: Optional[int] = None
+    total_cost_usd: Optional[float] = None
+    duration_ms: Optional[int] = None
+    num_turns: Optional[int] = None
+
+
 class CodeGraphHandler(BaseModel):
     qualified_name: str
     name: str
@@ -132,5 +143,6 @@ class AnalyzeChangesResponse(BaseModel):
     unresolved_new_dependencies: list[OutboundCallChange] = Field(default_factory=list)
     downstream: list[ComponentNode] = Field(default_factory=list)
     code_graph_evidence: Optional[CodeGraphEvidence] = None
+    llm_usage: Optional[LlmUsage] = None
     warnings: list[str] = Field(default_factory=list)
     phase: Literal["3"] = "3"

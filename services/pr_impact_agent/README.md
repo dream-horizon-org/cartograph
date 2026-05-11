@@ -144,7 +144,11 @@ The two are complementary. Pre-computing the deterministic part lets us hand Cla
 | `CARTOGRAPH_DB_NAME` | `cartograph` | |
 | `CARTOGRAPH_DB_USER` | `cartograph` | |
 | `CARTOGRAPH_DB_PASSWORD` | `cartograph` | |
-| `PR_IMPACT_CLAUDE_MODEL` | `claude-sonnet-4-6` | |
+| `PR_IMPACT_CLAUDE_MODEL` | (unset) | Hard override — forces ALL calls to one model. Leave unset for auto-selection. |
+| `PR_IMPACT_CLAUDE_MODEL_SMALL` | `claude-haiku-4-5-20251001` | Used when ≤ `PR_IMPACT_SMALL_PR_FILES` files AND ≤ `PR_IMPACT_SMALL_PR_DIFF_CHARS` chars |
+| `PR_IMPACT_CLAUDE_MODEL_LARGE` | `claude-sonnet-4-6` | Used otherwise |
+| `PR_IMPACT_SMALL_PR_FILES` | `0` (disabled) | Set both this and the diff-chars threshold to non-zero values to opt in to Haiku auto-selection for small PRs. Disabled by default because Haiku 4.5 sometimes ignores the "JSON-only" output instruction. |
+| `PR_IMPACT_SMALL_PR_DIFF_CHARS` | `0` (disabled) | Threshold for "small" PR (diff text size, post-filter). |
 | `PR_IMPACT_CLAUDE_TIMEOUT` | `600` | Subprocess timeout (s) |
 | `PR_IMPACT_CLAUDE_MAX_TURNS` | `20` | Bound on Claude tool-use turns |
 | `PR_IMPACT_GIT_TIMEOUT` | `180` | Clone timeout (s) |
@@ -186,12 +190,12 @@ The two are complementary. Pre-computing the deterministic part lets us hand Cla
 2. **codebase-memory-mcp is pre-1.0.** Pinned to `v0.6.1`. Schema drift on upgrade would degrade us to LLM-only mode (we have a startup schema check).
 3. **GitHub PAT briefly appears in `ps`** during clone subprocess. Fine for local-dev; production should use a git credential helper.
 4. **No concurrent PR processing.** One PR at a time per process.
-5. **No prompt caching.** Each Claude call resends the system prompt + components catalog. Switching from `claude -p` CLI to the Anthropic SDK directly with prompt caching would meaningfully reduce repeat-call latency and cost.
+5. **Output verbosity dominates cost, not input.** Prompt caching is already on automatically via `claude -p` (verified: ~75% input-token savings on warm calls within the cache window). Most billing now comes from `output_tokens` — Claude's rationale + resolution candidates can balloon the response. Capping output via prompt instructions is a next-step lever. Haiku 4.5 was tried as a small-PR optimisation but is unreliable here (sometimes outputs prose instead of JSON, sometimes ignores the "trust the pre-analysis" guidance), so auto-Haiku is **disabled by default**. Opt back in with `PR_IMPACT_SMALL_PR_FILES`/`PR_IMPACT_SMALL_PR_DIFF_CHARS` env vars if you want to retry on a different workload.
 6. **Resolution is read-only.** This service never mutates cartograph's data. New components introduced by a PR are surfaced as `unresolved_new_dependencies` for the operator to onboard separately.
 
 ## Possible next steps
 
-- Anthropic SDK + prompt caching — biggest LLM-side win for repeat traffic.
+- Cap output verbosity via system prompt + use Haiku 4.5 for small PRs.
 - Concurrent PR processing with disk-cache eviction by `head_sha`.
 - GitHub webhook → background pre-clone, so first call latency drops to LLM-only.
 - Bundle the codebase-memory-mcp pre-pass into cartograph's iterator pipeline so the per-handler index is materialised at indexing time, not re-computed per PR.

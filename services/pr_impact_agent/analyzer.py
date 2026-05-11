@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from .claude_client import ClaudeClassificationError, classify_diff
+from .claude_client import ClaudeClassificationError, classify_diff, pick_model
 from .db import cursor
 from .git_client import GitCloneError, cleanup_workspace, shallow_clone
 from .github_client import (
@@ -794,11 +794,17 @@ def analyze_changes(input_url: str) -> dict[str, Any]:
             warnings.append(f"code-graph pre-analysis crashed: {e}")
             pre_analysis = {"indexed": False, "note": f"crash: {e}"}
 
+        chosen_model = pick_model(len(included), len(diff_text))
+        logger.info(
+            "model selection: %s (changed_files=%d, diff_chars=%d)",
+            chosen_model, len(included), len(diff_text),
+        )
         try:
             classification = classify_diff(
                 diff_text, catalogs, components_for_llm,
                 cwd=workspace_path,
                 pre_analysis=pre_analysis,
+                model=chosen_model,
             )
         except ClaudeClassificationError as e:
             warnings.append(f"claude classification failed: {e}")
@@ -807,6 +813,8 @@ def analyze_changes(input_url: str) -> dict[str, Any]:
                 "llm_classification_failed", None, included, skipped, warnings,
             )
 
+        usage = classification.pop("_usage", None)
+
         result = _build_phase3_response(
             input_url, slug, pr_number, owner,
             classification, catalogs, root_ids,
@@ -814,6 +822,8 @@ def analyze_changes(input_url: str) -> dict[str, Any]:
         )
         if pre_analysis is not None:
             result["code_graph_evidence"] = pre_analysis
+        if usage is not None:
+            result["llm_usage"] = usage
         return result
     finally:
         if workspace_path:

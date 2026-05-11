@@ -24,9 +24,37 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_MODEL = os.getenv("PR_IMPACT_CLAUDE_MODEL", "claude-sonnet-4-6")
+# PR_IMPACT_CLAUDE_MODEL, when set, hard-overrides auto-selection — useful
+# for forcing a single model in tests / debugging. When unset, pick_model()
+# chooses Haiku for small PRs and Sonnet for big ones.
+_OVERRIDE_MODEL = os.getenv("PR_IMPACT_CLAUDE_MODEL")
+_SMALL_MODEL = os.getenv("PR_IMPACT_CLAUDE_MODEL_SMALL",
+                         "claude-haiku-4-5-20251001")
+_LARGE_MODEL = os.getenv("PR_IMPACT_CLAUDE_MODEL_LARGE", "claude-sonnet-4-6")
+# Auto-Haiku is OPT-IN: defaults to 0 so Sonnet handles every PR. Empirically
+# Haiku 4.5 sometimes ignores the "trust the pre-analysis / output JSON only"
+# instructions and either produces wrong impacted_endpoints or fails the JSON
+# parser. Set both env vars to non-zero values to opt back in.
+_SMALL_PR_FILES = int(os.getenv("PR_IMPACT_SMALL_PR_FILES", "0"))
+_SMALL_PR_DIFF_CHARS = int(os.getenv("PR_IMPACT_SMALL_PR_DIFF_CHARS", "0"))
+
 _DEFAULT_TIMEOUT = int(os.getenv("PR_IMPACT_CLAUDE_TIMEOUT", "600"))
 _DEFAULT_MAX_TURNS = int(os.getenv("PR_IMPACT_CLAUDE_MAX_TURNS", "20"))
+
+
+def pick_model(num_changed_files: int, diff_chars: int) -> str:
+    """Choose Haiku 4.5 for small PRs, Sonnet 4.6 for bigger ones.
+
+    `PR_IMPACT_CLAUDE_MODEL` env var hard-overrides this decision.
+    Setting either size threshold to 0 disables auto-selection."""
+    if _OVERRIDE_MODEL:
+        return _OVERRIDE_MODEL
+    if _SMALL_PR_FILES <= 0 or _SMALL_PR_DIFF_CHARS <= 0:
+        return _LARGE_MODEL
+    if (num_changed_files <= _SMALL_PR_FILES
+            and diff_chars <= _SMALL_PR_DIFF_CHARS):
+        return _SMALL_MODEL
+    return _LARGE_MODEL
 
 
 _SYSTEM_PROMPT = """You are a precise code-impact classifier for a deploy-planning system. You have:
@@ -73,7 +101,7 @@ Other rules:
   - Be conservative on new_outbound_calls and removed_outbound_calls — only include when the diff lines clearly add or remove an outbound interaction.
   - Use exact endpoint identifiers from the provided list (case-sensitive) including the HTTP verb prefix.
   - llm_match_canonical_name must be exactly one of the canonical_names from the candidate list, or null.
-  - When done, your FINAL message must be exactly one JSON object on a single line. No prose, no markdown fences, no commentary, no tool calls in the final message."""
+  - When done, your FINAL message MUST start with `{` and end with `}` — a single JSON object and nothing else. No introduction, no "Looking at this PR…", no commentary, no tool calls, no markdown fences. The first character of your final response is `{`. The last character is `}`."""
 
 
 _OUTPUT_SCHEMA = """{
@@ -106,6 +134,49 @@ def _strip_md_fences(text: str) -> str:
         text = re.sub(r"^```[a-zA-Z0-9]*\s*\n?", "", text)
         text = re.sub(r"\n?```\s*$", "", text)
     return text.strip()
+
+
+def _extract_json_object(text: str) -> str:
+    """Pull the first balanced JSON object out of possibly-noisy text.
+
+    Haiku especially likes to prepend prose ("Looking at this PR...") even
+    when told not to — this finds the actual JSON regardless. Falls back
+    to the original text so json.loads can produce a useful error if no
+    object is present at all."""
+    cleaned = _strip_md_fences(text)
+    try:
+        json.loads(cleaned)
+        return cleaned
+    except json.JSONDecodeError:
+        pass
+
+    start = cleaned.find("{")
+    if start < 0:
+        return cleaned
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(cleaned)):
+        ch = cleaned[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return cleaned[start:i + 1]
+    return cleaned
 
 
 def _format_component(comp: dict) -> str:
@@ -218,6 +289,7 @@ def classify_diff(diff_text: str,
     )
 
     allowed_tools = "Read,Grep,Glob" if cwd else ""
+    effective_model = _OVERRIDE_MODEL or model or _LARGE_MODEL
 
     cmd = [
         "claude",
@@ -226,14 +298,14 @@ def classify_diff(diff_text: str,
         "--allowedTools", allowed_tools,
         "--system-prompt", _SYSTEM_PROMPT,
         "--dangerously-skip-permissions",
-        "--model", model or _DEFAULT_MODEL,
+        "--model", effective_model,
         "--max-turns", str(max_turns or _DEFAULT_MAX_TURNS),
     ]
 
     logger.info(
         "claude classifier: model=%s cwd=%s tools=%s prompt_chars=%d "
         "endpoints=%d components=%d",
-        model or _DEFAULT_MODEL,
+        effective_model,
         cwd or "<none>",
         allowed_tools or "<none>",
         len(user_prompt),
@@ -276,15 +348,39 @@ def classify_diff(diff_text: str,
             f"claude wrapper had no string `result` field: {wrapped}"
         )
 
-    inner_clean = _strip_md_fences(inner)
+    inner_clean = _extract_json_object(inner)
     try:
         parsed = json.loads(inner_clean)
     except json.JSONDecodeError as e:
         raise ClaudeClassificationError(
-            f"claude inner response was not JSON: {inner_clean[:300]}"
+            f"claude inner response was not JSON: {inner[:300]}"
         ) from e
 
-    return _normalise(parsed)
+    normalised = _normalise(parsed)
+
+    # Capture usage / cost / turn metadata from the CLI's wrapper. Stashed
+    # under `_usage` so callers can pluck it without polluting the
+    # classification dict shape.
+    usage_block = wrapped.get("usage") or {}
+    usage = {
+        "model": effective_model,
+        "input_tokens": usage_block.get("input_tokens"),
+        "output_tokens": usage_block.get("output_tokens"),
+        "cache_creation_input_tokens": usage_block.get("cache_creation_input_tokens"),
+        "cache_read_input_tokens": usage_block.get("cache_read_input_tokens"),
+        "total_cost_usd": wrapped.get("total_cost_usd"),
+        "duration_ms": wrapped.get("duration_ms"),
+        "num_turns": wrapped.get("num_turns"),
+    }
+    logger.info(
+        "claude usage: model=%s input=%s output=%s cache_read=%s "
+        "cache_create=%s cost_usd=%s duration_ms=%s turns=%s",
+        usage["model"], usage["input_tokens"], usage["output_tokens"],
+        usage["cache_read_input_tokens"], usage["cache_creation_input_tokens"],
+        usage["total_cost_usd"], usage["duration_ms"], usage["num_turns"],
+    )
+    normalised["_usage"] = usage
+    return normalised
 
 
 def _normalise(parsed: dict) -> dict:
