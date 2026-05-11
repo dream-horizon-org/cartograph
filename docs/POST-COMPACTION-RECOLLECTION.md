@@ -1,4 +1,4 @@
-# Cartograph — Post-Compaction Recollection (2026-05-06 evening, post-Phase-10.12 + 3× real-data attempts)
+# Cartograph — Post-Compaction Recollection (2026-05-11, post-Phase-10.13 SHIPPED)
 
 > **Read this FIRST after compaction.** Then `git log --oneline -25`,
 > then the 7 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
@@ -83,7 +83,7 @@ Run cost: **$86.29 total** ($62.99 SME, $15.68 orch, $6.19 res, $1.43 iter). 2,3
 
 ---
 
-## 1. Branch + commit state (HEAD as of 2026-05-06 evening, post-Phase-10.12 + 3× real-data attempts)
+## 1. Branch + commit state (HEAD as of 2026-05-11, post-Phase-10.13 SHIPPED)
 
 - **Working dir:** `/Users/venkata.manohar/release-agent/docs/service-dependency/cartograph`
 - **Active branch:** `feat/trigger-manager-cartograh-mcp`
@@ -94,6 +94,18 @@ Run cost: **$86.29 total** ($62.99 SME, $15.68 orch, $6.19 res, $1.43 iter). 2,3
 
 Recent commits, newest first:
 ```
+5cdc3e7 Phase 10.13.11: final doc sync — Phase 10.13 SHIPPED
+928de48 Phase 10.13.7: resolve_references_bulk + bind_edges_bulk
+8b66d0c Phase 10.13.8: absorb_agent cascade-collision auto-dedup
+2303322 Phase 10.13.10: prompt-tightening bundle (7 nudges)
+0a4d3e6 Phase 10.13.4 + 10.13.5: identifier normalisation + thin-evidence skepticism
+e81bcca Phase 10.13.6: attribution UNIQUE → component-scoped (schema migration)
+fae957b Phase 10.13.3: get_component_owner MCP tool
+3e156bf Phase 10.13.1: SME prompt — split/merge discipline doctrine
+d8cb4d9 Phase 10.13.9: Kafka consumers declare consumed topics as queue catalogs
+6af36e0 Phase 10.13.2: QR clarification asker terminal path — prompt fix
+1ee1041 docs: sync recall §0 + IMPL-PHASES status with adb59f3 runtime work
+adb59f3 runtime: Bedrock-isolated agent auth via CARTOGRAPH_AGENT_SETTINGS_PATH
 b79bafc docs: sync for Phase 10.12 (iterator MCP port + APM fallback)
 45a9f4d Phase 10.12: iterator prompt — MCP port conflicts + APM surface fallback
 45ccf4b gitignore: snapshots/ + *.sql — local-only DB backups
