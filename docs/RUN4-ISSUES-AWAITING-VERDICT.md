@@ -1,6 +1,6 @@
-# Cartograph — Run #4 Issues (Phase 10.14 + 10.15 SHIPPED 2026-05-12)
+# Cartograph — Run #4 Issues (Phase 10.14 + 10.15 + 10.16 + 10.17 SHIPPED 2026-05-12)
 
-> **Status header:** Phase 10.14 (4 P0s — F1/F2/F3 + spawn collision) SHIPPED earlier in session. Phase 10.15 (5 P1/P2 prompt rules: abbreviation guard, monorepo Option A dissolution, cluster doctrine, telemetry bare-label placeholder, raise_blocker preference) SHIPPED 2026-05-12 evening. Only O4 (mark_resource_done precondition gate) remains deferred per admin verdict (pick later). Live-DB cleanup deferred — snapshot + wipe before run #5 instead.
+> **Status header (final):** All run-#4 admin-verdicted items SHIPPED. Phase 10.14 (4 P0s — F1/F2/F3 + spawn collision) + Phase 10.15 (5 P1/P2 prompt rules) + Phase 10.16 ([ADMIN-HACK-ORDERS-INFERRING] hack) + Phase 10.17 (doctrine-conflict fix surfaced during run-#5-v1) all landed. Only **O4** (`mark_resource_done` precondition gate strictness) remains explicitly deferred per admin verdict (pick hard-refuse vs soft-warn later). Live-DB cleanup deferred — snapshot+wipe used instead. **Doc preserved for cross-reference / post-compact orientation; nothing pending here.**
 
 ---
 
