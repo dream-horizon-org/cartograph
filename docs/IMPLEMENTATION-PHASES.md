@@ -6428,6 +6428,33 @@ Tool count: 117 (unchanged — no tools added or removed, just signature changes
 **Doc-sync:** HLD/SCHEMA/TRIGGER-MGMT unchanged (no surface change). AGENT-PROMPTS.md gains a 10.16 bullet. IMPLEMENTATION-PHASES.md (this section). POST-COMPACTION-RECOLLECTION.md §0a refreshes.
 
 **Run #5 readiness:** with this in place, a github-only run can produce a complete graph (each app component + its inferred DB/cache/queue stubs). Run #5 will exercise the path.
+
+---
+
+## Phase 10.17: [ADMIN-HACK-ORDERS-INFERRING] doctrine-conflict fix (2026-05-12 night) ✅
+
+**Symptom:** in run #5's first attempt, 3 SMEs (`asgard-ra-demo-service-a/b/c`) all admitted via admin chat that they DIDN'T fire the inferred-split nomination despite the Phase 10.16 INFERRING block being in their prompt. They reported back honestly: "I ran vector_search and got no match → I stopped at insert_unresolved → I treated leave-dangling as terminal." All 3 understood the doctrine but the **older Phase 10.8.3 leave-dangling rule** (sitting at STEP 3 of materialisation) overrode the newer INFERRING block (sitting later in SPLIT/MERGE DISCIPLINE). The agents read the workflow site (STEP 3), satisfied the safer-by-default rule, and never made it to (or didn't act on) the override.
+
+Plus secondary cause: vector_search was being run with **semantic / free-text descriptions** ("MySQL database demo asgard") rather than **identifier-verbatim name_pattern** — false-negatives let the SMEs conclude "no match" when an inferred stub might already exist.
+
+**Fix (prompt-only, one commit, no schema/tool change):**
+
+`sme.py` STEP 3 — at the `LEAVE DANGLING — DO NOT FORCE-CREATE THE TARGET` block:
+- Renamed to `LEAVE DANGLING — DO NOT FORCE-CREATE THE TARGET — *EXCEPT for inferred non-code stubs.*`
+- Inserted a `★★★ HARD EXCEPTION — INFERRED NON-CODE STUBS (Phase 10.17) ★★★` sub-block IMMEDIATELY after the default-behaviour statement.
+- The exception: when the dangling target pattern-matches a non-code class (DB / cache / queue / topic / broker / external-service) on a single-plane run, the leave-dangling default is OVERRIDDEN — the SME must follow the INFERRING block path.
+- Inline trigger pattern examples: `*-mysql-*.dream11.local`, `redis://...`, kafka bootstrap, RDS/Aurora hostname, `otlp.last9.io`, slack webhook URL — these are the WRONG things to leave dangling.
+- Inline mandatory sequence: (1) write dangling pair (still — source of truth); (2) PRE-FLIGHT vector_search with `name_pattern=<IDENTIFIER VERBATIM>`, NOT semantic; (3) on no-match, MANDATORY nominate_consolidation with `metadata.admin_hack='inferring'`; (4) explicit "treating insert_unresolved as terminal step is the BUG broadcast aff3b72c diagnosed."
+- Reinforces what default-applies-to: same-plane app/lambda/cron components ONLY.
+
+`sme.py` `[ADMIN-HACK-ORDERS-INFERRING]` block — pre-flight dedup step (STEP 3.a):
+- Changed `name_pattern=<identifier>` → `name_pattern='<IDENTIFIER EXACTLY AS OBSERVED>'` with explicit warning against semantic/free-text queries.
+- Added rationale: inferred stubs' canonical_name IS the raw identifier; semantic-search returns false negatives.
+- Clarified: use ILIKE wildcards only for templated env-var placeholders.
+
+**Smoke test:** all 4 prompts compile clean (sme=128094, iter=38547, orch=30391, res=30607). Caught 1 brace bug (`{ENV_NAME}` example needed `{{`/`}}` doubling). 92/92 mutation + consolidation tests green.
+
+**Status:** SHIPPED via single commit. Companion: snapshot DB + wipe + daemons restart so the new prompt loads on the next agent wake. Run #5 kickoff again now uses corrected doctrine.
 Tool surface signatures changed (no tool count delta):
 - `absorb_agent` drops `cascade_attributions` / `cascade_edges` /
   `cascade_flows` boolean flags. Callers passing any → ValueError.

@@ -2,7 +2,9 @@
 
 ## 0a. PHASE 10.14 / 10.15 / 10.16 — ALL SHIPPED · DB WIPED · READY FOR RUN #5 (most important)
 
-**Branch HEAD:** `feat/prompt-tuning-and-bug-fixes` after Phase 10.16 commit + doc-sync push.
+**Branch HEAD:** `feat/prompt-tuning-and-bug-fixes` after Phase 10.17 fix + 2nd wipe.
+
+**Phase 10.17 SHIPPED 2026-05-12 night (after first run-#5 attempt revealed doctrine conflict)** — fix for `[ADMIN-HACK-ORDERS-INFERRING]` not being followed: older Phase 10.8.3 leave-dangling rule at STEP 3 overrode the newer INFERRING block. Inserted a `★★★ HARD EXCEPTION ★★★` sub-block at the leave-dangling site itself with trigger patterns + mandatory 4-step sequence. Plus tightened pre-flight vector_search to mandate `name_pattern=<IDENTIFIER VERBATIM>` (semantic free-text was returning false-negatives). Prompt-only; no schema/tool change. DB wiped + snapshotted a SECOND time (snap-2026-05-12-{2nd-ts}-pre-run5-v2.sql).
 
 **Phase 10.16 SHIPPED 2026-05-12 night** — `[ADMIN-HACK-ORDERS-INFERRING]` prompt blocks in `sme.py` + `resolver.py`. Single-plane runs (e.g. github-only) can now spawn inferred non-code stubs (DBs/caches/queues/topics) via the existing split machinery: SME nominates a `type='split'` with `metadata.admin_hack='inferring'` + `inferred=true` + `inferred_kind` + `inferred_identifier`. Resolver pre-flight dedups via vector_search + serialises concurrent noms + validates ordering (inferred-splits AFTER real splits, BEFORE merges). Child SME hydrates from parent's repo + parent's attributions via the `split_briefing` hydration manual. **Prompt-only — no schema, no tool surface change.** Tagged with `metadata.admin_hack='inferring'` for grep-based cleanup when the real paradigm ships.
 

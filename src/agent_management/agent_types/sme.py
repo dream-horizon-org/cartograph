@@ -833,26 +833,78 @@ STEP 3 — Outbound references you find while reading your resource
   component looks complete on the dashboard. Always pair them.
 
   LEAVE DANGLING — DO NOT FORCE-CREATE THE TARGET (Phase 10.8.3,
-  DEMO11 insight 4b21b236).
-  When vector_search returns no useful match for a hostname /
-  endpoint / topic / queue, the CORRECT action is the dangling
-  pair above. DO NOT call upsert_component to create the missing
-  target component yourself just to bind cleanly — that target
-  is owned by another SME (their iterator hasn't enumerated it
-  yet, their plane's task is still pending, or it's truly a
-  reference to something outside the current scope). Force-
-  creating a component you don't actually own:
-    - Pollutes ownership semantics — no RCA row connects the
-      forced component to any real resource.
-    - Creates orphan slots that resolver's pre-M conflict check
-      can't reason about.
-    - Falsely closes the unresolved → resolved loop without
-      durable evidence.
+  DEMO11 insight 4b21b236) — *EXCEPT for inferred non-code stubs.*
+  Default behaviour: when vector_search returns no useful match for
+  a hostname / endpoint / topic / queue, the CORRECT action is the
+  dangling pair above + DO NOT call upsert_component to create the
+  missing target yourself.
+
+  ★★★ HARD EXCEPTION — INFERRED NON-CODE STUBS (Phase 10.17) ★★★
+  This DEFAULT is OVERRIDDEN when the dangling target is a
+  non-code component class (databases / caches / queues / topics
+  / brokers / external services) AND the current run is single-
+  plane. In that case the leave-dangling default is WRONG — no
+  other plane's SME will ever materialise the target, so the
+  graph stays unresolvable forever.
+
+  CONCRETE TRIGGER. Look at your unresolved dangling targets after
+  the cosine ladder. If the identifier pattern-matches a non-code
+  resource (e.g. `*-mysql-*.dream11.local`, `redis://...`, kafka
+  bootstrap server, RDS / Aurora hostname, otlp.last9.io, slack
+  webhook URL, etc.) — that's NOT something another plane's SME
+  will spontaneously create. You MUST proceed to the inferred-stub
+  nomination per the `[ADMIN-HACK-ORDERS-INFERRING]` block later
+  in this prompt — that path is REQUIRED, not optional, for these
+  identifiers on single-plane runs.
+
+  SEQUENCE (mandatory for non-code dangling targets on single-plane):
+    1. Write the dangling pair (upsert_edge_outbound(to=NULL) +
+       insert_unresolved). This stays — it's the source-of-truth
+       that you observed the dep.
+    2. PRE-FLIGHT vector_search FOR THE STUB: NAME-PATTERN must be
+       the IDENTIFIER VERBATIM (e.g.
+       `name_pattern='service-c-mysql-dt-2.asgard-stag.dss-platform.private'`),
+       NOT a semantic / free-text description like "MySQL database
+       demo". Use ILIKE wildcards only if the identifier has a
+       templated env-var substitution (`{{ENV_NAME}}` → ILIKE
+       `service-c-mysql-%.asgard-stag.dss-platform.private`). Run
+       the search twice: once unfiltered, once with
+       `filters={{"metadata.inferred": true}}`. If either returns
+       sim>=0.7, bind_edge + resolve_reference to that existing
+       component, done.
+    3. NO MATCH → MANDATORY NEXT STEP: nominate_consolidation
+       (type='split', component_a=YOUR_comp, component_b_id=NULL,
+       metadata={{"admin_hack": "inferring", "inferred": true,
+                  "inferred_kind": "<database|cache|queue|topic|broker|external-service>",
+                  "inferred_identifier": "<identifier verbatim>"}},
+       message='[ADMIN-HACK-ORDERS-INFERRING] ...'). The full
+       contract lives in the dedicated section below — read it.
+    4. "No match → leave dangling and move on" is SPECIFICALLY
+       WRONG for non-code dangling targets on single-plane runs.
+       Treating insert_unresolved as the terminal step is the
+       BUG that broadcast aff3b72c diagnosed across multiple SMEs.
+
+  THE DEFAULT (leave-dangling) STILL APPLIES for:
+    - Outbound calls to OTHER application/lambda/cron components
+      observed in the same plane — those callees materialise
+      their own components; let cross-plane sibling-search
+      reconcile.
+    - Anything you're not confident is a non-code target. If
+      unsure → leave dangling, file a `record_insight` flagging
+      the ambiguity, move on. Better a dangling than a wrong stub.
+
+  WHY THIS EXISTS. Force-creating a normal callee component
+  pollutes ownership semantics (no RCA, no resource). But
+  inferred non-code stubs are EXPLICITLY tagged
+  `metadata.admin_hack='inferring'` + `metadata.inferred=true`
+  + RCA-pointing back at YOUR resource — so the cleanup grep
+  pattern is durable. The hack-debt is acknowledged + auditable.
+
   Trust the EDGE_DISCOVERY phase + cross-SME hygiene
   (`get_unmatched_callers` on the target's owner side, when they
-  eventually arrive) to bind the dangling later. Your component
-  is "complete" with the dangling pair recorded; that's the
-  signal-rich state.
+  eventually arrive) to bind the dangling later — for the
+  default-applies cases only. For inferred non-code stubs, you
+  ARE that owner via spawn_child_agent; act now.
 
   Catalog-aware binding — once you have a target component_id:
     target_edges = get_component_edges(target_component_id)
@@ -1450,10 +1502,17 @@ STEP-BY-STEP:
    naming. If unsure → leave dangling; orch / resolver / next-plane
    SME will handle.
 3. For each candidate target identifier:
-   a. PRE-FLIGHT DEDUP. `vector_search(table='components',
-      name_pattern=<identifier>, filters={{"metadata.inferred": true}})`.
-      Also check non-inferred matches via the same call without
-      the filter. If sim>=0.7 hit found:
+   a. PRE-FLIGHT DEDUP — **VERBATIM IDENTIFIER MATCH ONLY**. Use
+      `vector_search(table='components', name_pattern='<IDENTIFIER
+      EXACTLY AS OBSERVED>', filters={{"metadata.inferred": true}})`.
+      DO NOT use semantic / free-text queries like "MySQL database
+      demo" — that returns false negatives because the embedding
+      ranks on description+name and an inferred stub's
+      canonical_name IS the raw identifier. Use ILIKE wildcards
+      (`%`, `_`) only when the identifier has a templated env-var
+      placeholder. Run the call TWICE: once with the
+      `metadata.inferred=true` filter, once without (to catch
+      pre-existing real components). If either returns sim>=0.7:
          → `bind_edge(<dangling_edge_id>, <existing_comp_id>)`,
          → `resolve_reference(<unresolved_id>, <existing_comp_id>)`,
          → DO NOT nominate. Move on.
