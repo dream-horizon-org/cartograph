@@ -1,8 +1,14 @@
-# Cartograph — Post-Compaction Recollection (2026-05-12, Phase 10.14 + 10.15 SHIPPED)
+# Cartograph — Post-Compaction Recollection (2026-05-12 night, Phase 10.14 + 10.15 + 10.16 SHIPPED, DB wiped pre-run-5)
 
-## 0a. PHASE 10.14 + 10.15 BUG-FIX & POLISH BUNDLES — SHIPPED (most important — read first)
+## 0a. PHASE 10.14 / 10.15 / 10.16 — ALL SHIPPED · DB WIPED · READY FOR RUN #5 (most important)
 
-**Phase 10.15 SHIPPED 2026-05-12 evening** — 5 prompt-only P1/P2 rules per admin verdict (abbreviation hallucination guard · monorepo Option A dissolution · cluster doctrine for Aurora/redis/RDS Multi-AZ · telemetry bare-label placeholder · raise_blocker preference). One commit. No schema or tool surface changes. See `docs/IMPLEMENTATION-PHASES.md §10.15` for full detail.
+**Branch HEAD:** `feat/prompt-tuning-and-bug-fixes` after Phase 10.16 commit + doc-sync push.
+
+**Phase 10.16 SHIPPED 2026-05-12 night** — `[ADMIN-HACK-ORDERS-INFERRING]` prompt blocks in `sme.py` + `resolver.py`. Single-plane runs (e.g. github-only) can now spawn inferred non-code stubs (DBs/caches/queues/topics) via the existing split machinery: SME nominates a `type='split'` with `metadata.admin_hack='inferring'` + `inferred=true` + `inferred_kind` + `inferred_identifier`. Resolver pre-flight dedups via vector_search + serialises concurrent noms + validates ordering (inferred-splits AFTER real splits, BEFORE merges). Child SME hydrates from parent's repo + parent's attributions via the `split_briefing` hydration manual. **Prompt-only — no schema, no tool surface change.** Tagged with `metadata.admin_hack='inferring'` for grep-based cleanup when the real paradigm ships.
+
+**DB wiped + snapshotted pre-run-5.** Snapshot path: `/tmp/cartograph-snapshots/snap-2026-05-12-<ts>-pre-run5.sql`. Workspaces backed up at `src/workspaces.bak.pre-run5.2026-05-12-<ts>/`. Fresh singletons (orch + resolver) auto-bootstrapped on agent_manager restart.
+
+**Phase 10.15 SHIPPED 2026-05-12 evening** — 5 prompt-only P1/P2 rules per admin verdict (abbreviation hallucination guard · monorepo Option A dissolution · cluster doctrine for Aurora/redis/RDS Multi-AZ · telemetry bare-label placeholder · raise_blocker preference). One commit (`a49b2ed`). No schema or tool surface changes. See `docs/IMPLEMENTATION-PHASES.md §10.15` for full detail.
 
 **Items NOT in 10.15 (deferred per admin):**
 - O4 `mark_resource_done` precondition gate — admin will pick later.

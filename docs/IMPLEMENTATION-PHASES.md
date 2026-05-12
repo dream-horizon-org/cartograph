@@ -1,6 +1,8 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-05-12 evening, late):** Phases 0 → 10.15 all ✅ except Phase 6 (Globe — parked). **Phase 10.15 SHIPPED** — 5 P1/P2 prompt rules (abbreviation guard, monorepo Option A dissolution, cluster doctrine for Aurora/redis-cluster/RDS Multi-AZ, telemetry bare-label placeholder, raise_blocker preference). Only O4 (`mark_resource_done` precondition gate) remains deferred. **Phase 10.14 SHIPPED** on `feat/prompt-tuning-and-bug-fixes` — 4 P0s landed in 4 commits (`beeba19` lock-step drop · `f905384` spawn fresh-id · `008c208` cascade_completed_at guard · `a96127a` attribution cascade auto-dedup + flag delete) plus doc-sync. 92/92 mutation + consolidation tests green. Schema delta: `consolidations.cascade_completed_at TIMESTAMPTZ` added (idempotent migration run on dev DB live). Tool count unchanged at 117; signatures changed on `absorb_agent` (cascade flags removed) and `spawn_child_agent` (`child_agent_id` minted server-side). F1 / F2 / F3 failure modes from run #4 all closed at the root. Bedrock token rotated 2026-05-12 06:51 UTC. **Phase 10.13 SHIPPED** — 10 sub-phases across 3 tiers landed in 9 commits; tool count 114 → 117 (+3: `get_component_owner`, `resolve_references_bulk`, `bind_edges_bulk`); 1 schema migration (attribution UNIQUE → component-scoped); 13 OPEN insights triaged (10 promoted, 3 wontfix). **Two post-sync follow-ups (2026-05-11)** ahead of 4th real-data attempt: `8c7fd30` Phase 10.13.12 iterator ADMIN-SCOPE rule (respect narrow target lists — upsert only named targets + their dependency-linked infra; full enumeration dumps to workspace file; saves ~50 LOC of admin kickoff boilerplate); `89ec1c4` Phase 10.13.13 SME lanes 8 → 12 (total concurrent subprocesses 12 → 16: orch 1 + iter 2 + res 1 + sme 12). **Runtime infra shipped 2026-05-08** (`adb59f3`): `CARTOGRAPH_AGENT_SETTINGS_PATH` env var toggles Bedrock-isolated agent auth. **DB wiped 2026-05-11** pre-4th-real-data-run (snapshot `/tmp/cartograph-snapshots/snap-2026-05-11-073639-pre-realdata4.sql`, workspaces backed up at `src/workspaces.bak.pre-realdata4.2026-05-11-073639/`). Fresh singletons live: `orch-841b98fd` + `res-fdb7d978`. **Next work: 4th real-data onboarding** with new ADMIN-SCOPE prompt + 16-lane concurrency.
+**Status (2026-05-12 night):** Phases 0 → 10.16 all ✅ except Phase 6 (Globe — parked). **Phase 10.16 SHIPPED** — `[ADMIN-HACK-ORDERS-INFERRING]` prompt blocks in sme.py + resolver.py let single-plane runs spawn inferred non-code stubs (DBs/caches/queues) via the existing split machinery; child SME hydrates from parent's repo + attributions. Tagged + auditable for future removal. Prompt-only; no schema/tool surface change. **DB wiped + snapshotted pre-run-5.**
+
+**Earlier Phase 10.15 state:** Phases 0 → 10.15 all ✅ except Phase 6 (Globe — parked). **Phase 10.15 SHIPPED** — 5 P1/P2 prompt rules (abbreviation guard, monorepo Option A dissolution, cluster doctrine for Aurora/redis-cluster/RDS Multi-AZ, telemetry bare-label placeholder, raise_blocker preference). Only O4 (`mark_resource_done` precondition gate) remains deferred. **Phase 10.14 SHIPPED** on `feat/prompt-tuning-and-bug-fixes` — 4 P0s landed in 4 commits (`beeba19` lock-step drop · `f905384` spawn fresh-id · `008c208` cascade_completed_at guard · `a96127a` attribution cascade auto-dedup + flag delete) plus doc-sync. 92/92 mutation + consolidation tests green. Schema delta: `consolidations.cascade_completed_at TIMESTAMPTZ` added (idempotent migration run on dev DB live). Tool count unchanged at 117; signatures changed on `absorb_agent` (cascade flags removed) and `spawn_child_agent` (`child_agent_id` minted server-side). F1 / F2 / F3 failure modes from run #4 all closed at the root. Bedrock token rotated 2026-05-12 06:51 UTC. **Phase 10.13 SHIPPED** — 10 sub-phases across 3 tiers landed in 9 commits; tool count 114 → 117 (+3: `get_component_owner`, `resolve_references_bulk`, `bind_edges_bulk`); 1 schema migration (attribution UNIQUE → component-scoped); 13 OPEN insights triaged (10 promoted, 3 wontfix). **Two post-sync follow-ups (2026-05-11)** ahead of 4th real-data attempt: `8c7fd30` Phase 10.13.12 iterator ADMIN-SCOPE rule (respect narrow target lists — upsert only named targets + their dependency-linked infra; full enumeration dumps to workspace file; saves ~50 LOC of admin kickoff boilerplate); `89ec1c4` Phase 10.13.13 SME lanes 8 → 12 (total concurrent subprocesses 12 → 16: orch 1 + iter 2 + res 1 + sme 12). **Runtime infra shipped 2026-05-08** (`adb59f3`): `CARTOGRAPH_AGENT_SETTINGS_PATH` env var toggles Bedrock-isolated agent auth. **DB wiped 2026-05-11** pre-4th-real-data-run (snapshot `/tmp/cartograph-snapshots/snap-2026-05-11-073639-pre-realdata4.sql`, workspaces backed up at `src/workspaces.bak.pre-realdata4.2026-05-11-073639/`). Fresh singletons live: `orch-841b98fd` + `res-fdb7d978`. **Next work: 4th real-data onboarding** with new ADMIN-SCOPE prompt + 16-lane concurrency.
 
 Most recent (2026-05-05 → 2026-05-06):
 - **10.7** (`description` column separate from `doc_md` + `vector_search` filters + `exclude_self` + workspace-local doc_md) — 8 sub-commits ending at `e7ce669`.
@@ -6395,6 +6397,37 @@ Tool count: 117 (unchanged — no tools added or removed, just signature changes
 **Verification:** smoke-tested all 4 prompts compile clean (sme=115759, iter=38547, orch=30391, res=26589). Caught one brace-escape bug on first try (Aurora worked example's `metadata={"role":...}` needed `{{`/`}}` doubling). 92/92 mutation + consolidation tests green.
 
 **Status:** SHIPPED via single commit (this commit) — prompt-only, no schema or tool changes. Tool count unchanged at 117.
+
+---
+
+## Phase 10.16: [ADMIN-HACK-ORDERS-INFERRING] inferred non-code component spawn (2026-05-12 evening) ✅
+
+**Motivation:** single-plane runs (e.g. github-only) leave outbound danglings to DBs/caches/queues unresolved because no telemetry/cloud SME ever materialises the target. Graph is unusable for blast-radius. Hack: caller-SME spawns inferred stubs via the existing split machinery, tagged for cleanup.
+
+**Prompt-only. No schema, no tool surface change.** Single commit. Two prompt blocks added:
+
+**`sme.py` (after SPLIT/MERGE DISCIPLINE):** new `== [ADMIN-HACK-ORDERS-INFERRING] — INFERRED NON-CODE COMPONENT SPAWN ==` block:
+- Triggers AFTER all real splits done, BEFORE any merge nominations.
+- Per non-code dangling identifier: pre-flight `vector_search` for existing stub → bind if found. Else `nominate_consolidation(type='split', component_b_id=NULL, metadata={admin_hack:'inferring', inferred:true, inferred_kind, inferred_identifier})` with `[ADMIN-HACK-ORDERS-INFERRING]` tag in message.
+- Once resolver approves M, call `spawn_child_agent` with a special `child_source_slice` that points BACK at parent's resource (not a carve-out — just hydration hints) and a `split_briefing` containing a full hydration manual.
+- After child component lands at D, parent binds its dangling edge + resolves its unresolved row to the child.
+
+**Child SME hydration (inside the briefing):** clone parent's repo via `github_token`, read parent's attributions, grep repo for identifier + adjacent config keys, upsert own component with canonical_name=identifier (verbatim), set attributions for hostname/runtime/schema/port/db_system, confidence 0.5-0.8. NO catalogs (DBs don't expose). NO outbound edges (it's a target, not a caller). `metadata.inferred=true` + `metadata.admin_hack='inferring'` on the component.
+
+**`resolver.py` (after Absorber Pick):** new `== [ADMIN-HACK-ORDERS-INFERRING] — APPROVING INFERRED-COMPONENT SPLITS ==` block. Pre-approval checks in order:
+1. **Pre-flight dedup** — `vector_search` for `inferred_identifier`; if any existing component matches (inferred or not) → refuse with R→F + pointer to existing.
+2. **Concurrent-nomination serialisation** — if another R/M/MD-state inferred cons exists for same identifier → approve the EARLIER one, refuse the later with R→B1 + "wait for cons X to land at D, then bind there."
+3. **Ordering sanity** — refuse if SME has non-inferred-splits pending (hard rule violation).
+4. **Metadata validation** — `admin_hack='inferring'` + `inferred=true` + `inferred_kind` ∈ valid set + non-empty `inferred_identifier` required; else F.
+5. **Approve** → R→M with mutation_assigned_to = agent_a (the SME nominator).
+
+**Cleanup path:** when the real "inferred component" paradigm ships, grep `metadata.admin_hack='inferring'` across `consolidations` + `components` to find every row touched by this hack, migrate to the new model, then strip the prompt blocks. Tag-based audit makes the removal mechanical.
+
+**Smoke test:** all 4 prompts compile clean (sme=124717, iter=38547, orch=30391, res=30607). Caught 2 brace-escape bugs on first try (Aurora-doctrine `{"role":...}` carried over from Phase 10.15.3 needed `{{`/`}}`, plus a new one in the child hydration `{kind}` template). 92/92 mutation + consolidation tests green; no regressions.
+
+**Doc-sync:** HLD/SCHEMA/TRIGGER-MGMT unchanged (no surface change). AGENT-PROMPTS.md gains a 10.16 bullet. IMPLEMENTATION-PHASES.md (this section). POST-COMPACTION-RECOLLECTION.md §0a refreshes.
+
+**Run #5 readiness:** with this in place, a github-only run can produce a complete graph (each app component + its inferred DB/cache/queue stubs). Run #5 will exercise the path.
 Tool surface signatures changed (no tool count delta):
 - `absorb_agent` drops `cascade_attributions` / `cascade_edges` /
   `cascade_flows` boolean flags. Callers passing any → ValueError.

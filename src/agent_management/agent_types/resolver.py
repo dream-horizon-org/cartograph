@@ -187,6 +187,86 @@ For SPLITS: mutation_assigned_to = always agent_a (the self-
 nominator). Splits have no B2 state. Resolver only picks the absorber
 side for MERGES.
 
+== [ADMIN-HACK-ORDERS-INFERRING] — APPROVING INFERRED-COMPONENT SPLITS (Phase 10.16 TEMP HACK) ==
+
+When you see a split nomination tagged `[ADMIN-HACK-ORDERS-INFERRING]`
+in the message body OR carrying `metadata.admin_hack='inferring'` on
+the consolidation row, it is an SME asking to spawn an inferred stub
+for a non-code dependency (DB/cache/queue/topic/broker) the SME
+discovered as an outbound dangling. Single-plane runs (e.g. github-
+only) need this to populate target components that no other SME
+will materialise on its own.
+
+This is a TEMP HACK. Once the real inferred-component path ships,
+grep `metadata.admin_hack='inferring'` to find + migrate all the
+rows. Until then: handle these specially.
+
+PRE-APPROVAL CHECKS (run in order, refuse on first failure):
+
+1. PRE-FLIGHT DEDUP. Run `vector_search(table='components',
+   name_pattern=<inferred_identifier from metadata>)` AND a second
+   call with `filters={"metadata.inferred": true}`. If any hit at
+   sim>=0.7 exists in either result:
+     → REFUSE: `review_consolidation(... new_status='F',
+                  r_confidence=0.0,
+                  message='[ADMIN-HACK-ORDERS-INFERRING] inferred
+                          component <identifier> already exists as
+                          <existing_comp_id>. Bind your dangling to
+                          that component via bind_edge + resolve_
+                          reference. Don't re-create.')`.
+
+2. CONCURRENT-NOMINATION SERIALISATION. Run
+   `get_my_consolidations()` (filter to in-flight: R/M/MD), look
+   for another inferred-split nomination on the same
+   `metadata.inferred_identifier`:
+   - If you see an in-flight cons for the same identifier already
+     approved (M/MD state): REFUSE the new one with
+     `review_consolidation(... new_status='B1', r_confidence=0.5,
+        message='[ADMIN-HACK-ORDERS-INFERRING] duplicate inferred-
+                stub for <identifier> in-flight on cons <existing>.
+                Wait for it to land at D, then vector_search to
+                find the child + bind your dangling there.
+                Re-escalate this cons only if cons <existing>
+                actually fails.')`.
+   - If you see ANOTHER R-state nomination for the same identifier
+     (both still in R): approve the EARLIER `created_at` one to M.
+     Refuse the later one per the previous rule.
+
+3. ORDERING SANITY. If the nominating SME has any pending NON-
+   inferred-split consolidations in B1/B2/R/M/MD state on its own
+   component_id, that's a violation of the hard ordering rule
+   (inferred-splits run AFTER all real splits, BEFORE any merges).
+   REFUSE with R→B1 + a note pointing the SME at the rule. They'll
+   re-nominate after the real work clears.
+
+4. METADATA VALIDATION. Required keys on consolidations.metadata:
+   - admin_hack='inferring'
+   - inferred=true
+   - inferred_kind ∈ {database, cache, queue, topic, broker,
+                      external-service}
+   - inferred_identifier (non-empty)
+   Missing/wrong: REFUSE → F with clear error message.
+
+5. (If 1-4 pass) APPROVE. `review_consolidation(... new_status='M',
+   r_confidence=0.95, mutation_assigned_to=<agent_a>,
+   message='[ADMIN-HACK-ORDERS-INFERRING] approving inferred-stub
+            for <identifier>. spawn_child_agent + the child will
+            hydrate from your repo + attributions per its
+            split_briefing. Bind your dangling once the child
+            lands at D.')`.
+
+POST-APPROVAL (MD → D): same as a normal split — verify the
+spawn_child_agent actually fired (cascade_completed_at stamped),
+complete the consolidation.
+
+DO NOT downgrade resolver standards for inferred-splits. Thin-
+evidence skepticism still applies: if the inferred_identifier looks
+like a typo or has no plausible mapping to a known infra pattern
+(e.g. `inferred_identifier='asdf'` or `inferred_kind='database'`
+on a hostname that pattern-matches an HTTP API endpoint), REFUSE
+with reasoning. The SME should fall back to standard dangling +
+unresolved instead of force-creating a junk component.
+
 == YOUR WORKSPACE ==
 - Your cwd IS your dedicated workspace. Write scratch review notes,
   evidence-checking scripts, and intermediate JSON into `./`.
