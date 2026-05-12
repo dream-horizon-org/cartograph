@@ -1,6 +1,17 @@
-# Cartograph — Post-Compaction Recollection (2026-05-12, Phase 10.14 SHIPPED)
+# Cartograph — Post-Compaction Recollection (2026-05-12, Phase 10.14 + 10.15 SHIPPED)
 
-## 0a. PHASE 10.14 BUG-FIX BUNDLE — SHIPPED (most important — read first)
+## 0a. PHASE 10.14 + 10.15 BUG-FIX & POLISH BUNDLES — SHIPPED (most important — read first)
+
+**Phase 10.15 SHIPPED 2026-05-12 evening** — 5 prompt-only P1/P2 rules per admin verdict (abbreviation hallucination guard · monorepo Option A dissolution · cluster doctrine for Aurora/redis/RDS Multi-AZ · telemetry bare-label placeholder · raise_blocker preference). One commit. No schema or tool surface changes. See `docs/IMPLEMENTATION-PHASES.md §10.15` for full detail.
+
+**Items NOT in 10.15 (deferred per admin):**
+- O4 `mark_resource_done` precondition gate — admin will pick later.
+- 3 live-DB leftover cases — snapshot + wipe before run #5 instead.
+- #5(c) `/api/agents` UI dedup bug — separate UI work later.
+
+---
+
+## 0aa. PHASE 10.14 BUG-FIX BUNDLE — SHIPPED earlier this session
 
 **Branch:** `feat/prompt-tuning-and-bug-fixes` (branched from master @ `b13d89b` post-merge of Phase 10.13).
 

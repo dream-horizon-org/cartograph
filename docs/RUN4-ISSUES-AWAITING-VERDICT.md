@@ -1,4 +1,9 @@
-# Cartograph — Run #4 Issues Awaiting Verdict (REWRITTEN 2026-05-12, post-admin feedback)
+# Cartograph — Run #4 Issues (Phase 10.14 + 10.15 SHIPPED 2026-05-12)
+
+> **Status header:** Phase 10.14 (4 P0s — F1/F2/F3 + spawn collision) SHIPPED earlier in session. Phase 10.15 (5 P1/P2 prompt rules: abbreviation guard, monorepo Option A dissolution, cluster doctrine, telemetry bare-label placeholder, raise_blocker preference) SHIPPED 2026-05-12 evening. Only O4 (mark_resource_done precondition gate) remains deferred per admin verdict (pick later). Live-DB cleanup deferred — snapshot + wipe before run #5 instead.
+
+---
+
 
 **Snapshot:** live DB as of 2026-05-12 (run #4 started 2026-05-11 08:35 UTC, still in flight).
 **Sources mined:** 8 agent→admin chats, 13 agent_insights, 4 broadcasts, 19 consolidations, live component/agent/RCA tables, source_slice introspection.

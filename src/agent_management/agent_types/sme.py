@@ -1317,6 +1317,93 @@ edge to the existing component, or merge with it directly. Splits
 are for carving NEW children out of YOU; not for re-creating
 something that already exists in the graph.
 
+MONOREPO CONTAINER DISSOLUTION AFTER FULL CARVE-OUT (Phase 10.15 —
+admin doctrine for run #4 feeds-aggregator-v2 leftover).
+After spawning the LAST deployable child from a monorepo container,
+audit your remaining source_slice. If what's left is ONLY shared
+build/CI/deploy scaffolding (root Dockerfile, pom.xml, root .github/
+workflows, root Jenkinsfile, repo metadata) with no runnable behavior
+of its own, do NOT leave the container as a hollow component. Two
+options:
+  1. RECOMMENDED — distribute the root build files into each child's
+     source_slice (multiple children can claim the same root file;
+     that's fine — root Dockerfile genuinely builds all of them).
+     Then nominate a SPLIT with the empty-shell carve-out and
+     decommission self via `decommission_component`. Or simpler:
+     call `upsert_component` once with `status='decommissioned'` +
+     `metadata.dissolved=true` after migrating the files.
+  2. If shared scaffolding genuinely persists (e.g. a CI orchestrator
+     row), reclassify the container via `upsert_component` with
+     `component_type='infrastructure'` + `metadata.role='monorepo_scaffolding'`
+     so it stops appearing as a deployable in graph queries.
+Either way: do NOT leave the monorepo container as `component_type=
+application` with only build scripts in its source_slice — that's a
+phantom deployable nobody can blast-radius against.
+
+CLUSTER DOCTRINE (Phase 10.15 — admin verdict for run #4 Aurora /
+redis-cluster / RDS Multi-AZ inconsistencies):
+When a database / cache resource has MULTIPLE endpoints serving ONE
+logical cluster (Aurora master + reader endpoints; redis cluster's
+N node hostnames; RDS Multi-AZ primary + standby), model the
+cluster as **ONE component** with the N endpoint hostnames as
+SEPARATE attribution rows (resource_type=`hostname`, plane=`telemetry`
+or `github`, identifier=each endpoint). Role distinctions
+(master/reader/primary/standby) go into `metadata.role` on each
+attribution.
+
+Concrete worked example for Aurora:
+  upsert_component(canonical_name='feeds-aggregator-v2-aurora',
+                    component_type='database', display_name='Feeds Aurora cluster')
+  upsert_attribution(... resource_type='hostname',
+                     identifier='feeds-aggregator-v2-aurora-master.dream11.local',
+                     metadata={{"role":"writer","endpoint_type":"master"}})
+  upsert_attribution(... resource_type='hostname',
+                     identifier='feeds-aggregator-v2-aurora-reader.dream11.local',
+                     metadata={{"role":"reader","endpoint_type":"reader"}})
+
+Rationale: blast-radius is at the cluster level (master down = whole
+DB unavailable; reader-only outages still degrade the same logical
+service). "Different hostname → different component" is wrong for
+cluster topologies. If two SMEs independently materialised master +
+reader as separate components, nominate a merge with cluster-doctrine
+as the rationale. Run #4 had fantasy-tour-admin-aurora-reader frozen
+on a tombstone post-failed-cascade (5 attrs) — Phase 10.14.4 fixed
+the cascade; this doctrine prevents the recurrence.
+
+ABBREVIATION HALLUCINATION GUARD (Phase 10.15 — closes run #4 ft-cm
+case where SME invented "Fantasy Tour Contest Management" from
+APM-abbreviation `ft-cm` without any cross-plane evidence).
+When you discover an APM service name / metric label / span attribute
+that LOOKS like an abbreviation (`ft-cm-poller`, `fav2-api`,
+`gpc-admin`), DO NOT expand the abbreviation to a guessed full
+phrase for your component's canonical_name. **Keep canonical_name =
+the literal identifier you observed** (so `canonical_name=
+'ft-cm-poller'`, NOT `canonical_name='fantasy-tour-contest-management-poller'`).
+The literal identifier is what cross-plane peers will use to search
+for siblings via vector_search. If a github SME later materialises
+`fantasy-commentary-poller` and finds it via vector_search, that SME
+nominates a merge and YOUR canonical_name gets updated through the
+merge cascade — that's the only sanctioned way to expand an
+abbreviation. Hallucinating an expansion guarantees no cross-plane
+peer ever finds you (insight in run #4: ft-cm-poller SME guessed
+"Fantasy Tour Contest Management Poller", was actually
+fantasy-commentary; admin had to manually intervene).
+
+TELEMETRY BARE-LABEL LOW-CONFIDENCE PLACEHOLDER (Phase 10.15 — closes
+run #4 O3: Last9 emits bare `redis` / `mysql` / `kafka` labels when
+the calling service has no OTel CLIENT span attribute populated).
+If your only evidence for a cache / DB / queue resource is a bare
+type label from a dependency graph (no hostname, no APM service name,
+no per-instance identifier), still materialise the component — but:
+  - confidence = 0.5 (placeholder; reflects the thin evidence)
+  - metadata.awaiting_hostname_corroboration = true
+  - canonical_name reflects the bare label + calling service for
+    uniqueness (e.g. `fav2-api-redis-unknown` if no hostname known)
+Do NOT try to merge it with any other component yet — let the cross-
+plane sibling-search rule (post-Phase-10.14.1 lock-step removal)
+catch the merge organically when a github SME later finds the
+hostname via grep on the calling service's config files.
+
 == THIN-EVIDENCE SKEPTICISM (Phase 10.13.5 — REREAD before nominating) ==
 
 BEFORE nominating ANY merge, SELF-AUDIT your evidence depth. Thin

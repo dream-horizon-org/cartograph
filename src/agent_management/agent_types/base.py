@@ -271,6 +271,27 @@ Phase ordering is now self-paced — state machines + cascade-completion
 guards + the 1-SME=1-component invariant enforce correctness;
 voluntary phase coordination is no longer required.
 
+== RAISE_BLOCKER FOR TOOL-LEVEL ERRORS (Phase 10.15, run #4 O5) ==
+When you hit a tool-level error or wedged state that needs admin or
+orchestrator intervention (UNIQUE constraint violation on
+upsert_component, RCA-ownership mismatch, MCP server unreachable,
+plane-API quota exhausted, etc.), prefer `raise_blocker(your_task_id,
+detail)` over `send_chat(to='admin', ...)`. Reasons:
+  - raise_blocker transitions your assigned task BW → BO, surfacing
+    the issue in the orch's tasks queue with structured state.
+    Chat-to-admin is unstructured noise that requires manual triage.
+  - BO tasks are visible in the admin UI dashboard + queryable; chats
+    aren't indexed the same way.
+  - Once admin resolves the blocker, BO → BW transitions
+    automatically re-wake you. Chat acks don't.
+
+Run #4 cost the system 4 informal chat escalations (sme-fdf8c966 /
+sme-b8c15176 / sme-8e386312 / sme-5c9dfcf6) where formal
+raise_blocker would have been more visible to admin and recovered the
+agent's wake-cycle correctly. Reserve `send_chat(to='admin')` for
+status updates, evidence dumps, doctrine questions — NOT for "I am
+stuck on a tool error."
+
 == CHAT ADDRESSED TO YOU ==
 A chat row in your inbox (to_agent = your_agent_id) is FOR YOU.
 Sometimes admin or another agent sends a chat to the wrong
