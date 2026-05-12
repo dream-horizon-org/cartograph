@@ -435,8 +435,14 @@ def test_split_b1_nominator_back_to_R_only(agent_factory):
 
 # ---------- Phase 4: mutation lifecycle ----------
 
-def _seed_m_state(agent_factory):
-    """Common setup: merge consolidation in state M with sme-a as mutation_assigned_to."""
+def _seed_m_state(agent_factory, stamp_cascade: bool = True):
+    """Common setup: merge consolidation in state M with sme-a as mutation_assigned_to.
+
+    Phase 10.14.3: execute_mutation refuses M→MD unless cascade_completed_at
+    is set (signals absorb_agent or spawn_child_agent ran). For unit tests
+    that only exercise execute_mutation's other gates, stamp it directly.
+    Tests of the Phase 10.14.3 guard itself pass stamp_cascade=False.
+    """
     _iter(agent_factory, "i", "github")
     ca = _sme_with_component(agent_factory, "i", "sme-a", "o/a", "a")
     cb = _sme_with_component(agent_factory, "i", "sme-b", "o/b", "b")
@@ -446,6 +452,11 @@ def _seed_m_state(agent_factory):
     consolidation.review_consolidation(
         "res", cons["id"], 0.95, "approve", "M", "sme-a"
     )
+    if stamp_cascade:
+        execute_mutate(
+            "UPDATE consolidations SET cascade_completed_at = now() WHERE id=%s",
+            (cons["id"],),
+        )
     return cons["id"]
 
 
@@ -554,3 +565,111 @@ def test_get_consolidation_thread_scope(agent_factory):
     # Non-participant gets empty.
     thread_c = consolidation.get_consolidation_thread("sme-c", cons["id"])
     assert thread_c == []
+
+
+# ========================== Phase 10.14.3 ==========================
+
+
+def test_phase10_14_3_execute_mutation_blocked_without_cascade(agent_factory):
+    """The new guard: execute_mutation refuses M→MD if cascade_completed_at
+    is NULL. Reproduces the F3 silent-corruption case from cons a21f113a
+    where sme-5c9dfcf6 fired execute_mutation before absorb_agent.
+    """
+    cons_id = _seed_m_state(agent_factory, stamp_cascade=False)
+    with pytest.raises(ValueError, match="cascade_completed_at"):
+        consolidation.execute_mutation("sme-a", cons_id, "trying without absorb")
+    # Status MUST stay at M.
+    row = execute_one("SELECT status FROM consolidations WHERE id=%s", (cons_id,))
+    assert row["status"] == "M"
+
+
+def test_phase10_14_3_execute_mutation_allowed_after_cascade_stamp(agent_factory):
+    """Once cascade_completed_at is stamped (absorb_agent or
+    spawn_child_agent done) execute_mutation proceeds normally."""
+    cons_id = _seed_m_state(agent_factory, stamp_cascade=False)
+    # Stamp directly — simulates absorb_agent's stamp.
+    execute_mutate(
+        "UPDATE consolidations SET cascade_completed_at = now() WHERE id=%s",
+        (cons_id,),
+    )
+    result = consolidation.execute_mutation("sme-a", cons_id, "now done")
+    assert result["status"] == "MD"
+
+
+def test_phase10_14_3_absorb_agent_stamps_cascade_completed_at(agent_factory):
+    """absorb_agent (merge path) populates cascade_completed_at on success."""
+    from cartograph_mcp.tools import mutation
+    cons_id = _seed_m_state(agent_factory, stamp_cascade=False)
+    # Before: NULL.
+    pre = execute_one(
+        "SELECT cascade_completed_at FROM consolidations WHERE id=%s", (cons_id,)
+    )
+    assert pre["cascade_completed_at"] is None
+    # absorb_agent should stamp it.
+    mutation.absorb_agent("sme-a", cons_id, "sme-b")
+    post = execute_one(
+        "SELECT cascade_completed_at FROM consolidations WHERE id=%s", (cons_id,)
+    )
+    assert post["cascade_completed_at"] is not None
+
+
+def test_phase10_14_3_spawn_child_stamps_cascade_completed_at(agent_factory):
+    """spawn_child_agent (split path) also stamps cascade_completed_at."""
+    from cartograph_mcp.tools import mutation, resources
+    # Set up a split consolidation in state M.
+    _iter(agent_factory, "i", "github")
+    r = resources.upsert_resource("i", "github", "repo", "o/x")
+    agent_factory("sme-a", "sme")
+    execute_mutate(
+        """INSERT INTO resource_component_agents (resource_id, component_id, agent_id)
+           VALUES (%s, NULL, %s)""",
+        (r["id"], "sme-a"),
+    )
+    from cartograph_mcp.tools import components
+    c = components.upsert_component(
+        "sme-a",
+        {
+            "canonical_name": "o/x",
+            "display_name": "x",
+            "component_type": "application",
+            "source_slice": {str(r["id"]): {"paths": ["a/", "b/"]}},
+        },
+    )
+    agent_factory("res", "resolver")
+    cons = consolidation.nominate_consolidation(
+        "sme-a", c["id"], None, "split", 0.95, "split a/ from b/"
+    )
+    execute_mutate(
+        "UPDATE consolidations SET status='R' WHERE id=%s", (cons["id"],)
+    )
+    consolidation.review_consolidation(
+        "res", cons["id"], 0.95, "approve", "M", "sme-a"
+    )
+    pre = execute_one(
+        "SELECT cascade_completed_at FROM consolidations WHERE id=%s",
+        (cons["id"],),
+    )
+    assert pre["cascade_completed_at"] is None
+    mutation.spawn_child_agent(
+        "sme-a", cons["id"],
+        {"canonical_name": "o/child", "display_name": "child",
+         "component_type": "application"},
+        {str(r["id"]): {"paths": ["b/"]}},
+        "carve b/",
+    )
+    post = execute_one(
+        "SELECT cascade_completed_at FROM consolidations WHERE id=%s",
+        (cons["id"],),
+    )
+    assert post["cascade_completed_at"] is not None
+
+
+def test_phase10_14_3_full_merge_flow_uses_guard(agent_factory):
+    """End-to-end: absorb_agent → execute_mutation succeeds because
+    cascade_completed_at was stamped by absorb. Re-run without absorb
+    on a fresh cons: execute_mutation refuses."""
+    from cartograph_mcp.tools import mutation
+    cons_id = _seed_m_state(agent_factory, stamp_cascade=False)
+    mutation.absorb_agent("sme-a", cons_id, "sme-b")
+    result = consolidation.execute_mutation("sme-a", cons_id, "merged")
+    assert result["status"] == "MD"

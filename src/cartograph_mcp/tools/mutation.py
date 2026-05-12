@@ -372,6 +372,16 @@ def absorb_agent(
                 r = transfer_flows(agent_id, consolidation_id, flow_ids)
                 cascade_result["flows"] = r["transferred"]
 
+    # Phase 10.14.3: stamp cascade_completed_at. execute_mutation refuses
+    # M→MD without this stamp — guards against the silent corruption
+    # observed on cons a21f113a (execute_mutation fired before
+    # absorb_agent → state machine advanced M→MD without any actual
+    # cascade).
+    execute_mutate(
+        "UPDATE consolidations SET cascade_completed_at = now() WHERE id = %s",
+        (consolidation_id,),
+    )
+
     return {
         "absorbed": target_agent_id,
         "survivor": agent_id,
@@ -713,6 +723,13 @@ def spawn_child_agent(
             parent_component_id, child_component_id,
         )
         transferred_attributions = r["transferred"]
+
+    # Phase 10.14.3: stamp cascade_completed_at. execute_mutation refuses
+    # M→MD without this stamp.
+    execute_mutate(
+        "UPDATE consolidations SET cascade_completed_at = now() WHERE id = %s",
+        (consolidation_id,),
+    )
 
     return {
         "child_agent_id": child_agent_id,
