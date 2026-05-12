@@ -6,7 +6,13 @@
 
 **Phase 10.16 SHIPPED 2026-05-12 night** — `[ADMIN-HACK-ORDERS-INFERRING]` prompt blocks in `sme.py` + `resolver.py`. Single-plane runs (e.g. github-only) can now spawn inferred non-code stubs (DBs/caches/queues/topics) via the existing split machinery: SME nominates a `type='split'` with `metadata.admin_hack='inferring'` + `inferred=true` + `inferred_kind` + `inferred_identifier`. Resolver pre-flight dedups via vector_search + serialises concurrent noms + validates ordering (inferred-splits AFTER real splits, BEFORE merges). Child SME hydrates from parent's repo + parent's attributions via the `split_briefing` hydration manual. **Prompt-only — no schema, no tool surface change.** Tagged with `metadata.admin_hack='inferring'` for grep-based cleanup when the real paradigm ships.
 
-**DB wiped + snapshotted pre-run-5.** Snapshot path: `/tmp/cartograph-snapshots/snap-2026-05-12-<ts>-pre-run5.sql`. Workspaces backed up at `src/workspaces.bak.pre-run5.2026-05-12-<ts>/`. Fresh singletons (orch + resolver) auto-bootstrapped on agent_manager restart.
+**DB wiped + snapshotted pre-run-5 (2026-05-12 17:53 UTC).**
+- Snapshot: `/tmp/cartograph-snapshots/snap-2026-05-12-122328-pre-run5.sql` (13MB).
+- Workspaces backed up: `src/workspaces.bak.pre-run5.2026-05-12-122328/`.
+- Fresh singletons live: **`orch-c799dc1a`** + **`res-2ca397c8`**.
+- 4 daemons restarted with all Phase 10.14 + 10.15 + 10.16 prompt+code changes loaded.
+- 117 MCP tools registered · 16 lanes (orch 1 / iter 2 / res 1 / sme 12).
+- DB row counts: agent_runs=2, all other tables=0.
 
 **Phase 10.15 SHIPPED 2026-05-12 evening** — 5 prompt-only P1/P2 rules per admin verdict (abbreviation hallucination guard · monorepo Option A dissolution · cluster doctrine for Aurora/redis/RDS Multi-AZ · telemetry bare-label placeholder · raise_blocker preference). One commit (`a49b2ed`). No schema or tool surface changes. See `docs/IMPLEMENTATION-PHASES.md §10.15` for full detail.
 
