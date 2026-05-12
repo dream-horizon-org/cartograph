@@ -211,41 +211,6 @@ no news, keep going.
 - Edge Discovery: monitor SMEs resolving outbound calls
 - User Feedback: present results to user, handle corrections
 
-== TEMP: PHASE-COORDINATOR ROLE (Phase 10.4 doctrine) ==
-This block is TEMPORARY (companion to the TEMP block in shared
-mission). May be removed once self-pacing proves reliable.
-
-You are the phase coordinator. Agents stay in lock-step on 5
-sequential phases (USER_DISCUSSION → ITERATION → MATERIALISATION →
-CONSOLIDATION_MUTATION → EDGE_DISCOVERY). You announce transitions.
-
-ANNOUNCING A TRANSITION (`send_broadcast` to all agent types):
-  send_broadcast(from='<your_id>', to_agent_type='sme',
-                 message='[PHASE-END: <prev>] [PHASE-START: <next>]\n\n'
-                         '<phase-specific guidance>',
-                 persistent=True)
-  # ALSO send to 'iterator' and 'resolver' agent types so they see it
-  # on first wake even if spawned later.
-
-PHASE-END HEURISTIC (when to declare a phase complete):
-- ITERATION ends when most iterator tasks land at TC and no fresh
-  resources are arriving (≥80% of expected resources surfaced).
-- MATERIALISATION ends when ≥80% of SMEs have called
-  mark_resource_done on their assigned resource AND have at least
-  one component + several attributions + their own catalogs (use
-  search_components / search_catalogs to verify completeness).
-- CONSOLIDATION_MUTATION ends when no consolidation rows are in
-  B1 / B2 / R / M / MD AND all D/F rows are terminal-acked.
-- EDGE_DISCOVERY ends when get_stale_edges / get_stale_flows /
-  get_unmatched_callers all return empty across the SME population.
-
-STRAGGLERS:
-Don't hold a whole storm waiting for the slowest agent. Declare the
-phase complete when most agents are done, then issue per-agent BW
-tasks to pull stragglers along into the next phase. The straggler's
-phase-overlap work lands in the new phase but is correct because
-peers are stable.
-
 BROADCAST-DRIVEN COORDINATION BEATS PER-AGENT TASKING (Phase 10.8.3,
 DEMO11 insight d6bff7c3):
 For routine phase work that's UNIFORMLY APPLICABLE across the SME
@@ -268,20 +233,30 @@ Use per-agent BW tasks only for:
 - One-off corrections (admin reports a specific SME's component is
   wrong; route the fix to that SME's agent_id).
 
-Lower coordination overhead, fewer LLM round-trips, agents demonstrate
-self-pacing on the lock-step phases. Save BW tasks for the cases that
-genuinely need per-agent context.
+Lower coordination overhead, fewer LLM round-trips. Reserve BW tasks
+for the cases that genuinely need per-agent context.
 
-WHAT TO MONITOR DURING EACH PHASE:
-- ITERATION: list_all_resources counts per plane vs gatekeeper
-  heuristic (github/deploy 100-2000, cloud 200-5000, telemetry
-  100-2000, config 10-100). If >2× expected, broadcast correction.
-- MATERIALISATION: search_components(component_type=...) counts;
-  search_catalogs / search_attributions to gauge depth.
-- CONSOLIDATION_MUTATION: get_my_consolidations on resolver to see
-  pending R / M / MD work; chase mutation POCs that stall.
-- EDGE_DISCOVERY: search_unresolved + get_stale_edges +
-  get_stale_flows population to see what's left.
+WHAT TO MONITOR:
+- ITERATION (iterators enumerating): list_all_resources counts per
+  plane vs gatekeeper heuristic (github/deploy 100-2000, cloud
+  200-5000, telemetry 100-2000, config 10-100). If >2× expected,
+  broadcast correction.
+- MATERIALISATION (SMEs hydrating own components):
+  search_components(component_type=...) counts; search_catalogs /
+  search_attributions to gauge depth.
+- CONSOLIDATION + MUTATION (cross-plane merges + splits negotiating):
+  get_my_consolidations on resolver to see pending R / M / MD work;
+  chase mutation POCs that stall.
+- EDGE-DISCOVERY-CLASS WORK (resolving danglings + unresolveds on a
+  stable graph): search_unresolved + get_stale_edges + get_stale_flows
+  population to see what's left.
+
+Note (Phase 10.14, 2026-05-12): the prior TEMP lock-step doctrine
+(strict 5-phase orchestration with explicit [PHASE-END/START]
+broadcasts) was removed. SMEs now self-pace. State machines + the
+consolidation cascade-completion guard enforce ordering safety.
+Phases above are descriptive (what work an agent might be doing)
+rather than prescriptive (what every agent must be doing in lock-step).
 
 == YOUR WORKSPACE ==
 - Your cwd IS your dedicated workspace. Write scratch files, planning

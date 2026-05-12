@@ -1,6 +1,6 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-05-12):** Phases 0 → 10.13 all ✅ except Phase 6 (Globe — parked on `feat/globe-experimental`). Run #4 in flight on `feat/prompt-tuning-and-bug-fixes` (branched from master @ `b13d89b`). 13 issues identified (8 admin-observed + 5 from agent insights) documented in `docs/RUN4-ISSUES-AWAITING-VERDICT.md`; awaiting admin verdict on which to ship. Bedrock token rotated 2026-05-12 06:51 UTC. **Phase 10.13 SHIPPED** — 10 sub-phases across 3 tiers landed in 9 commits; tool count 114 → 117 (+3: `get_component_owner`, `resolve_references_bulk`, `bind_edges_bulk`); 1 schema migration (attribution UNIQUE → component-scoped); 13 OPEN insights triaged (10 promoted, 3 wontfix). **Two post-sync follow-ups (2026-05-11)** ahead of 4th real-data attempt: `8c7fd30` Phase 10.13.12 iterator ADMIN-SCOPE rule (respect narrow target lists — upsert only named targets + their dependency-linked infra; full enumeration dumps to workspace file; saves ~50 LOC of admin kickoff boilerplate); `89ec1c4` Phase 10.13.13 SME lanes 8 → 12 (total concurrent subprocesses 12 → 16: orch 1 + iter 2 + res 1 + sme 12). **Runtime infra shipped 2026-05-08** (`adb59f3`): `CARTOGRAPH_AGENT_SETTINGS_PATH` env var toggles Bedrock-isolated agent auth. **DB wiped 2026-05-11** pre-4th-real-data-run (snapshot `/tmp/cartograph-snapshots/snap-2026-05-11-073639-pre-realdata4.sql`, workspaces backed up at `src/workspaces.bak.pre-realdata4.2026-05-11-073639/`). Fresh singletons live: `orch-841b98fd` + `res-fdb7d978`. **Next work: 4th real-data onboarding** with new ADMIN-SCOPE prompt + 16-lane concurrency.
+**Status (2026-05-12 afternoon):** Phases 0 → 10.13 all ✅ except Phase 6 (Globe — parked). **Phase 10.14 IN-PROGRESS** on `feat/prompt-tuning-and-bug-fixes` — admin verdict confirmed; 4 P0s being shipped this session (see §10.14 below). Phases 0 → 10.13 status unchanged from prior summary. Bedrock token rotated 2026-05-12 06:51 UTC. **Phase 10.13 SHIPPED** — 10 sub-phases across 3 tiers landed in 9 commits; tool count 114 → 117 (+3: `get_component_owner`, `resolve_references_bulk`, `bind_edges_bulk`); 1 schema migration (attribution UNIQUE → component-scoped); 13 OPEN insights triaged (10 promoted, 3 wontfix). **Two post-sync follow-ups (2026-05-11)** ahead of 4th real-data attempt: `8c7fd30` Phase 10.13.12 iterator ADMIN-SCOPE rule (respect narrow target lists — upsert only named targets + their dependency-linked infra; full enumeration dumps to workspace file; saves ~50 LOC of admin kickoff boilerplate); `89ec1c4` Phase 10.13.13 SME lanes 8 → 12 (total concurrent subprocesses 12 → 16: orch 1 + iter 2 + res 1 + sme 12). **Runtime infra shipped 2026-05-08** (`adb59f3`): `CARTOGRAPH_AGENT_SETTINGS_PATH` env var toggles Bedrock-isolated agent auth. **DB wiped 2026-05-11** pre-4th-real-data-run (snapshot `/tmp/cartograph-snapshots/snap-2026-05-11-073639-pre-realdata4.sql`, workspaces backed up at `src/workspaces.bak.pre-realdata4.2026-05-11-073639/`). Fresh singletons live: `orch-841b98fd` + `res-fdb7d978`. **Next work: 4th real-data onboarding** with new ADMIN-SCOPE prompt + 16-lane concurrency.
 
 Most recent (2026-05-05 → 2026-05-06):
 - **10.7** (`description` column separate from `doc_md` + `vector_search` filters + `exclude_self` + workspace-local doc_md) — 8 sub-commits ending at `e7ce669`.
@@ -6135,3 +6135,238 @@ cartograph/
 - `embedding.py` / `vector_search` tool — not built yet (needed for materialisation lookups).
 - Components/attributions/edges/unresolved/consolidations/clarifications/mutations tool modules — not built.
 - Auto-spawn scanner for SMEs from pending resources — not built (orchestrator currently spawns via `create_agent`).
+
+---
+
+## Phase 10.14: Run #4 bug-fix bundle — 4 P0s from admin verdict (2026-05-12, IN PROGRESS)
+
+**Source:** admin walk-through of `docs/RUN4-ISSUES-AWAITING-VERDICT.md` 2026-05-12. Three distinct failure modes identified across run #4's leftover/duplicate components:
+- **F1** cross-plane merge never nominated (caused by TEMP lock-step doctrine).
+- **F2** cascade-attribution UNIQUE collision → SME workaround `cascade_attributions=False` → target decom but attrs frozen on tombstone.
+- **F3** `execute_mutation` fired before `absorb_agent` → state machine advanced M→MD without actual absorb → silent corruption.
+
+Plus #8 spawn collision (SME owns multiple active comps because caller supplies `child_agent_id` that may already be in use).
+
+Four P0 sub-phases, ship in order. Each is its own commit + test set.
+
+### 10.14.1 — Drop the TEMP lock-step doctrine (P0-1, XS)
+
+**Why.** F1's root cause. SMEs read "stay DANGLING during MATERIALISATION" as "no cross-plane discovery at all." Per-phase cost not tracked; state machines already enforce ordering safely.
+
+**Files:**
+- `src/agent_management/agent_types/base.py` — remove `== TEMP: PHASE-WISE LOCK-STEP PROGRESSION ==` block from `MISSION_AND_VOCABULARY`.
+- `src/agent_management/agent_types/orchestrator.py` — remove phase-coordinator section that emits `[PHASE-END]/[PHASE-START]` broadcasts on the ≥80% heuristic.
+
+**Smoke test:** `SYSTEM_PROMPT_TEMPLATE.format(plane='x', resource_id='y')` for sme + iterator; module-import for orch + resolver. Verify all 4 prompts compile clean.
+
+**Companion drop:** O1 (orch self-pacing on phase advance) becomes moot.
+
+**No tests** beyond compile smoke. Prompt-only edit.
+
+**Effort:** XS (~20 LOC delete).
+
+### 10.14.2 — `spawn_child_agent` mints fresh agent_id server-side (P0-4, XS)
+
+**Why.** #8: parent SME supplies `child_agent_id`, sometimes collides with an existing agent. Three SMEs wedged in run #4 because the spawn re-used an active SME's id, putting it into ownership of two active components — violating the 1-SME = 1-component invariant.
+
+**Files:**
+- `src/cartograph_mcp/tools/mutation.py::spawn_child_agent` — remove `child_agent_id` parameter. Generate fresh id internally via `f"sme-{uuid.uuid4().hex[:8]}"`. Loop on collision against `agent_runs.agent_id` to guarantee uniqueness.
+- `src/cartograph_mcp/server.py` — wrapper signature loses `child_agent_id`. If a caller passes it (legacy prompt), raise `ValueError("spawn_child_agent no longer accepts child_agent_id — id is minted server-side")`.
+- `src/agent_management/agent_types/sme.py` — update mutation/split worked example to NOT show `child_agent_id=...` arg.
+
+**Tests:**
+- `test_spawn_child_mints_fresh_id` — call without child_agent_id, assert returned id is fresh, not in any existing agent_runs row.
+- `test_spawn_child_rejects_legacy_param` — pass child_agent_id, expect ValueError.
+- `test_spawn_child_no_collision_under_concurrent_spawns` — spawn 5 children sequentially, assert all 5 unique ids.
+
+**Effort:** XS (~30 LOC + 3 tests).
+
+### 10.14.3 — `consolidations.cascade_completed_at` guard (P0-2, M)
+
+**Why.** F3: `execute_mutation` advanced M→MD without verifying an `absorb_agent` (merge) or `spawn_child_agent` (split) ran. sme-5c9dfcf6's cons `a21f113a` is the proof case.
+
+**Schema (idempotent migration in `src/shared/migrations.py`):**
+```sql
+ALTER TABLE consolidations ADD COLUMN IF NOT EXISTS cascade_completed_at TIMESTAMPTZ;
+```
+
+**Setter sites (mutation.py):**
+- `absorb_agent` — at end of successful path, after all cascades complete:
+  ```sql
+  UPDATE consolidations SET cascade_completed_at = now() WHERE id = consolidation_id;
+  ```
+- `spawn_child_agent` — at end of successful path, after spawn + carve + welcome task creation.
+
+**Enforcer site (mutation.py::execute_mutation):**
+- Before allowing M→MD transition:
+  ```python
+  row = execute_one(
+      "SELECT cascade_completed_at FROM consolidations WHERE id = %s AND status = 'M'",
+      (consolidation_id,),
+  )
+  if not row or row["cascade_completed_at"] is None:
+      raise ValueError(
+          "execute_mutation requires absorb_agent (merge) or spawn_child_agent (split) "
+          "to have run first since M-state began. Call the cascade tool first, then "
+          "execute_mutation to transition M→MD."
+      )
+  ```
+
+**Prompt clarification (sme.py mutation block):** explicit worked example showing `absorb_agent → execute_mutation` order with a callout about the new guard.
+
+**Tests:**
+- `test_execute_mutation_blocked_without_absorb` — set up merge cons in M, call execute_mutation directly without absorb_agent → ValueError.
+- `test_execute_mutation_allowed_after_absorb` — same setup, run absorb_agent first, then execute_mutation succeeds, status M→MD.
+- `test_execute_mutation_blocked_without_spawn` — set up split cons in M, call execute_mutation directly → ValueError.
+- `test_execute_mutation_allowed_after_spawn` — same, run spawn_child_agent first, execute succeeds.
+- `test_cascade_completed_at_idempotent` — running absorb twice on same cons (re-call) doesn't break (already-stamped is fine).
+
+**Effort:** M (~80 LOC + migration + 5 tests).
+
+### 10.14.4 — Attribution cascade auto-dedup + delete cascade_*=False flags (P0-3, M)
+
+**Why.** F2: cascade hits `UNIQUE (component_id, plane, rt, id)` on legitimate shared categorical tags. SMEs work around via `cascade_attributions=False`, leaving attrs frozen on decom tombstones. Same problem class addressed for edges in Phase 10.13.8.
+
+**Behavioural change in `mutation.py::_cascade_attributions` (or wherever the attribution cascade lives — probably inside `absorb_agent` body):**
+
+```python
+for attr in target_attrs:
+    existing = execute_one(
+        """SELECT id, metadata, confidence
+           FROM attributions
+           WHERE component_id = %s AND plane = %s AND resource_type = %s AND identifier = %s""",
+        (survivor_component_id, attr["plane"], attr["resource_type"], attr["identifier"]),
+    )
+    if existing:
+        # Collision — keep survivor's row, merge metadata, MAX confidence, drop target's row
+        merged_metadata = {**target_attr["metadata"], **survivor_attr_existing["metadata"]}
+        # Note: target keys merged in first so survivor's keys win on conflict
+        # Or: depending on desired precedence, swap order. Document choice.
+        execute_mutate(
+            """UPDATE attributions
+                  SET metadata = %s::jsonb,
+                      confidence = GREATEST(confidence, %s),
+                      last_seen_at = now()
+                WHERE id = %s""",
+            (json.dumps(merged_metadata), attr["confidence"], existing["id"]),
+        )
+        execute_mutate("DELETE FROM attributions WHERE id = %s", (attr["id"],))
+        cascade_summary["dedup_collisions"] += 1
+    else:
+        # No collision — standard move
+        execute_mutate(
+            "UPDATE attributions SET component_id = %s WHERE id = %s",
+            (survivor_component_id, attr["id"]),
+        )
+        cascade_summary["transferred"] += 1
+```
+
+**Tool surface change — delete all 3 cascade boolean flags:**
+- `absorb_agent` signature: drop `cascade_attributions`, `cascade_edges`, `cascade_flows` parameters entirely.
+- Behavior is always cascade=True for all three.
+- If a caller passes any of these legacy params: raise `ValueError("cascade_* flags removed — cascade is unconditional now; use delete_attribution + upsert_attribution post-merge if you need to hand-pick.")`.
+
+**MCP wrapper update (`server.py`):** signature change.
+
+**SME prompt update (`sme.py`):** remove any mention of `cascade_attributions=False` / `cascade_edges=False` / `cascade_flows=False` workaround patterns. Note that cascade is unconditional now.
+
+**One-shot SQL backfill** (run once on live DB, NOT in migrations — manual cleanup):
+```sql
+-- Move 11 frozen attrs from fantasy-tour-admin-telemetry tombstone to fantasy-tour-admin
+-- ... handle (plane, rt, id) collisions via the same dedup logic
+-- Move 5 frozen attrs from fantasy-tour-admin-aurora-reader tombstone to fantasy-tour-admin-aurora
+-- ... same dedup
+```
+Defer this to admin's verdict on graph-state cleanup (per RUN4-ISSUES open question #2).
+
+**Tests:**
+- `test_cascade_attributions_collision_keeps_survivor_merges_metadata` — set up survivor + target with shared `(telemetry, runtime, jvm)`, call absorb, assert target's row gone, survivor's metadata contains target's metadata keys, confidence is MAX.
+- `test_cascade_attributions_no_collision_moves_normally` — disjoint attrs cascade cleanly via UPDATE.
+- `test_cascade_attributions_mixed_collision_and_normal` — 5 target attrs, 2 collide, 3 don't. All 5 land on survivor. 2 deduped, 3 transferred.
+- `test_absorb_agent_no_longer_accepts_cascade_flags` — passing `cascade_attributions=False` raises ValueError.
+- `test_absorb_agent_cascade_summary_includes_dedup_count` — response shape includes `cascade_collisions_resolved: N`.
+
+**Effort:** M (~100 LOC + 5 tests).
+
+### 10.14.5 — Doc-sync
+
+After 10.14.1–4 land:
+- `docs/HLD.md` §2.5 + §9 — `spawn_child_agent` signature change (drops child_agent_id) + `absorb_agent` signature change (drops cascade flags) + note Phase 10.14 lock-step removal.
+- `docs/SCHEMA.md` — `consolidations.cascade_completed_at TIMESTAMPTZ` column.
+- `docs/TRIGGER-MANAGEMENT.md` §3 — new tool contracts.
+- `docs/AGENT-PROMPTS.md` — Phase 10.14 bullet under §0 mentioning the 4 changes.
+- `docs/IMPLEMENTATION-PHASES.md` — this section gets commit hashes filled in + SHIPPED marker.
+- `docs/POST-COMPACTION-RECOLLECTION.md` — §0a refresh to point at Phase 10.14 SHIPPED.
+- `docs/PROMPT-ENHANCEMENTS.md` §2 — promote the relevant §3 entries that 10.14 closes.
+
+**Effort:** S (mechanical doc updates).
+
+### 10.14.6 — Agent verification on current DB state
+
+Minimal smoke test before final commit:
+- Pick 1-2 active SMEs from current run #4 DB.
+- Send admin chat asking about cross-plane sibling-search (verifies lock-step removal landed).
+- Trigger orchestrator to perform any health-check verification.
+- DO NOT wipe DB before this — verification uses current state.
+
+After verification passes, admin wipes DB + runs fresh iteration.
+
+### 10.14.7 — Commit cadence + ordering
+
+```
+10.14.1  drop lock-step doctrine                ← XS, ship FIRST (kills F1)
+10.14.2  spawn_child fresh-id only              ← XS, kills #8 wedge class
+10.14.3  cascade_completed_at guard             ← M, kills F3 silent corruption
+10.14.4  attribution cascade auto-dedup + flags ← M, kills F2 + workaround pattern
+10.14.5  doc-sync                               ← S, mechanical
+10.14.6  agent verification                     ← S, smoke
+```
+
+Each = own commit + push. Restart MCP server after 10.14.3 (migration). Restart agent_manager after any prompt change (cleaner, not strictly required).
+
+### 10.14.8 — Test budget
+
+| Sub | New tests |
+|---|---:|
+| 10.14.1 | 0 (smoke compile only) |
+| 10.14.2 | 3 |
+| 10.14.3 | 5 |
+| 10.14.4 | 5 |
+| **Total** | **13** |
+
+### 10.14.9 — Schema delta
+
+```sql
+ALTER TABLE consolidations ADD COLUMN IF NOT EXISTS cascade_completed_at TIMESTAMPTZ;
+```
+
+Single nullable column. Idempotent. Zero data migration. Existing consolidations remain valid (NULL just means "pre-10.14.3 cons or never-cascaded").
+
+### 10.14.10 — Tool surface delta
+
+| Tool | Change |
+|---|---|
+| `absorb_agent` | DROPS `cascade_attributions`, `cascade_edges`, `cascade_flows` params. Cascade is unconditional. |
+| `spawn_child_agent` | DROPS `child_agent_id` param. Server mints fresh id. |
+| `execute_mutation` | Now refuses M→MD if `consolidations.cascade_completed_at IS NULL`. |
+
+Tool count: 117 (unchanged — no tools added or removed, just signature changes).
+
+### 10.14.11 — Items NOT shipping in 10.14 (deferred)
+
+- **#1 abbreviation-stays-verbatim rule** (P2) — prompt-only nudge for run #5; ship if time after P0s.
+- **#2 monorepo container dissolution** (P1) — needs admin verdict on Option A vs B; bundle with run #5 prep.
+- **#3 + NEW-B cluster doctrine** (P1) — needs admin verdict.
+- **#5(c) `/api/agents` multi-component dedup UI bug** (P1) — separate UI investigation; track as own task.
+- **O4 `mark_resource_done` precondition gate** (P1) — needs admin verdict on hard-refuse vs soft-warn.
+- **O3 telemetry bare-redis** (P2) — simplified to "do nothing special, low-conf placeholder."
+
+### 10.14.12 — Status (updated as commits land)
+
+| Sub | Commit | Date |
+|---|---|---|
+| 10.14.1 lock-step drop | _pending_ | _pending_ |
+| 10.14.2 spawn fresh-id | _pending_ | _pending_ |
+| 10.14.3 cascade_completed_at guard | _pending_ | _pending_ |
+| 10.14.4 attr cascade auto-dedup + flag delete | _pending_ | _pending_ |
+| 10.14.5 doc-sync | _pending_ | _pending_ |

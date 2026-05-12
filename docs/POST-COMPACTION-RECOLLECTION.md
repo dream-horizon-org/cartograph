@@ -1,6 +1,38 @@
-# Cartograph — Post-Compaction Recollection (2026-05-12, run #4 in flight)
+# Cartograph — Post-Compaction Recollection (2026-05-12, Phase 10.14 in flight)
 
-## 0a. RUN #4 STATE + AWAITING-VERDICT DOC (most important — read first)
+## 0a. PHASE 10.14 BUG-FIX BUNDLE — IN PROGRESS (most important — read first)
+
+**Branch:** `feat/prompt-tuning-and-bug-fixes` (branched from master @ `b13d89b` post-merge of Phase 10.13).
+
+**Admin verdict received 2026-05-12 afternoon.** Shipping 4 P0s in order — see `docs/IMPLEMENTATION-PHASES.md §10.14` for full step-by-step plan:
+
+| # | Sub | What | Effort | Status |
+|---|---|---|---|---|
+| P0-1 | 10.14.1 | Drop the TEMP lock-step doctrine (kills F1 cross-plane miss) | XS | _check git log_ |
+| P0-4 | 10.14.2 | `spawn_child_agent` mints fresh agent_id server-side (kills #8 wedge class) | XS | _check git log_ |
+| P0-2 | 10.14.3 | `consolidations.cascade_completed_at` guard (kills F3 silent corruption) | M | _check git log_ |
+| P0-3 | 10.14.4 | Attribution cascade auto-dedup + delete `cascade_*` flags (kills F2 frozen-attrs) | M | _check git log_ |
+| — | 10.14.5 | Doc-sync HLD/SCHEMA/TRIGGER-MGMT/AGENT-PROMPTS | S | _check git log_ |
+| — | 10.14.6 | Agent verification on current DB state (no wipe yet) | S | _post-commits_ |
+
+**Three failure modes targeted (full detail in `docs/RUN4-ISSUES-AWAITING-VERDICT.md`):**
+- **F1** cross-plane merge never nominated → lock-step doctrine fooled SMEs into "no cross-plane discovery"
+- **F2** cascade-attribution UNIQUE collision → SME workaround `cascade_attributions=False` → attrs frozen on tombstone (2 cases: fantasy-tour-admin-telemetry 11 attrs · fantasy-tour-admin-aurora-reader 5 attrs)
+- **F3** `execute_mutation` before `absorb_agent` → silent corruption (cons `a21f113a`: status=D but both components still active)
+
+**Items deferred (not in 10.14):** #1 abbreviation rule (P2) · #2 monorepo container dissolution (awaiting Option A/B verdict) · #3+NEW-B cluster doctrine (awaiting verdict) · #5(c) UI multi-comp dedup bug · O4 mark_resource_done gate (awaiting strictness verdict) · O3 telemetry bare-redis (simplified to no-deferral).
+
+**Open admin questions remaining:**
+1. Cluster doctrine — one component with N hostnames OR N per endpoint?
+2. 3 leftover live-DB cases — one-shot SQL repair or accept and wipe before run #5?
+3. `mark_resource_done` strictness — hard-refuse vs soft-warn?
+4. Monorepo container — Option A (distribute build files + dissolve) vs Option B (reclassify as scaffolding)?
+
+After 10.14 ships + agent-verifies on current DB state, admin will wipe + kick off fresh run #5.
+
+---
+
+## 0b. (PRIOR) RUN #4 STATE — superseded by 0a once 10.14 ships
 
 Branch: **`feat/prompt-tuning-and-bug-fixes`** (branched from master @ `b13d89b` post-merge of Phase 10.13).
 
