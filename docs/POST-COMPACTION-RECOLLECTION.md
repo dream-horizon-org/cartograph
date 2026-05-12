@@ -1,4 +1,36 @@
-# Cartograph — Post-Compaction Recollection (2026-05-11, post-Phase-10.13 SHIPPED)
+# Cartograph — Post-Compaction Recollection (2026-05-12, run #4 in flight)
+
+## 0a. RUN #4 STATE + AWAITING-VERDICT DOC (most important — read first)
+
+Branch: **`feat/prompt-tuning-and-bug-fixes`** (branched from master @ `b13d89b` post-merge of Phase 10.13).
+
+**Live DB:** run #4 in flight since 2026-05-11 08:35 UTC. 36 agents, 35 components (5 decom), 311 attributions, 278 comms, 19 consolidations (all status=D but several have silent-failure issues), 13 insights filed during run.
+
+**13 issues identified, NOT YET SHIPPED — awaiting admin verdict** in `docs/RUN4-ISSUES-AWAITING-VERDICT.md`. Summary:
+
+| # | Issue | Priority | Effort |
+|---|---|---|---|
+| 1 | ft-cm-poller/api wrong-named "Fantasy Tour Contest Management" — cross-plane merge missed | P2 | XS |
+| 2 | fav2 monorepo split-before-merge worked ✓ | — | done |
+| 3 | Aurora master+reader not merged into one cluster-component | P1 | S |
+| 4 | fantasy-tour ↔ fantasy-tour-v1 cross-plane duplicate unmerged | **P0** | S |
+| 5 | lineups-v2 standalone telem + spawn collision wedge | P1 | S+XS |
+| 6 | fav2-admin telem ↔ feeds-aggregator-v2-admin github unmerged | **P0** | (#4 fix) |
+| 7 | fav2-api silent merge "D" without absorb (execute_mutation before absorb_agent) | **P0** | M |
+| 8 | spawn_child_agent collision wedges target SME (3 instances) | **P0** | XS |
+| O1 | orch waits for admin greenlight even when phase-end heuristic met | P1 | S |
+| O2 | absorb_agent cascade_attributions atomic failure on duplicate triple | **P0** | M |
+| O3 | Last9 bare-label `redis` (no hostname) — telemetry SME stuck | P2 | XS |
+| O4 | SMEs don't self-audit; admin sanity broadcasts needed | P1 | M |
+| O5 | Agents prefer chat-to-admin over raise_blocker for tool errors | P2 | XS |
+
+**Suggested minimum to ship:** P0-1 (#7 + O2 mutation guards) + P0-2 (#4/#6 cross-plane sibling-search prompt) + P0-3 (#8 spawn_child pre-check). ~1 day work.
+
+**Awaiting admin verdict before any patches go in.** Post-compact session should pull verdict from user + ship agreed scope.
+
+---
+
+
 
 > **Read this FIRST after compaction.** Then `git log --oneline -25`,
 > then the 7 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /
