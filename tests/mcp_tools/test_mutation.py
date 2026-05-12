@@ -400,13 +400,13 @@ def test_spawn_child_atomic_carve_out(agent_factory):
     )
     child_slice = {ra: {"plane": "github", "paths": ["services/y/"]}}
     result = mutation.spawn_child_agent(
-        "sme-a", cons["id"], "sme-child",
+        "sme-a", cons["id"],
         {"canonical_name": "o/child", "display_name": "child",
          "component_type": "application"},
         child_slice,
         "split out services/y into its own component",
     )
-    assert result["child_agent_id"] == "sme-child"
+    assert result["child_agent_id"].startswith("sme-") and len(result["child_agent_id"]) == 12
     # Parent's slice shrank to only services/x/.
     row = execute_one("SELECT source_slice FROM components WHERE id=%s", (ca,))
     assert row["source_slice"][ra]["paths"] == ["services/x/"]
@@ -420,14 +420,14 @@ def test_spawn_child_atomic_carve_out(agent_factory):
     assert "services/y" in row["split_briefing"]
     # Child agent row exists + is idle + type sme.
     child = execute_one(
-        "SELECT agent_type, status FROM agent_runs WHERE agent_id='sme-child'"
+        "SELECT agent_type, status FROM agent_runs WHERE agent_id=%s", (result["child_agent_id"],)
     )
     assert child["agent_type"] == "sme"
     assert child["status"] == "idle"
     # RCA row for child.
     rca = execute_one(
         "SELECT agent_id, component_id FROM resource_component_agents "
-        "WHERE agent_id='sme-child'"
+        "WHERE agent_id=%s", (result["child_agent_id"],)
     )
     assert str(rca["component_id"]) == result["child_component_id"]
 
@@ -440,7 +440,7 @@ def test_spawn_blocks_respawn(agent_factory):
         (json.dumps({ra: {"paths": ["a/", "b/"]}}), s["comp_a"]),
     )
     mutation.spawn_child_agent(
-        "sme-a", s["cons_id"], "sme-child",
+        "sme-a", s["cons_id"],
         {"canonical_name": "o/child", "display_name": "c",
          "component_type": "application"},
         {ra: {"paths": ["b/"]}},
@@ -448,7 +448,7 @@ def test_spawn_blocks_respawn(agent_factory):
     )
     with pytest.raises(ValueError, match="already spawned"):
         mutation.spawn_child_agent(
-            "sme-a", s["cons_id"], "sme-child2",
+            "sme-a", s["cons_id"],
             {"canonical_name": "o/child2", "display_name": "c2",
              "component_type": "application"},
             {ra: {"paths": ["b/"]}},
@@ -489,17 +489,17 @@ def test_phase10_1_2_child_gets_dedicated_workspace(agent_factory, tmp_path):
 
     # Spawn child with agent_manager passed → should get its own ws.
     result = mutation.spawn_child_agent(
-        "sme-a", s["cons_id"], "sme-child-iso",
+        "sme-a", s["cons_id"],
         {"canonical_name": "o/iso", "display_name": "iso",
          "component_type": "application"},
         {ra: {"plane": "github", "paths": ["b/"]}},
         "split",
         agent_manager=am,
     )
-    assert result["child_agent_id"] == "sme-child-iso"
+    assert result["child_agent_id"].startswith("sme-") and len(result["child_agent_id"]) == 12
 
     child = execute_one(
-        "SELECT workspace_path FROM agent_runs WHERE agent_id='sme-child-iso'"
+        "SELECT workspace_path FROM agent_runs WHERE agent_id=%s", (result["child_agent_id"],)
     )
     # Child workspace must be DIFFERENT from parent.
     assert child["workspace_path"] != parent_ws, (
@@ -527,8 +527,8 @@ def test_phase10_1_2_no_agent_manager_falls_back_with_warning(agent_factory):
         (json.dumps({ra: {"paths": ["a/", "b/"]}}), s["comp_a"]),
     )
     # No agent_manager arg → fallback to parent-copy.
-    mutation.spawn_child_agent(
-        "sme-a", s["cons_id"], "sme-child-fb",
+    result = mutation.spawn_child_agent(
+        "sme-a", s["cons_id"],
         {"canonical_name": "o/fb", "display_name": "fb",
          "component_type": "application"},
         {ra: {"paths": ["b/"]}},
@@ -538,7 +538,7 @@ def test_phase10_1_2_no_agent_manager_falls_back_with_warning(agent_factory):
         "SELECT workspace_path FROM agent_runs WHERE agent_id='sme-a'"
     )
     child = execute_one(
-        "SELECT workspace_path FROM agent_runs WHERE agent_id='sme-child-fb'"
+        "SELECT workspace_path FROM agent_runs WHERE agent_id=%s", (result["child_agent_id"],)
     )
     # Without agent_manager, fallback re-shares parent's ws (legacy behaviour).
     assert child["workspace_path"] == parent["workspace_path"]
@@ -549,7 +549,7 @@ def test_spawn_requires_split_nomination(agent_factory):
     s = _m_state_merge(agent_factory)
     with pytest.raises(ValueError, match="nomination_type='split'"):
         mutation.spawn_child_agent(
-            "sme-a", s["cons_id"], "sme-child",
+            "sme-a", s["cons_id"],
             {"canonical_name": "o/child", "display_name": "c",
              "component_type": "application"},
             {"r": {"paths": ["x/"]}},
@@ -562,7 +562,7 @@ def test_spawn_requires_briefing(agent_factory):
     ra = s["res_a"]
     with pytest.raises(ValueError, match="briefing"):
         mutation.spawn_child_agent(
-            "sme-a", s["cons_id"], "sme-child",
+            "sme-a", s["cons_id"],
             {"canonical_name": "o/c", "display_name": "c",
              "component_type": "application"},
             {ra: {"paths": ["x/"]}},
@@ -574,7 +574,7 @@ def test_spawn_requires_non_empty_slice(agent_factory):
     s = _m_state_split(agent_factory)
     with pytest.raises(ValueError, match="child_source_slice"):
         mutation.spawn_child_agent(
-            "sme-a", s["cons_id"], "sme-child",
+            "sme-a", s["cons_id"],
             {"canonical_name": "o/c", "display_name": "c",
              "component_type": "application"},
             {},
@@ -592,7 +592,7 @@ def test_spawn_requires_parent_top_level_source_slice(agent_factory):
     s = _m_state_split(agent_factory)  # parent has no slice set
     with pytest.raises(ValueError, match="top-level components.source_slice"):
         mutation.spawn_child_agent(
-            "sme-a", s["cons_id"], "sme-child",
+            "sme-a", s["cons_id"],
             {"canonical_name": "o/c", "display_name": "c",
              "component_type": "application"},
             {str(s["res_a"]): {"paths": ["x/"]}},
@@ -608,7 +608,7 @@ def test_spawn_welcome_task_created(agent_factory):
         (json.dumps({ra: {"paths": ["x/", "y/"]}}), s["comp_a"]),
     )
     result = mutation.spawn_child_agent(
-        "sme-a", s["cons_id"], "sme-child",
+        "sme-a", s["cons_id"],
         {"canonical_name": "o/c", "display_name": "c",
          "component_type": "application"},
         {ra: {"paths": ["y/"]}},
@@ -617,7 +617,7 @@ def test_spawn_welcome_task_created(agent_factory):
     child_comp = result["child_component_id"]
     # Welcome task exists: owner=parent, worker=child, BW.
     task = execute_one(
-        "SELECT * FROM tasks WHERE worker_agent_id='sme-child'"
+        "SELECT * FROM tasks WHERE worker_agent_id=%s", (result["child_agent_id"],)
     )
     assert task is not None
     assert task["owner_agent_id"] == "sme-a"
@@ -644,7 +644,7 @@ def test_spawn_with_transfer_edge_ids_moves_edges(agent_factory):
         (s["comp_a"],),
     )
     result = mutation.spawn_child_agent(
-        "sme-a", s["cons_id"], "sme-child",
+        "sme-a", s["cons_id"],
         {"canonical_name": "o/c", "display_name": "c",
          "component_type": "application"},
         {ra: {"paths": ["y/"]}},
@@ -675,7 +675,7 @@ def test_spawn_with_transfer_attribution_ids_moves_attrs(agent_factory):
         (s["comp_a"],),
     )
     result = mutation.spawn_child_agent(
-        "sme-a", s["cons_id"], "sme-child",
+        "sme-a", s["cons_id"],
         {"canonical_name": "o/c", "display_name": "c",
          "component_type": "application"},
         {ra: {"paths": ["y/"]}},
@@ -722,7 +722,7 @@ def test_spawn_with_transfer_flow_ids_moves_flows(agent_factory):
     # Transfer the catalog (so flow incoming ref stays valid post-move),
     # the outgoing edge, and the flow itself.
     result = mutation.spawn_child_agent(
-        "sme-a", s["cons_id"], "sme-child",
+        "sme-a", s["cons_id"],
         {"canonical_name": "o/c", "display_name": "c",
          "component_type": "application"},
         {ra: {"paths": ["y/"]}},
@@ -1131,3 +1131,78 @@ def test_transfer_edges_dangling_collision_auto_dedups(agent_factory):
     # Survivor's row is the keeper; target's metadata folded in.
     assert rows[0]["metadata"].get("surv") == 1
     assert rows[0]["metadata"].get("tgt") == 1
+
+
+# ========================== Phase 10.14.2 ==========================
+
+
+def test_phase10_14_2_spawn_child_mints_fresh_id(agent_factory):
+    """Server mints a fresh sme-<8hex> id; caller cannot supply one."""
+    s = _m_state_split(agent_factory)
+    ra = s["res_a"]
+    execute_mutate(
+        "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
+        (json.dumps({ra: {"paths": ["a/", "b/"]}}), s["comp_a"]),
+    )
+    result = mutation.spawn_child_agent(
+        "sme-a", s["cons_id"],
+        {"canonical_name": "o/c", "display_name": "c",
+         "component_type": "application"},
+        {ra: {"paths": ["b/"]}},
+        "split",
+    )
+    child_id = result["child_agent_id"]
+    # Format: sme-<8 hex chars> → 12 chars total.
+    assert child_id.startswith("sme-") and len(child_id) == 12
+    # Not in any existing agent's name (uniqueness verified by mint loop).
+    row = execute_one(
+        "SELECT agent_type FROM agent_runs WHERE agent_id = %s", (child_id,)
+    )
+    assert row is not None and row["agent_type"] == "sme"
+
+
+def test_phase10_14_2_spawn_child_rejects_legacy_param(agent_factory):
+    """Legacy callers passing child_agent_id get a clear refusal."""
+    s = _m_state_split(agent_factory)
+    ra = s["res_a"]
+    execute_mutate(
+        "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
+        (json.dumps({ra: {"paths": ["a/", "b/"]}}), s["comp_a"]),
+    )
+    with pytest.raises(ValueError, match="no longer accepts child_agent_id"):
+        mutation.spawn_child_agent(
+            "sme-a", s["cons_id"],
+            {"canonical_name": "o/c", "display_name": "c",
+             "component_type": "application"},
+            {ra: {"paths": ["b/"]}},
+            "split",
+            child_agent_id="sme-legacy-id",
+        )
+
+
+def test_phase10_14_2_no_collision_with_existing_agents(agent_factory):
+    """Even with several pre-existing SMEs in agent_runs, spawn mints a
+    unique id (the mint loop retries on collision). Sanity check that
+    the mint helper doesn't accidentally reuse the parent's id, the
+    resolver's id, or any other agent's id."""
+    s = _m_state_split(agent_factory)
+    ra = s["res_a"]
+    # Pre-seed: add an extra agent_runs row to ensure mint loop sees them.
+    execute_mutate(
+        "INSERT INTO agent_runs (agent_id, agent_type, status) "
+        "VALUES ('sme-deadbeef', 'sme', 'idle') ON CONFLICT DO NOTHING"
+    )
+    execute_mutate(
+        "UPDATE components SET source_slice=%s::jsonb WHERE id=%s",
+        (json.dumps({ra: {"paths": ["a/", "b/"]}}), s["comp_a"]),
+    )
+    result = mutation.spawn_child_agent(
+        "sme-a", s["cons_id"],
+        {"canonical_name": "o/c", "display_name": "c",
+         "component_type": "application"},
+        {ra: {"paths": ["b/"]}},
+        "split",
+    )
+    child_id = result["child_agent_id"]
+    # Must not collide with seeded agent ids.
+    assert child_id not in {"sme-a", "sme-b", "sme-deadbeef", "res"}

@@ -1397,10 +1397,12 @@ Mutation (when you are mutation_assigned_to):
   Then call upsert_component on YOUR component to MERGE your source_slice
   with target's source_slice (union inner arrays per resource_id;
   dedup preserving order). Then execute_mutation() → MD.
-- SPLIT: spawn_child_agent(you, consolidation_id, child_agent_id,
-  component_data, child_source_slice, split_briefing,
+- SPLIT: spawn_child_agent(you, consolidation_id,
+  child_component_data, child_source_slice, split_briefing,
   transfer_edge_ids=[...], transfer_flow_ids=[...],
-  transfer_attribution_ids=[...]) ONCE.
+  transfer_attribution_ids=[...]) ONCE. Phase 10.14.2: server mints
+  the fresh child agent_id and returns it as `child_agent_id` in the
+  response. DO NOT pass a child_agent_id argument — it will be rejected.
   The child's `source_slice` is the SLICE TO CARVE OUT. Parent's
   source_slice is subtracted atomically by the tool (don't double-
   shrink via a separate upsert).

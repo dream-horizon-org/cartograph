@@ -1427,7 +1427,6 @@ def absorb_agent(
 def spawn_child_agent(
     agent_id: str,
     consolidation_id: str,
-    child_agent_id: str,
     child_component_data: dict[str, Any],
     child_source_slice: dict[str, Any],
     split_briefing: str,
@@ -1436,18 +1435,24 @@ def spawn_child_agent(
     transfer_attribution_ids: list[str] | None = None,
     transfer_catalog_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Phase 4 + 4.1 + 4.2 + 7.4.2. SPLIT: carve a new component + idle
-    SME out of the caller's component. Child source_slice is subtracted
-    atomically. Phase 4.1: strict top-level source_slice guard,
-    [split-welcome] BW task, optional edge + flow transfers.
-    Phase 4.2: transfer_attribution_ids for hostname/evidence carve.
-    Phase 7.4.2: transfer_catalog_ids — atomically move catalog rows
-    (the surfaces the carved-out concern exposes) to the child. Runs
-    BEFORE flow transfer so flow.incoming_catalog_id refs land
-    correctly. Without this, post-split callers resolve to the wrong
-    component when binding to the carved-out endpoint."""
+    """Phase 4 + 4.1 + 4.2 + 7.4.2 + 10.14.2. SPLIT: carve a new component
+    + idle SME out of the caller's component. Server mints a fresh
+    child agent_id (Phase 10.14.2 — caller no longer supplies it;
+    re-using an existing id wedged the receiving SME with two active
+    components). Returned dict carries `child_agent_id` field with the
+    minted id.
+
+    Child source_slice is subtracted atomically. Phase 4.1: strict
+    top-level source_slice guard, [split-welcome] BW task, optional
+    edge + flow transfers. Phase 4.2: transfer_attribution_ids for
+    hostname/evidence carve. Phase 7.4.2: transfer_catalog_ids —
+    atomically move catalog rows (the surfaces the carved-out concern
+    exposes) to the child. Runs BEFORE flow transfer so
+    flow.incoming_catalog_id refs land correctly. Without this,
+    post-split callers resolve to the wrong component when binding to
+    the carved-out endpoint."""
     return mutation_tool.spawn_child_agent(
-        agent_id, consolidation_id, child_agent_id,
+        agent_id, consolidation_id,
         child_component_data, child_source_slice, split_briefing,
         transfer_edge_ids, transfer_flow_ids, transfer_attribution_ids,
         transfer_catalog_ids,

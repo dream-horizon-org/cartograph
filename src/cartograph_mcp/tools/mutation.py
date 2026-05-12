@@ -27,6 +27,7 @@ Design choices:
 from __future__ import annotations
 
 import json
+import uuid
 
 from shared import embedding as emb
 from shared.actor_auth import require_active_agent
@@ -384,10 +385,32 @@ def absorb_agent(
 # ---------- spawn_child_agent (split) ----------
 
 
+def _mint_fresh_agent_id() -> str:
+    """Generate a fresh sme-<8hex> id, retrying on collision against agent_runs.
+
+    Phase 10.14.2: spawn_child_agent no longer accepts a caller-supplied
+    child_agent_id. The server mints the id here so concurrent spawns
+    can never collide on an existing agent (which would put one SME
+    in ownership of two active components — violating the
+    1-SME=1-component invariant). Up to 10 retries; in practice the
+    8-hex namespace (~4B) means collisions are astronomically rare.
+    """
+    for _ in range(10):
+        candidate = f"sme-{uuid.uuid4().hex[:8]}"
+        existing = execute_one(
+            "SELECT 1 FROM agent_runs WHERE agent_id = %s", (candidate,)
+        )
+        if existing is None:
+            return candidate
+    raise RuntimeError(
+        "Could not mint a unique agent_id after 10 attempts — "
+        "namespace exhaustion is improbable, suspect bug."
+    )
+
+
 def spawn_child_agent(
     agent_id: str,
     consolidation_id: str,
-    child_agent_id: str,
     child_component_data: dict,
     child_source_slice: dict,
     split_briefing: str,
@@ -396,31 +419,45 @@ def spawn_child_agent(
     transfer_attribution_ids: list[str] | None = None,
     transfer_catalog_ids: list[str] | None = None,
     agent_manager=None,
+    child_agent_id: str | None = None,  # DEPRECATED — Phase 10.14.2
 ) -> dict:
     """SPLIT: carve out a new component + new SME from the caller's scope.
 
     Atomic within its scope. Effects:
-      1. INSERT new component with split_from_component_id = parent's,
+      1. Mint a fresh `child_agent_id` server-side (Phase 10.14.2 —
+         caller can NO LONGER supply it; collisions previously wedged
+         the receiving SME with two active components).
+      2. INSERT new component with split_from_component_id = parent's,
          source_slice = `child_source_slice`.
-      2. UPDATE parent component: source_slice = parent_slice MINUS child_slice.
-      3. INSERT child_agent_id into agent_runs as an idle SME.
-      4. INSERT resource_component_agents for the child.
-      5. SET consolidations.child_agent_id to block re-spawn.
-      6. Auto-embed the new component.
-      7. (Phase 4.1) Create a BW "[split-welcome]" task for the child
+      3. UPDATE parent component: source_slice = parent_slice MINUS child_slice.
+      4. INSERT the freshly-minted child agent_id into agent_runs as an idle SME.
+      5. INSERT resource_component_agents for the child.
+      6. SET consolidations.child_agent_id to block re-spawn.
+      7. Auto-embed the new component.
+      8. (Phase 4.1) Create a BW "[split-welcome]" task for the child
          with component_id + split_briefing in the description so the
          child wakes with visible context (fixes the "child doesn't
          know their component" gap).
-      8. (Phase 4.1) Transfer specified edge_ids + flow_ids to the
+      9. (Phase 4.1) Transfer specified edge_ids + flow_ids to the
          child via the mutation-scoped transfer tools.
 
     Phase 4.1 tightens parent-slice validation: requires the top-level
     components.source_slice column to be non-empty (previously fell
     back to empty carve when agents stashed slice in metadata).
 
+    Phase 10.14.2 (commit pending): caller-supplied child_agent_id is
+    DEPRECATED — server mints fresh ids. Passing the legacy param
+    raises ValueError to surface the contract change loudly.
+
     Idempotency: consolidation.child_agent_id blocks re-spawn. Caller
     re-runs safely only while child_agent_id IS NULL.
     """
+    if child_agent_id is not None:
+        raise ValueError(
+            "spawn_child_agent no longer accepts child_agent_id — the server "
+            "mints fresh ids to prevent spawn-collision wedges (Phase 10.14.2). "
+            "Drop the child_agent_id arg from your call."
+        )
     cons = _assert_mutation_gate(agent_id, consolidation_id)
     if cons["nomination_type"] != "split":
         raise ValueError(
@@ -439,6 +476,12 @@ def spawn_child_agent(
             raise ValueError(f"child_component_data.{required} is required")
     if not child_source_slice:
         raise ValueError("child_source_slice is required (non-empty dict)")
+
+    # Phase 10.14.2: mint a fresh child agent_id server-side. Previously
+    # callers supplied this and could re-use an existing active SME's id,
+    # putting that SME into ownership of two active components and
+    # wedging it on upsert_component (unique-constraint violation).
+    child_agent_id = _mint_fresh_agent_id()
 
     parent_component_id = _component_of_agent(agent_id)
     if not parent_component_id:
