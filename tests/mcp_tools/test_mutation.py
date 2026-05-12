@@ -276,79 +276,30 @@ def test_absorb_cascade_moves_attributions_edges_flows(agent_factory):
     assert str(row["incoming_catalog_id"]) == str(cat["id"])
 
 
-def test_absorb_cascade_attributions_off(agent_factory):
-    """cascade_attributions=False → evidence stays with (decommissioned) target."""
+def test_phase10_14_4_absorb_rejects_cascade_attributions_flag(agent_factory):
+    """Phase 10.14.4: cascade_attributions=False raises — the workaround
+    pattern that left attrs frozen on tombstones is gone."""
     s = _m_state_merge(agent_factory)
-    attr = execute_one(
-        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
-           VALUES (%s, 'github', 'repo', 'o/b#x') RETURNING id""",
-        (s["comp_b"],),
-    )
-    result = mutation.absorb_agent(
-        "sme-a", s["cons_id"], "sme-b", cascade_attributions=False,
-    )
-    assert result["cascade"]["attributions"] == 0
-    row = execute_one("SELECT component_id FROM attributions WHERE id=%s", (attr["id"],))
-    assert str(row["component_id"]) == str(s["comp_b"])  # unchanged
+    with pytest.raises(ValueError, match="cascade_attributions"):
+        mutation.absorb_agent(
+            "sme-a", s["cons_id"], "sme-b", cascade_attributions=False,
+        )
 
 
-def test_absorb_cascade_edges_off(agent_factory):
+def test_phase10_14_4_absorb_rejects_cascade_edges_flag(agent_factory):
     s = _m_state_merge(agent_factory)
-    execute_mutate(
-        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
-                              identifier, discovered_by)
-           VALUES (NULL, %s, 'calls', 'POST /keep', 'test')""",
-        (s["comp_b"],),
-    )
-    result = mutation.absorb_agent(
-        "sme-a", s["cons_id"], "sme-b", cascade_edges=False,
-    )
-    assert result["cascade"]["edges"] == 0
-    # Edge still points at comp_b (now decommissioned).
-    row = execute_one(
-        "SELECT COUNT(*) as n FROM edges WHERE to_component_id = %s",
-        (s["comp_b"],),
-    )
-    assert row["n"] == 1
+    with pytest.raises(ValueError, match="cascade"):
+        mutation.absorb_agent(
+            "sme-a", s["cons_id"], "sme-b", cascade_edges=False,
+        )
 
 
-def test_absorb_cascade_flows_off(agent_factory):
+def test_phase10_14_4_absorb_rejects_cascade_flows_flag(agent_factory):
     s = _m_state_merge(agent_factory)
-    cat = execute_one(
-        """INSERT INTO catalogs (component_id, kind, identifier, discovered_by)
-           VALUES (%s::uuid, 'endpoint', 'POST /x', 'test') RETURNING id""",
-        (s["comp_b"],),
-    )
-    ds = execute_one(
-        """INSERT INTO components (canonical_name, display_name, component_type)
-           VALUES ('o/ds2', 'ds2', 'application') RETURNING id"""
-    )
-    out = execute_one(
-        """INSERT INTO edges (from_component_id, to_component_id, edge_type,
-                              identifier, discovered_by)
-           VALUES (%s, %s, 'calls', 'GET /ds2', 'test') RETURNING id""",
-        (s["comp_b"], ds["id"]),
-    )
-    flow = execute_one(
-        """INSERT INTO flows (component_id, incoming_catalog_id, outgoing_edge_id,
-                              discovered_by)
-           VALUES (%s, %s, %s, 'test') RETURNING id""",
-        (s["comp_b"], cat["id"], out["id"]),
-    )
-    # Cascade edges ON but flows OFF — edges + catalogs move, flow stays.
-    # Phase 7.4.2: catalog cascade is unconditional (it precedes flow
-    # cascade so flow.incoming_catalog_id refs stay consistent). With
-    # cascade_flows=False, the flow stays on the target — but its
-    # catalog ref now points at a row whose component_id is the survivor.
-    # The flow row itself is still on comp_b.
-    result = mutation.absorb_agent(
-        "sme-a", s["cons_id"], "sme-b", cascade_flows=False,
-    )
-    assert result["cascade"]["edges"] == 1
-    assert result["cascade"]["catalogs"] == 1
-    assert result["cascade"]["flows"] == 0
-    row = execute_one("SELECT component_id FROM flows WHERE id=%s", (flow["id"],))
-    assert str(row["component_id"]) == str(s["comp_b"])  # flow unchanged
+    with pytest.raises(ValueError, match="cascade"):
+        mutation.absorb_agent(
+            "sme-a", s["cons_id"], "sme-b", cascade_flows=False,
+        )
 
 
 def test_absorb_cascade_empty_body_produces_zero_counts(agent_factory):
@@ -1012,19 +963,17 @@ def test_get_stale_edges_includes_survivor_when_merged(agent_factory):
     merged_into_agent_id set → suggested_action = re-bind-to-survivor."""
     from cartograph_mcp.tools import components as comp_tool
     s = _m_state_merge(agent_factory)
-    # sme-a has a bound edge → sme-b's component (before absorb).
+    # Run absorb (cascade is unconditional post-10.14.4). Then insert a
+    # new edge from sme-a's component → decommissioned comp_b directly
+    # via SQL — simulates a stale state that could arise from a
+    # post-merge SME re-discovery cycle or from a manual data fix that
+    # bypasses the cascade.
+    mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
     execute_mutate(
         """INSERT INTO edges (from_component_id, to_component_id, edge_type,
                               identifier, discovered_by)
            VALUES (%s, %s, 'calls', 'GET /dead', 'test')""",
         (s["comp_a"], s["comp_b"]),
-    )
-    # Absorb sme-b into sme-a — flips sme-b.merged_into_agent_id to sme-a
-    # AND decommissions comp_b. We turn cascade_edges OFF here so the
-    # edge STAYS pointing at the dead comp_b (otherwise 4.1.3 would
-    # auto-transfer it and there'd be nothing stale to surface).
-    mutation.absorb_agent(
-        "sme-a", s["cons_id"], "sme-b", cascade_edges=False,
     )
     rows = comp_tool.get_stale_edges("sme-a")
     # sme-a's edge now points at decommissioned comp_b.
@@ -1206,3 +1155,111 @@ def test_phase10_14_2_no_collision_with_existing_agents(agent_factory):
     child_id = result["child_agent_id"]
     # Must not collide with seeded agent ids.
     assert child_id not in {"sme-a", "sme-b", "sme-deadbeef", "res"}
+
+
+# ========================== Phase 10.14.4 ==========================
+
+
+def test_phase10_14_4_cascade_attrs_no_collision_moves_normally(agent_factory):
+    """Disjoint attributes cascade cleanly via standard component_id move."""
+    s = _m_state_merge(agent_factory)
+    # Target has 2 attrs that DON'T collide with survivor (which has none).
+    a1 = execute_one(
+        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
+           VALUES (%s, 'telemetry', 'apm_service', 'target-svc') RETURNING id""",
+        (s["comp_b"],),
+    )
+    a2 = execute_one(
+        """INSERT INTO attributions (component_id, plane, resource_type, identifier)
+           VALUES (%s, 'telemetry', 'hostname', 'target.local') RETURNING id""",
+        (s["comp_b"],),
+    )
+    result = mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
+    # Both transferred, none deduped.
+    assert result["cascade"]["attributions"] == 2
+    assert result["cascade"].get("deduped_attributions", 0) == 0
+    for aid in (a1["id"], a2["id"]):
+        row = execute_one(
+            "SELECT component_id FROM attributions WHERE id=%s", (aid,)
+        )
+        assert str(row["component_id"]) == str(s["comp_a"])
+
+
+def test_phase10_14_4_cascade_attrs_collision_keeps_survivor_merges_metadata(agent_factory):
+    """The core F2 fix: shared categorical tag (e.g. telemetry/runtime/jvm)
+    on both survivor + target gets auto-deduped — keep survivor's row,
+    merge target's metadata into it (target keys present; survivor keys
+    win on conflict), MAX confidence, drop target's row."""
+    s = _m_state_merge(agent_factory)
+    # Both components legitimately have the same categorical tag.
+    surv = execute_one(
+        """INSERT INTO attributions
+             (component_id, plane, resource_type, identifier, metadata, confidence)
+           VALUES (%s, 'telemetry', 'runtime', 'jvm',
+                   '{"discovered_by_a":"sme-a","conflict_key":"surv"}', 0.7)
+           RETURNING id""",
+        (s["comp_a"],),
+    )
+    tgt = execute_one(
+        """INSERT INTO attributions
+             (component_id, plane, resource_type, identifier, metadata, confidence)
+           VALUES (%s, 'telemetry', 'runtime', 'jvm',
+                   '{"discovered_by_b":"sme-b","conflict_key":"tgt"}', 0.9)
+           RETURNING id""",
+        (s["comp_b"],),
+    )
+    result = mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
+    # Dedup counter increments; standard transferred stays 0 for this row.
+    assert result["cascade"].get("deduped_attributions", 0) == 1
+    assert result["cascade"]["attributions"] == 0
+    # Survivor's row still exists with merged metadata + MAX confidence.
+    keeper = execute_one(
+        "SELECT metadata, confidence FROM attributions WHERE id=%s", (surv["id"],)
+    )
+    assert keeper["metadata"]["discovered_by_a"] == "sme-a"
+    assert keeper["metadata"]["discovered_by_b"] == "sme-b"  # merged in
+    assert keeper["metadata"]["conflict_key"] == "surv"  # survivor wins
+    assert keeper["confidence"] == 0.9  # MAX
+    # Target row dropped entirely.
+    dropped = execute_one(
+        "SELECT id FROM attributions WHERE id=%s", (tgt["id"],)
+    )
+    assert dropped is None
+
+
+def test_phase10_14_4_cascade_attrs_mixed_collision_and_normal(agent_factory):
+    """5 target attrs — 2 collide with survivor, 3 don't. After absorb:
+    all 5 reflected on survivor (2 via metadata merge, 3 via component_id move).
+    Target component has 0 attrs left."""
+    s = _m_state_merge(agent_factory)
+    # Set up: survivor has 2 attrs that target will collide with.
+    for ident in ("jvm", "prod"):
+        execute_mutate(
+            """INSERT INTO attributions
+                 (component_id, plane, resource_type, identifier, metadata)
+               VALUES (%s, 'telemetry', 'tag', %s, '{}')""",
+            (s["comp_a"], ident),
+        )
+    # Target has 5: 2 collide (jvm, prod) + 3 unique.
+    for ident in ("jvm", "prod", "us-east-1", "vertx", "service-X"):
+        execute_mutate(
+            """INSERT INTO attributions
+                 (component_id, plane, resource_type, identifier, metadata)
+               VALUES (%s, 'telemetry', 'tag', %s, '{}')""",
+            (s["comp_b"], ident),
+        )
+    result = mutation.absorb_agent("sme-a", s["cons_id"], "sme-b")
+    assert result["cascade"]["attributions"] == 3
+    assert result["cascade"].get("deduped_attributions", 0) == 2
+    # Survivor now has all 5 distinct (plane, rt, identifier) tuples.
+    n = execute_one(
+        "SELECT COUNT(*) as c FROM attributions WHERE component_id=%s",
+        (s["comp_a"],),
+    )
+    assert n["c"] == 5
+    # Target has none.
+    n_t = execute_one(
+        "SELECT COUNT(*) as c FROM attributions WHERE component_id=%s",
+        (s["comp_b"],),
+    )
+    assert n_t["c"] == 0

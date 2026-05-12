@@ -1406,20 +1406,21 @@ def absorb_agent(
     target_agent_id: str,
     deactivation_reason: str = "merged",
     deactivation_notes: str | None = None,
-    cascade_attributions: bool = True,
-    cascade_edges: bool = True,
-    cascade_flows: bool = True,
 ) -> dict[str, Any]:
-    """Phase 4 + 4.1 cascade. MERGE: flip target to decommissioned,
-    union source_slice, decommission target component, re-point RCA.
-    Phase 4.1: by default also cascades attributions + edges + flows
-    from target to survivor via the mutation-scoped transfer_* tools
-    (survivor workflow collapses to absorb + execute_mutation). Set any
-    cascade_* flag to False to opt out."""
+    """Phase 4 + 4.1 + 10.14.4 cascade. MERGE: flip target to
+    decommissioned, union source_slice, decommission target component,
+    re-point RCA, cascade attributions + edges + flows from target to
+    survivor via the mutation-scoped transfer_* tools. Phase 10.14.4
+    made cascade unconditional — transfer_attributions auto-dedups on
+    (plane, resource_type, identifier) collision (keep survivor's row,
+    merge target metadata, MAX confidence, drop target's row). The
+    cascade_* boolean flags were removed; callers that still pass them
+    get a ValueError. Hand-pick "keep my edges discard target's" use
+    case can be served by delete_attribution / upsert_attribution
+    post-absorb."""
     return mutation_tool.absorb_agent(
         agent_id, consolidation_id, target_agent_id,
         deactivation_reason, deactivation_notes,
-        cascade_attributions, cascade_edges, cascade_flows,
     )
 
 

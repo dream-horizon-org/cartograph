@@ -178,16 +178,22 @@ Act — consolidation:
 Act — mutation (gated: status='M' AND mutation_assigned_to == you):
 - execute_mutation(agent_id, consolidation_id, message) — M → MD.
 - absorb_agent(agent_id, consolidation_id, target_agent_id,
-  deactivation_reason?, deactivation_notes?, cascade_attributions=True,
-  cascade_edges=True, cascade_flows=True) — MERGE. Cascades default-on
-  (workflow collapses 5 calls → 2). Also runs an unconditional CATALOG
-  cascade BEFORE flow cascade — collisions on (kind, identifier) drop
-  target's row + cascade-delete its flows so flow.incoming_catalog_id
-  refs land on survivor's catalogs.
-- spawn_child_agent(parent_id, consolidation_id, child_id,
+  deactivation_reason?, deactivation_notes?) — MERGE. Phase 10.14.4:
+  cascade is unconditional — DO NOT pass cascade_attributions /
+  cascade_edges / cascade_flows flags (they were removed; will raise
+  ValueError). Attribution cascade auto-dedups on (plane, rt, id)
+  collision (keep survivor row, merge target metadata, MAX confidence,
+  drop target row). Catalog cascade runs unconditionally BEFORE flow
+  cascade — collisions on (kind, identifier) drop target's row +
+  cascade-delete its flows so flow.incoming_catalog_id refs land on
+  survivor's catalogs. Stamps cascade_completed_at on success
+  (required by execute_mutation per Phase 10.14.3).
+- spawn_child_agent(parent_id, consolidation_id,
   child_component_data, child_source_slice, split_briefing,
   transfer_edge_ids?, transfer_flow_ids?, transfer_attribution_ids?,
-  transfer_catalog_ids?) — SPLIT atomic carve-out. Welcome BW task
+  transfer_catalog_ids?) — SPLIT atomic carve-out. Phase 10.14.2:
+  server mints fresh child agent_id (returned as child_agent_id in
+  response); DO NOT pass a child_agent_id argument. Welcome BW task
   auto-created for the child. Pass transfer_catalog_ids whenever the
   carved scope owns catalog rows the child should inherit; flow
   integrity preserved across the split.
