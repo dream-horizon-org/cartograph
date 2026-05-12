@@ -820,6 +820,18 @@ def run_migrations() -> None:
                 "metadata JSONB NOT NULL DEFAULT '{}'"
             )
 
+            # Phase 10.14.3: cascade_completed_at guard. Set by
+            # absorb_agent (merge) and spawn_child_agent (split) on
+            # successful completion. execute_mutation refuses M→MD
+            # if NULL — closes the silent corruption observed on cons
+            # a21f113a in run #4 (sme-5c9dfcf6 fired execute_mutation
+            # before absorb_agent; state machine advanced M→MD without
+            # any actual transfer).
+            cur.execute(
+                "ALTER TABLE consolidations ADD COLUMN IF NOT EXISTS "
+                "cascade_completed_at TIMESTAMPTZ"
+            )
+
             # Phase 7.4: catalogs — promote catalog rows from `edges`
             # (where from_component_id IS NULL) to a dedicated table
             # with noun-form `kind` enum (endpoint/topic/queue/

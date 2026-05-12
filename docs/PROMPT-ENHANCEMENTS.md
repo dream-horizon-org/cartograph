@@ -33,6 +33,31 @@
 
 ## 2. Shipped enhancements
 
+### 2.51 Phase 10.17 — `[ADMIN-HACK-ORDERS-INFERRING]` doctrine-conflict fix (`a100b04`, 2026-05-12)
+
+First run-#5-v1 attempt revealed 3 SMEs (service-a/b/c) honestly reported via admin chat that they did NOT fire the inferred-split nominations despite the Phase 10.16 block being in their prompt. Diagnosis: older Phase 10.8.3 "LEAVE DANGLING — DO NOT FORCE-CREATE" rule at STEP 3 (workflow site) overrode the newer INFERRING block (located later in SPLIT/MERGE DISCIPLINE). Agents read STEP 3, satisfied the safer-by-default rule, never made it to or acted on the override. Plus: pre-flight vector_search was being run with semantic / free-text descriptions ("MySQL database demo") not identifier-verbatim, false-negating existing-stub matches. Fix: (a) at the STEP 3 leave-dangling site, inserted a `★★★ HARD EXCEPTION — INFERRED NON-CODE STUBS ★★★` sub-block IMMEDIATELY after the default statement with inline trigger patterns (`*-mysql-*.dream11.local`, `redis://`, `kafka` bootstrap, `otlp.last9.io`, etc.) + explicit 4-step mandatory sequence ending "treating insert_unresolved as terminal step is the BUG"; (b) in the INFERRING block, mandated `name_pattern=<IDENTIFIER VERBATIM>` for pre-flight vector_search with explicit warning against semantic queries (semantic ranks on description+name, false-negates because inferred stub canonical_name IS the raw identifier). ILIKE wildcards only for templated env-var placeholders. Prompt-only; no schema/tool change.
+
+### 2.50 Phase 10.16 — `[ADMIN-HACK-ORDERS-INFERRING]` inferred non-code component spawn (`c4e7a02`, 2026-05-12)
+
+Two prompt blocks (sme.py + resolver.py) implementing a TEMP HACK for single-plane runs. Caller-SMEs spawn inferred stubs for DB/cache/queue/topic/broker via the existing split machinery, tagged `metadata.admin_hack='inferring'` + `metadata.inferred=true` for cleanup-via-grep. Resolver pre-flight dedups via vector_search + serialises concurrent noms + enforces ordering (inferred-splits AFTER all real splits, BEFORE any merges) + validates metadata. Child SME hydrates from parent's repo (clone same github resource) + parent's attributions via the `split_briefing` hydration manual. Cleanup path: when the real inferred-component paradigm ships, grep the hack tag + migrate. No schema, no tool surface, no code change.
+
+### 2.49 Phase 10.15 — P1/P2 polish bundle (`a49b2ed`, 2026-05-12)
+
+5 prompt-only rules per admin verdict on run #4 issues:
+- **#1 abbreviation hallucination guard** — canonical_name stays verbatim with the literal APM/identifier observed; never expand abbreviations (`ft-cm-poller` stays as-is); cross-plane merge cascade is the only sanctioned path to a richer name.
+- **#2 monorepo container Option A dissolution** — after spawning all deployable children, if remaining source_slice is only shared build/CI/Dockerfile scaffolding, distribute those files into each child's source_slice + decommission the container. Don't leave a hollow `application` row with only build scripts.
+- **#3 + NEW-B cluster doctrine** — Aurora master+reader / Redis cluster / RDS Multi-AZ = ONE component with N endpoint hostnames as separate attribution rows. `metadata.role` distinguishes master/reader/primary/standby. Blast-radius is at cluster level.
+- **O3 telemetry bare-label low-conf placeholder** — when Last9 emits bare `redis`/`mysql`/`kafka` without hostname, materialise at confidence=0.5 + `metadata.awaiting_hostname_corroboration=true` with `<caller>-<type>-unknown` canonical_name. Don't try to merge — cross-plane sibling-search catches it organically.
+- **O5 raise_blocker preference for tool errors** — for wedged-state / UNIQUE constraint violations / MCP unreachable, prefer `raise_blocker(task_id, detail)` over `send_chat(to='admin')`. Run #4 cost 4 informal chat escalations that should have been formal BO tasks.
+
+### 2.48 Phase 10.14 — Run #4 bug-fix bundle (4 P0s shipped 2026-05-12)
+
+Four sub-phases closing F1 / F2 / F3 silent-failure modes from run #4:
+- **10.14.1 drop TEMP lock-step doctrine** (`beeba19`) — removed the 5-phase lock-step block from base.py + the phase-coordinator section from orchestrator.py. SMEs were reading "stay DANGLING during MATERIALISATION" as "no cross-plane discovery at all." Cross-plane vector_search now encouraged; only edge BINDING (bind_edge) still deferred per asymmetric edge protocol. Companion: O1 (orch waiting for greenlight on phase advance) became moot — dropped.
+- **10.14.2 spawn_child_agent mints fresh agent_id** (`f905384`) — server generates `sme-<8hex>` via `_mint_fresh_agent_id()` with collision-retry against agent_runs. Caller-supplied `child_agent_id` was the root cause of the #8 wedge class (3 SMEs in run #4 ended up owning 2 active components). Legacy param raises ValueError.
+- **10.14.3 `consolidations.cascade_completed_at` guard** (`008c208`) — new nullable TIMESTAMPTZ column. `absorb_agent` and `spawn_child_agent` stamp on success. `execute_mutation` refuses M→MD if NULL — closes F3 silent-corruption (cons a21f113a in run #4: sme-5c9dfcf6 fired execute_mutation before absorb_agent).
+- **10.14.4 attribution cascade auto-dedup + delete cascade_* flags** (`a96127a`) — `transfer_attributions` per-row dedup loop replaces bulk UPDATE: on collision, keep survivor's row, merge target metadata, MAX confidence, drop target's. Direct mirror of Phase 10.13.8's pattern for edges. Closes F2 (2 frozen-attr tombstones in run #4). The boolean cascade flags were removed entirely; passing them raises ValueError.
+
 ### 2.1 Per-type model + reasoning-effort assignment (`b4df80a`)
 
 **Symptom:** every spawned `claude -p` subprocess used the user's default

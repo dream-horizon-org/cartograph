@@ -1,4 +1,107 @@
-# Cartograph — Post-Compaction Recollection (2026-05-11, post-Phase-10.13 SHIPPED)
+# Cartograph — Post-Compaction Recollection (2026-05-12 night, Phase 10.14 + 10.15 + 10.16 SHIPPED, DB wiped pre-run-5)
+
+## 0a. PHASE 10.14 / 10.15 / 10.16 — ALL SHIPPED · DB WIPED · READY FOR RUN #5 (most important)
+
+**Branch HEAD:** `a100b04` on `feat/prompt-tuning-and-bug-fixes` (Phase 10.17 + 2nd wipe). All Phase 10.14 → 10.17 changes loaded.
+
+**LIVE STATE for run #5 v2 kickoff (2026-05-12 18:38 UTC):**
+- DB wiped + snapshotted: `/tmp/cartograph-snapshots/snap-2026-05-12-130846-pre-run5-v2.sql` (851K — captures run-#5-v1's pre-wipe state where 3 SMEs reported doctrine-conflict).
+- v1 snapshot still around: `/tmp/cartograph-snapshots/snap-2026-05-12-122328-pre-run5.sql` (13MB — pre-run-5-v1, right after run #4 wipe).
+- Workspaces backed up: `src/workspaces.bak.pre-run5-v2.2026-05-12-130846/` + earlier `src/workspaces.bak.pre-run5.2026-05-12-122328/`.
+- Fresh singletons: **`orch-0810c668`** + **`res-323a3e0a`** (idle).
+- 4 daemons fresh with Phase 10.17 prompt loaded. 117 tools registered, 16 lanes (orch 1 / iter 2 / res 1 / sme 12). DB rows: agent_runs=2, all other tables=0.
+
+**Phase 10.17 SHIPPED 2026-05-12 night (commit `a100b04`):** Doctrine-conflict fix for `[ADMIN-HACK-ORDERS-INFERRING]`. First run-#5-v1 attempt revealed 3 SMEs (service-a/b/c) all reported via admin chat that they did NOT fire the inferred-split nominations despite Phase 10.16 block being in their prompt. Diagnosis: the OLDER Phase 10.8.3 "LEAVE DANGLING — DON'T FORCE-CREATE" rule at STEP 3 (workflow site) overrode the newer INFERRING block (located later in SPLIT/MERGE DISCIPLINE). Agents read STEP 3, satisfied the safe default, never made it to or acted on the override. Plus: pre-flight vector_search was being run with semantic / free-text descriptions ("MySQL database demo") not identifier-verbatim, false-negating real existing-stub matches. Fix: (a) at the STEP 3 leave-dangling site, inserted a `★★★ HARD EXCEPTION — INFERRED NON-CODE STUBS ★★★` sub-block IMMEDIATELY after the default statement with inline trigger patterns (`*-mysql-*.dream11.local`, `redis://`, `kafka` bootstrap, `otlp.last9.io`, etc.) + explicit 4-step mandatory sequence ending "treating insert_unresolved as terminal step is the BUG"; (b) in the INFERRING block, mandated `name_pattern=<IDENTIFIER VERBATIM>` for pre-flight vector_search with explicit warning against semantic queries. Prompt-only; no schema/tool change.
+
+**Phase 10.16 SHIPPED 2026-05-12 night** — `[ADMIN-HACK-ORDERS-INFERRING]` prompt blocks in `sme.py` + `resolver.py`. Single-plane runs (e.g. github-only) can now spawn inferred non-code stubs (DBs/caches/queues/topics) via the existing split machinery: SME nominates a `type='split'` with `metadata.admin_hack='inferring'` + `inferred=true` + `inferred_kind` + `inferred_identifier`. Resolver pre-flight dedups via vector_search + serialises concurrent noms + validates ordering (inferred-splits AFTER real splits, BEFORE merges). Child SME hydrates from parent's repo + parent's attributions via the `split_briefing` hydration manual. **Prompt-only — no schema, no tool surface change.** Tagged with `metadata.admin_hack='inferring'` for grep-based cleanup when the real paradigm ships.
+
+**DB wiped + snapshotted pre-run-5 (2026-05-12 17:53 UTC).**
+- Snapshot: `/tmp/cartograph-snapshots/snap-2026-05-12-122328-pre-run5.sql` (13MB).
+- Workspaces backed up: `src/workspaces.bak.pre-run5.2026-05-12-122328/`.
+- Fresh singletons live: **`orch-c799dc1a`** + **`res-2ca397c8`**.
+- 4 daemons restarted with all Phase 10.14 + 10.15 + 10.16 prompt+code changes loaded.
+- 117 MCP tools registered · 16 lanes (orch 1 / iter 2 / res 1 / sme 12).
+- DB row counts: agent_runs=2, all other tables=0.
+
+**Phase 10.15 SHIPPED 2026-05-12 evening** — 5 prompt-only P1/P2 rules per admin verdict (abbreviation hallucination guard · monorepo Option A dissolution · cluster doctrine for Aurora/redis/RDS Multi-AZ · telemetry bare-label placeholder · raise_blocker preference). One commit (`a49b2ed`). No schema or tool surface changes. See `docs/IMPLEMENTATION-PHASES.md §10.15` for full detail.
+
+**Items NOT in 10.15 (deferred per admin):**
+- O4 `mark_resource_done` precondition gate — admin will pick later.
+- 3 live-DB leftover cases — snapshot + wipe before run #5 instead.
+- #5(c) `/api/agents` UI dedup bug — separate UI work later.
+
+---
+
+## 0aa. PHASE 10.14 BUG-FIX BUNDLE — SHIPPED earlier this session
+
+**Branch:** `feat/prompt-tuning-and-bug-fixes` (branched from master @ `b13d89b` post-merge of Phase 10.13).
+
+**Phase 10.14 SHIPPED 2026-05-12.** 4 P0s + doc-sync committed. 92/92 mutation + consolidation tests green.
+
+| # | Sub | What | Commit |
+|---|---|---|---|
+| P0-1 | 10.14.1 | Drop the TEMP lock-step doctrine (kills F1) | `beeba19` |
+| P0-4 | 10.14.2 | `spawn_child_agent` mints fresh agent_id server-side (kills #8 wedge class) | `f905384` |
+| P0-2 | 10.14.3 | `consolidations.cascade_completed_at` guard (kills F3 silent corruption) | `008c208` |
+| P0-3 | 10.14.4 | Attribution cascade auto-dedup + delete cascade_* flags (kills F2 frozen-attrs) | `a96127a` |
+| — | 10.14.5 | Doc-sync HLD/SCHEMA/TRIGGER-MGMT/AGENT-PROMPTS/IMPL-PHASES | this commit |
+| — | 10.14.6 | Agent verification on current DB state | pending — post doc-sync push |
+
+**Schema delta:** `consolidations.cascade_completed_at TIMESTAMPTZ` (nullable). Migration idempotent; run on dev DB live.
+
+**Tool surface signatures changed (no tool count delta):**
+- `absorb_agent`: drops `cascade_attributions` / `cascade_edges` / `cascade_flows` flags. Callers passing any → ValueError.
+- `spawn_child_agent`: drops `child_agent_id` arg. Server mints fresh `sme-<8hex>` and returns it. Callers passing the legacy arg → ValueError.
+- `execute_mutation`: refuses M→MD unless `cascade_completed_at` stamped by absorb_agent or spawn_child_agent.
+
+**Three failure modes targeted (full detail in `docs/RUN4-ISSUES-AWAITING-VERDICT.md`):**
+- **F1** cross-plane merge never nominated → lock-step doctrine fooled SMEs into "no cross-plane discovery"
+- **F2** cascade-attribution UNIQUE collision → SME workaround `cascade_attributions=False` → attrs frozen on tombstone (2 cases: fantasy-tour-admin-telemetry 11 attrs · fantasy-tour-admin-aurora-reader 5 attrs)
+- **F3** `execute_mutation` before `absorb_agent` → silent corruption (cons `a21f113a`: status=D but both components still active)
+
+**Items deferred (not in 10.14):** #1 abbreviation rule (P2) · #2 monorepo container dissolution (awaiting Option A/B verdict) · #3+NEW-B cluster doctrine (awaiting verdict) · #5(c) UI multi-comp dedup bug · O4 mark_resource_done gate (awaiting strictness verdict) · O3 telemetry bare-redis (simplified to no-deferral).
+
+**Open admin questions remaining:**
+1. Cluster doctrine — one component with N hostnames OR N per endpoint?
+2. 3 leftover live-DB cases — one-shot SQL repair or accept and wipe before run #5?
+3. `mark_resource_done` strictness — hard-refuse vs soft-warn?
+4. Monorepo container — Option A (distribute build files + dissolve) vs Option B (reclassify as scaffolding)?
+
+After 10.14 ships + agent-verifies on current DB state, admin will wipe + kick off fresh run #5.
+
+---
+
+## 0b. (PRIOR) RUN #4 STATE — superseded by 0a once 10.14 ships
+
+Branch: **`feat/prompt-tuning-and-bug-fixes`** (branched from master @ `b13d89b` post-merge of Phase 10.13).
+
+**Live DB:** run #4 in flight since 2026-05-11 08:35 UTC. 36 agents, 35 components (5 decom), 311 attributions, 278 comms, 19 consolidations (all status=D but several have silent-failure issues), 13 insights filed during run.
+
+**13 issues identified, NOT YET SHIPPED — awaiting admin verdict** in `docs/RUN4-ISSUES-AWAITING-VERDICT.md`. Summary:
+
+| # | Issue | Priority | Effort |
+|---|---|---|---|
+| 1 | ft-cm-poller/api wrong-named "Fantasy Tour Contest Management" — cross-plane merge missed | P2 | XS |
+| 2 | fav2 monorepo split-before-merge worked ✓ | — | done |
+| 3 | Aurora master+reader not merged into one cluster-component | P1 | S |
+| 4 | fantasy-tour ↔ fantasy-tour-v1 cross-plane duplicate unmerged | **P0** | S |
+| 5 | lineups-v2 standalone telem + spawn collision wedge | P1 | S+XS |
+| 6 | fav2-admin telem ↔ feeds-aggregator-v2-admin github unmerged | **P0** | (#4 fix) |
+| 7 | fav2-api silent merge "D" without absorb (execute_mutation before absorb_agent) | **P0** | M |
+| 8 | spawn_child_agent collision wedges target SME (3 instances) | **P0** | XS |
+| O1 | orch waits for admin greenlight even when phase-end heuristic met | P1 | S |
+| O2 | absorb_agent cascade_attributions atomic failure on duplicate triple | **P0** | M |
+| O3 | Last9 bare-label `redis` (no hostname) — telemetry SME stuck | P2 | XS |
+| O4 | SMEs don't self-audit; admin sanity broadcasts needed | P1 | M |
+| O5 | Agents prefer chat-to-admin over raise_blocker for tool errors | P2 | XS |
+
+**Suggested minimum to ship:** P0-1 (#7 + O2 mutation guards) + P0-2 (#4/#6 cross-plane sibling-search prompt) + P0-3 (#8 spawn_child pre-check). ~1 day work.
+
+**Awaiting admin verdict before any patches go in.** Post-compact session should pull verdict from user + ship agreed scope.
+
+---
+
+
 
 > **Read this FIRST after compaction.** Then `git log --oneline -25`,
 > then the 7 canonical docs (HLD / SCHEMA / TRIGGER-MANAGEMENT /

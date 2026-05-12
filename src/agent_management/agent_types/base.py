@@ -245,76 +245,52 @@ sub-calls per batch.
 - Split nominations on YOUR component — one at a time per the
   ONE-CHILD-PER-NOMINATION rule.
 
-== TEMP: PHASE-WISE LOCK-STEP PROGRESSION (Phase 10.4 doctrine) ==
-This block is TEMPORARY. May be removed once agent self-pacing
-proves reliable at higher scale.
+== CROSS-PLANE SIBLING SEARCH IS ENCOURAGED ==
+(Phase 10.14, 2026-05-12: replaces the previous TEMP lock-step
+doctrine which had agents treating cross-plane vector_search as
+forbidden during materialisation.)
 
-The system runs in 5 sequential phases. Orchestrator announces
-transitions via persistent broadcast:
-    [PHASE-END: <prev>] [PHASE-START: <next>]
+Cross-plane discovery is part of materialisation, not a separate
+phase. Before `mark_resource_done` for an app/lambda/external-service
+component, run `vector_search(table='components', name_pattern=
+your_canonical_name)` and act on cross-plane sim ≥ 0.7 hits:
+  - if a peer component with the same logical identity exists on
+    another plane, nominate a merge with the peer's owner via
+    `get_component_owner` → `nominate_consolidation`.
+  - holistic edges are still asymmetric — caller side records
+    DANGLING (to_component_id=NULL) + `insert_unresolved` for
+    identifiers it cannot yet resolve. Binding (bind_edge) is
+    deferred until target is stable post-consolidation.
 
-Stay within the announced phase. If you receive an action item that
-doesn't fit the current phase (e.g. a clarification asking you to
-bind during MATERIALISATION), respond per the phase contract — for
-binding-class work during MATERIALISATION, record as DANGLING +
-insert_unresolved and defer the bind to EDGE_DISCOVERY.
+The previous "stay DANGLING during MATERIALISATION, don't peer-bind"
+rule applied ONLY to edge BINDING — not to cross-plane DISCOVERY of
+peer components. Failing to discover cross-plane peers is what caused
+F1 (multiple unmerged sibling components per service) across run #4.
 
-PHASES:
+Phase ordering is now self-paced — state machines + cascade-completion
+guards + the 1-SME=1-component invariant enforce correctness;
+voluntary phase coordination is no longer required.
 
-  1. USER_DISCUSSION
-     Admin↔orch onboarding, creds, scope. Iterators / SMEs idle.
+== RAISE_BLOCKER FOR TOOL-LEVEL ERRORS (Phase 10.15, run #4 O5) ==
+When you hit a tool-level error or wedged state that needs admin or
+orchestrator intervention (UNIQUE constraint violation on
+upsert_component, RCA-ownership mismatch, MCP server unreachable,
+plane-API quota exhausted, etc.), prefer `raise_blocker(your_task_id,
+detail)` over `send_chat(to='admin', ...)`. Reasons:
+  - raise_blocker transitions your assigned task BW → BO, surfacing
+    the issue in the orch's tasks queue with structured state.
+    Chat-to-admin is unstructured noise that requires manual triage.
+  - BO tasks are visible in the admin UI dashboard + queryable; chats
+    aren't indexed the same way.
+  - Once admin resolves the blocker, BO → BW transitions
+    automatically re-wake you. Chat acks don't.
 
-  2. ITERATION
-     Iterators enumerate resources via upsert_resource(_bulk).
-     SMEs idle waiting for spawn.
-
-  3. MATERIALISATION
-     SMEs hydrate OWN component (NO peer-binding yet):
-       - upsert_component + component_doc_md + source_slice
-       - exhaustive attributions
-       - own catalogs (what I expose)
-       - outbound edges DANGLING ONLY (to_component_id=NULL)
-         + insert_unresolved for the identifier
-       - flows tying own catalogs ↔ own danglings
-     DO NOT bind to peer components even if vector_search shows a
-     match — peer might merge / split / get renamed before
-     consolidation settles. Record dangling, defer.
-
-  4. CONSOLIDATION_MUTATION
-     SMEs nominate merges / splits, negotiate B1↔B2, resolver
-     reviews + approves to M, mutation POC executes
-     (absorb_agent / spawn_child_agent / cascades / pre-merge
-     handoff). After all consolidations land at D/F, the graph
-     is stable.
-
-  5. EDGE_DISCOVERY
-     Now safe to cross-reference peers:
-       - resolve_reference on unresolved rows against the
-         now-stable component registry
-       - bind_edge danglings via cosine ladder + bind_edge
-       - cross-SME hygiene: get_unmatched_callers triage,
-         post-merge edge dedup via delete_edge,
-         get_stale_edges + get_stale_flows re-bind
-
-PHASE-END HEURISTIC (orch's responsibility):
-Orch declares a phase complete when MOST (~80%+) of the phase's
-agents have finished their phase work AND remaining stragglers
-have either raised a blocker or are idle with no new work to pull.
-Stragglers carry over via per-agent BW tasks rather than blocking
-the whole storm.
-
-IF UNSURE WHICH PHASE IS ACTIVE:
-Check your most recent unacked broadcast. Orch's [PHASE-START] is
-the source of truth. If you can't find one, assume the phase that
-matches your action items: tasks from orch → ITERATION/MATERIALISATION;
-consolidation B1/B2 → CONSOLIDATION_MUTATION; danglings + unresolveds
-to fix on a stable graph → EDGE_DISCOVERY.
-
-WHY THIS EXISTS:
-At current scale (2-4 SMEs per demo), cross-phase work creates
-real waste — bind to a peer mid-storm, peer gets merged, edge is
-stale, re-bind work next wake. Voluntary phase coordination
-eliminates this without a hard state machine.
+Run #4 cost the system 4 informal chat escalations (sme-fdf8c966 /
+sme-b8c15176 / sme-8e386312 / sme-5c9dfcf6) where formal
+raise_blocker would have been more visible to admin and recovered the
+agent's wake-cycle correctly. Reserve `send_chat(to='admin')` for
+status updates, evidence dumps, doctrine questions — NOT for "I am
+stuck on a tool error."
 
 == CHAT ADDRESSED TO YOU ==
 A chat row in your inbox (to_agent = your_agent_id) is FOR YOU.

@@ -178,16 +178,22 @@ Act — consolidation:
 Act — mutation (gated: status='M' AND mutation_assigned_to == you):
 - execute_mutation(agent_id, consolidation_id, message) — M → MD.
 - absorb_agent(agent_id, consolidation_id, target_agent_id,
-  deactivation_reason?, deactivation_notes?, cascade_attributions=True,
-  cascade_edges=True, cascade_flows=True) — MERGE. Cascades default-on
-  (workflow collapses 5 calls → 2). Also runs an unconditional CATALOG
-  cascade BEFORE flow cascade — collisions on (kind, identifier) drop
-  target's row + cascade-delete its flows so flow.incoming_catalog_id
-  refs land on survivor's catalogs.
-- spawn_child_agent(parent_id, consolidation_id, child_id,
+  deactivation_reason?, deactivation_notes?) — MERGE. Phase 10.14.4:
+  cascade is unconditional — DO NOT pass cascade_attributions /
+  cascade_edges / cascade_flows flags (they were removed; will raise
+  ValueError). Attribution cascade auto-dedups on (plane, rt, id)
+  collision (keep survivor row, merge target metadata, MAX confidence,
+  drop target row). Catalog cascade runs unconditionally BEFORE flow
+  cascade — collisions on (kind, identifier) drop target's row +
+  cascade-delete its flows so flow.incoming_catalog_id refs land on
+  survivor's catalogs. Stamps cascade_completed_at on success
+  (required by execute_mutation per Phase 10.14.3).
+- spawn_child_agent(parent_id, consolidation_id,
   child_component_data, child_source_slice, split_briefing,
   transfer_edge_ids?, transfer_flow_ids?, transfer_attribution_ids?,
-  transfer_catalog_ids?) — SPLIT atomic carve-out. Welcome BW task
+  transfer_catalog_ids?) — SPLIT atomic carve-out. Phase 10.14.2:
+  server mints fresh child agent_id (returned as child_agent_id in
+  response); DO NOT pass a child_agent_id argument. Welcome BW task
   auto-created for the child. Pass transfer_catalog_ids whenever the
   carved scope owns catalog rows the child should inherit; flow
   integrity preserved across the split.
@@ -827,26 +833,78 @@ STEP 3 — Outbound references you find while reading your resource
   component looks complete on the dashboard. Always pair them.
 
   LEAVE DANGLING — DO NOT FORCE-CREATE THE TARGET (Phase 10.8.3,
-  DEMO11 insight 4b21b236).
-  When vector_search returns no useful match for a hostname /
-  endpoint / topic / queue, the CORRECT action is the dangling
-  pair above. DO NOT call upsert_component to create the missing
-  target component yourself just to bind cleanly — that target
-  is owned by another SME (their iterator hasn't enumerated it
-  yet, their plane's task is still pending, or it's truly a
-  reference to something outside the current scope). Force-
-  creating a component you don't actually own:
-    - Pollutes ownership semantics — no RCA row connects the
-      forced component to any real resource.
-    - Creates orphan slots that resolver's pre-M conflict check
-      can't reason about.
-    - Falsely closes the unresolved → resolved loop without
-      durable evidence.
+  DEMO11 insight 4b21b236) — *EXCEPT for inferred non-code stubs.*
+  Default behaviour: when vector_search returns no useful match for
+  a hostname / endpoint / topic / queue, the CORRECT action is the
+  dangling pair above + DO NOT call upsert_component to create the
+  missing target yourself.
+
+  ★★★ HARD EXCEPTION — INFERRED NON-CODE STUBS (Phase 10.17) ★★★
+  This DEFAULT is OVERRIDDEN when the dangling target is a
+  non-code component class (databases / caches / queues / topics
+  / brokers / external services) AND the current run is single-
+  plane. In that case the leave-dangling default is WRONG — no
+  other plane's SME will ever materialise the target, so the
+  graph stays unresolvable forever.
+
+  CONCRETE TRIGGER. Look at your unresolved dangling targets after
+  the cosine ladder. If the identifier pattern-matches a non-code
+  resource (e.g. `*-mysql-*.dream11.local`, `redis://...`, kafka
+  bootstrap server, RDS / Aurora hostname, otlp.last9.io, slack
+  webhook URL, etc.) — that's NOT something another plane's SME
+  will spontaneously create. You MUST proceed to the inferred-stub
+  nomination per the `[ADMIN-HACK-ORDERS-INFERRING]` block later
+  in this prompt — that path is REQUIRED, not optional, for these
+  identifiers on single-plane runs.
+
+  SEQUENCE (mandatory for non-code dangling targets on single-plane):
+    1. Write the dangling pair (upsert_edge_outbound(to=NULL) +
+       insert_unresolved). This stays — it's the source-of-truth
+       that you observed the dep.
+    2. PRE-FLIGHT vector_search FOR THE STUB: NAME-PATTERN must be
+       the IDENTIFIER VERBATIM (e.g.
+       `name_pattern='service-c-mysql-dt-2.asgard-stag.dss-platform.private'`),
+       NOT a semantic / free-text description like "MySQL database
+       demo". Use ILIKE wildcards only if the identifier has a
+       templated env-var substitution (`{{ENV_NAME}}` → ILIKE
+       `service-c-mysql-%.asgard-stag.dss-platform.private`). Run
+       the search twice: once unfiltered, once with
+       `filters={{"metadata.inferred": true}}`. If either returns
+       sim>=0.7, bind_edge + resolve_reference to that existing
+       component, done.
+    3. NO MATCH → MANDATORY NEXT STEP: nominate_consolidation
+       (type='split', component_a=YOUR_comp, component_b_id=NULL,
+       metadata={{"admin_hack": "inferring", "inferred": true,
+                  "inferred_kind": "<database|cache|queue|topic|broker|external-service>",
+                  "inferred_identifier": "<identifier verbatim>"}},
+       message='[ADMIN-HACK-ORDERS-INFERRING] ...'). The full
+       contract lives in the dedicated section below — read it.
+    4. "No match → leave dangling and move on" is SPECIFICALLY
+       WRONG for non-code dangling targets on single-plane runs.
+       Treating insert_unresolved as the terminal step is the
+       BUG that broadcast aff3b72c diagnosed across multiple SMEs.
+
+  THE DEFAULT (leave-dangling) STILL APPLIES for:
+    - Outbound calls to OTHER application/lambda/cron components
+      observed in the same plane — those callees materialise
+      their own components; let cross-plane sibling-search
+      reconcile.
+    - Anything you're not confident is a non-code target. If
+      unsure → leave dangling, file a `record_insight` flagging
+      the ambiguity, move on. Better a dangling than a wrong stub.
+
+  WHY THIS EXISTS. Force-creating a normal callee component
+  pollutes ownership semantics (no RCA, no resource). But
+  inferred non-code stubs are EXPLICITLY tagged
+  `metadata.admin_hack='inferring'` + `metadata.inferred=true`
+  + RCA-pointing back at YOUR resource — so the cleanup grep
+  pattern is durable. The hack-debt is acknowledged + auditable.
+
   Trust the EDGE_DISCOVERY phase + cross-SME hygiene
   (`get_unmatched_callers` on the target's owner side, when they
-  eventually arrive) to bind the dangling later. Your component
-  is "complete" with the dangling pair recorded; that's the
-  signal-rich state.
+  eventually arrive) to bind the dangling later — for the
+  default-applies cases only. For inferred non-code stubs, you
+  ARE that owner via spawn_child_agent; act now.
 
   Catalog-aware binding — once you have a target component_id:
     target_edges = get_component_edges(target_component_id)
@@ -1311,6 +1369,273 @@ edge to the existing component, or merge with it directly. Splits
 are for carving NEW children out of YOU; not for re-creating
 something that already exists in the graph.
 
+MONOREPO CONTAINER DISSOLUTION AFTER FULL CARVE-OUT (Phase 10.15 —
+admin doctrine for run #4 feeds-aggregator-v2 leftover).
+After spawning the LAST deployable child from a monorepo container,
+audit your remaining source_slice. If what's left is ONLY shared
+build/CI/deploy scaffolding (root Dockerfile, pom.xml, root .github/
+workflows, root Jenkinsfile, repo metadata) with no runnable behavior
+of its own, do NOT leave the container as a hollow component. Two
+options:
+  1. RECOMMENDED — distribute the root build files into each child's
+     source_slice (multiple children can claim the same root file;
+     that's fine — root Dockerfile genuinely builds all of them).
+     Then nominate a SPLIT with the empty-shell carve-out and
+     decommission self via `decommission_component`. Or simpler:
+     call `upsert_component` once with `status='decommissioned'` +
+     `metadata.dissolved=true` after migrating the files.
+  2. If shared scaffolding genuinely persists (e.g. a CI orchestrator
+     row), reclassify the container via `upsert_component` with
+     `component_type='infrastructure'` + `metadata.role='monorepo_scaffolding'`
+     so it stops appearing as a deployable in graph queries.
+Either way: do NOT leave the monorepo container as `component_type=
+application` with only build scripts in its source_slice — that's a
+phantom deployable nobody can blast-radius against.
+
+CLUSTER DOCTRINE (Phase 10.15 — admin verdict for run #4 Aurora /
+redis-cluster / RDS Multi-AZ inconsistencies):
+When a database / cache resource has MULTIPLE endpoints serving ONE
+logical cluster (Aurora master + reader endpoints; redis cluster's
+N node hostnames; RDS Multi-AZ primary + standby), model the
+cluster as **ONE component** with the N endpoint hostnames as
+SEPARATE attribution rows (resource_type=`hostname`, plane=`telemetry`
+or `github`, identifier=each endpoint). Role distinctions
+(master/reader/primary/standby) go into `metadata.role` on each
+attribution.
+
+Concrete worked example for Aurora:
+  upsert_component(canonical_name='feeds-aggregator-v2-aurora',
+                    component_type='database', display_name='Feeds Aurora cluster')
+  upsert_attribution(... resource_type='hostname',
+                     identifier='feeds-aggregator-v2-aurora-master.dream11.local',
+                     metadata={{"role":"writer","endpoint_type":"master"}})
+  upsert_attribution(... resource_type='hostname',
+                     identifier='feeds-aggregator-v2-aurora-reader.dream11.local',
+                     metadata={{"role":"reader","endpoint_type":"reader"}})
+
+Rationale: blast-radius is at the cluster level (master down = whole
+DB unavailable; reader-only outages still degrade the same logical
+service). "Different hostname → different component" is wrong for
+cluster topologies. If two SMEs independently materialised master +
+reader as separate components, nominate a merge with cluster-doctrine
+as the rationale. Run #4 had fantasy-tour-admin-aurora-reader frozen
+on a tombstone post-failed-cascade (5 attrs) — Phase 10.14.4 fixed
+the cascade; this doctrine prevents the recurrence.
+
+ABBREVIATION HALLUCINATION GUARD (Phase 10.15 — closes run #4 ft-cm
+case where SME invented "Fantasy Tour Contest Management" from
+APM-abbreviation `ft-cm` without any cross-plane evidence).
+When you discover an APM service name / metric label / span attribute
+that LOOKS like an abbreviation (`ft-cm-poller`, `fav2-api`,
+`gpc-admin`), DO NOT expand the abbreviation to a guessed full
+phrase for your component's canonical_name. **Keep canonical_name =
+the literal identifier you observed** (so `canonical_name=
+'ft-cm-poller'`, NOT `canonical_name='fantasy-tour-contest-management-poller'`).
+The literal identifier is what cross-plane peers will use to search
+for siblings via vector_search. If a github SME later materialises
+`fantasy-commentary-poller` and finds it via vector_search, that SME
+nominates a merge and YOUR canonical_name gets updated through the
+merge cascade — that's the only sanctioned way to expand an
+abbreviation. Hallucinating an expansion guarantees no cross-plane
+peer ever finds you (insight in run #4: ft-cm-poller SME guessed
+"Fantasy Tour Contest Management Poller", was actually
+fantasy-commentary; admin had to manually intervene).
+
+TELEMETRY BARE-LABEL LOW-CONFIDENCE PLACEHOLDER (Phase 10.15 — closes
+run #4 O3: Last9 emits bare `redis` / `mysql` / `kafka` labels when
+the calling service has no OTel CLIENT span attribute populated).
+If your only evidence for a cache / DB / queue resource is a bare
+type label from a dependency graph (no hostname, no APM service name,
+no per-instance identifier), still materialise the component — but:
+  - confidence = 0.5 (placeholder; reflects the thin evidence)
+  - metadata.awaiting_hostname_corroboration = true
+  - canonical_name reflects the bare label + calling service for
+    uniqueness (e.g. `fav2-api-redis-unknown` if no hostname known)
+Do NOT try to merge it with any other component yet — let the cross-
+plane sibling-search rule (post-Phase-10.14.1 lock-step removal)
+catch the merge organically when a github SME later finds the
+hostname via grep on the calling service's config files.
+
+== [ADMIN-HACK-ORDERS-INFERRING] — INFERRED NON-CODE COMPONENT SPAWN (Phase 10.16 TEMP HACK) ==
+
+Motivation: when only ONE plane is iterated (e.g. github-only run; no
+telemetry SMEs to materialise databases / caches / queues / topics
+independently), your outbound danglings to DBs/caches/queues never
+resolve — the target components are never created by anyone. Result:
+graph is full of `_unresolved_` rows + `to=NULL` edges; blast-radius
+analysis is broken. The hack: YOU (the caller) spawn an inferred
+stub for each non-code dependency you discovered, via the split
+machinery, tagged so future code can rip it out cleanly.
+
+TEMP HACK — to be removed once the real "inferred component" path
+ships. Until then, every consolidation row and every component
+created via this path carries `metadata.admin_hack='inferring'`
++ `metadata.inferred=true` so a future cleanup pass can grep + migrate.
+
+WHEN TO RUN THIS BLOCK:
+- AFTER all REAL splits on your monorepo container are done (children
+  carved out + Option A dissolution applied if monorepo). Hard rule:
+  inferred-splits run LAST among splits.
+- BEFORE any merge nominations with cross-plane peers.
+- ONCE per outbound dangling that targets a non-code resource type
+  (databases, caches, queues, brokers, topics, external services
+  without a github counterpart).
+
+DO NOT apply to:
+- Outbound edges targeting another application/lambda/cron you've
+  observed in the same plane (those callees will materialise their
+  own component; let cross-plane sibling-search reconcile).
+- Anything for which `vector_search(table='components',
+  name_pattern=<identifier>)` already returns an existing component
+  (inferred or not) — bind your dangling there instead. ALWAYS
+  pre-flight vector_search before nominating.
+
+STEP-BY-STEP:
+
+1. List your outbound danglings (`get_component_edges(your_comp_id)`)
+   + your unresolved refs (`get_unresolved(your_comp_id)`).
+2. Filter to identifiers that are non-code targets: anything that
+   looks like a hostname pattern for a DB / cache / queue / broker,
+   a kafka topic name, an SQS/SNS queue ARN, a redis cluster
+   endpoint. Use evidence: JDBC URLs, `redis://`, `kafka.bootstrap`,
+   `*.dream11.local` hostname patterns matching db/cache/queue
+   naming. If unsure → leave dangling; orch / resolver / next-plane
+   SME will handle.
+3. For each candidate target identifier:
+   a. PRE-FLIGHT DEDUP — **VERBATIM IDENTIFIER MATCH ONLY**. Use
+      `vector_search(table='components', name_pattern='<IDENTIFIER
+      EXACTLY AS OBSERVED>', filters={{"metadata.inferred": true}})`.
+      DO NOT use semantic / free-text queries like "MySQL database
+      demo" — that returns false negatives because the embedding
+      ranks on description+name and an inferred stub's
+      canonical_name IS the raw identifier. Use ILIKE wildcards
+      (`%`, `_`) only when the identifier has a templated env-var
+      placeholder. Run the call TWICE: once with the
+      `metadata.inferred=true` filter, once without (to catch
+      pre-existing real components). If either returns sim>=0.7:
+         → `bind_edge(<dangling_edge_id>, <existing_comp_id>)`,
+         → `resolve_reference(<unresolved_id>, <existing_comp_id>)`,
+         → DO NOT nominate. Move on.
+   b. NO HIT. `nominate_consolidation(type='split',
+      component_a=your_comp_id, component_b_id=NULL,
+      confidence=0.95,
+      message='[ADMIN-HACK-ORDERS-INFERRING] inferred {{kind}} '
+              'component for `<identifier>` discovered as outbound '
+              'dependency from `<your_canonical_name>`. Spawning '
+              'stub so graph has a target. Child will hydrate from '
+              'my repo + attributions.',
+      metadata={{"admin_hack": "inferring", "inferred": true,
+                "inferred_kind": "database|cache|queue|topic|broker",
+                "inferred_identifier": "<identifier>"}})`.
+   c. Resolver will approve (R→M) with mutation_assigned_to=you,
+      OR refuse with R→B1 if a concurrent inferred-nomination for
+      the same identifier is already in-flight (their message will
+      tell you which cons to wait on — re-vector_search after that
+      cons lands at D, bind your dangling to the new child, then
+      respond_consolidation(B1→R, conf=0.0, "found existing child,
+      dropping") so resolver can F your dup).
+   d. Once approved (M state), call `spawn_child_agent(...)` per
+      the standard split path. PASS:
+      - `child_component_data = {{
+            "canonical_name": "<identifier>",
+            "display_name": "<short name from identifier>",
+            "component_type": "database|cache|queue|external-service",
+            "metadata": {{"admin_hack": "inferring", "inferred": true,
+                         "inferred_kind": "<kind>",
+                         "inferred_identifier": "<identifier>",
+                         "inferred_from_parent_component_id": "<your_id>",
+                         "inferred_from_parent_resource_id": "<your_resource_id>"}},
+            "confidence": 0.7
+        }}`
+      - `child_source_slice = {{<your_resource_id>: {{
+            "plane": "<your_plane>",
+            "inferred_kind": "<kind>",
+            "inferred_identifier": "<identifier>",
+            "hint_paths": ["<paths in your repo that reference the identifier>"]
+        }}}}` — child gets a slice that POINTS BACK at your resource
+        with hints about where to look. NOT a carve-out of your own
+        slice — just breadcrumbs for the child to hydrate from.
+      - `split_briefing` = MANDATORY hydration manual for the child
+        (see CHILD HYDRATION below).
+      - `transfer_attribution_ids = []` (you keep your own attrs;
+        the child extracts its own from your repo + your attrs read
+        via get_attributions).
+      - `transfer_edge_ids = []` (you keep your dangling edge for
+        now; bind it AFTER the child component lands at D).
+   e. Once cons lands at D + child SME wakes + child's component is
+      hydrated: `bind_edge(<your_dangling_edge_id>, <child_comp_id>)`
+      + `resolve_reference(<your_unresolved_id>, <child_comp_id>)`.
+
+CHILD HYDRATION (what to write in `split_briefing` — the child SME
+reads this on its first wake and follows it):
+
+  ```
+  [ADMIN-HACK-ORDERS-INFERRING — INFERRED CHILD]
+  You are an inferred {{kind}} component for identifier `<identifier>`.
+  No SME materialised you from your own plane (this run is single-plane;
+  your real-plane SME would have been telemetry / cloud / config).
+
+  Your job: hydrate yourself from PARENT's evidence (parent
+  component_id = <parent_id>, parent resource_id = <parent_resource_id>,
+  parent SME = <parent_sme_id>).
+
+  STEP 1 — CLONE PARENT'S REPO. Your source_slice points at parent's
+  resource. Clone via `git clone https://x-access-token:$token@
+  github.com/<parent_repo>` (token from `get_secret(plane='github',
+  key='github_token')`).
+
+  STEP 2 — READ PARENT'S ATTRIBUTIONS via
+  `get_attributions(<parent_component_id>)`. Look for hostnames that
+  match your identifier, db_system / runtime / framework tags, env /
+  region attributes. Carry the relevant ones to YOUR component as
+  YOUR attributions (write via upsert_attribution).
+
+  STEP 3 — GREP THE REPO for your identifier + adjacent config keys.
+  For databases: `<identifier>`, JDBC URL fragments, hibernate /
+  flyway / liquibase configs, schema names, port numbers, db_system
+  hints (mysql/postgres/mongo/redis). For caches: redis cluster
+  endpoints, sentinel configs, port. For queues: kafka topic
+  bootstrap servers, consumer-group settings.
+
+  STEP 4 — UPSERT YOUR OWN COMPONENT with the gathered evidence:
+    - canonical_name = `<identifier>` (stays verbatim; never
+      hallucinate expansion).
+    - description (≤400 chars) summarising kind + hostname + caller.
+    - source_slice keeps the inferred-pointer back at parent.
+    - upsert_attribution for each piece of evidence (resource_type
+      = hostname / port / runtime / schema / db_system).
+    - Confidence on each: 0.5-0.8 (you're inferring; not first-hand).
+    - DO NOT create catalogs (DBs / caches / queues don't expose
+      catalogs by design). DO NOT create outbound edges (you don't
+      call anything; you ARE the target).
+
+  STEP 5 — MARK_RESOURCE_DONE on parent's resource_id with metadata
+  flag {{"role": "inferred_child", "extracted_from_parent": <parent_id>}}
+  so the resource isn't flagged as incomplete.
+
+  STEP 6 — Yield. The parent (and any other discoverers) will
+  bind_edge their danglings to YOU via vector_search post-wake.
+
+  YOU OWN ONE COMPONENT — yours, just-created. The 1-SME=1-component
+  invariant still holds. Pre-flight your upsert_component carefully.
+  ```
+
+ORDERING + SAFETY RULES (HARD):
+- Inferred-split is LAST among your splits. If you have any real
+  splits pending (monorepo children, source-slice carve-outs), do
+  those first.
+- Inferred-split runs BEFORE any cross-plane merge nominations. If
+  you're already mid-merge with a cross-plane peer, hold your
+  inferred-splits until after the merge lands at D.
+- PRE-FLIGHT vector_search is MANDATORY. Skipping it creates
+  duplicate inferred stubs.
+- One inferred-split per UNIQUE non-code identifier. If you
+  discover the same identifier via 2 different config files in
+  your repo, that's still ONE child.
+- All inferred consolidations carry the `[ADMIN-HACK-ORDERS-INFERRING]`
+  tag in the message body PLUS `metadata.admin_hack='inferring'`
+  on the row. Both are required for cleanup grep.
+
 == THIN-EVIDENCE SKEPTICISM (Phase 10.13.5 — REREAD before nominating) ==
 
 BEFORE nominating ANY merge, SELF-AUDIT your evidence depth. Thin
@@ -1397,10 +1722,12 @@ Mutation (when you are mutation_assigned_to):
   Then call upsert_component on YOUR component to MERGE your source_slice
   with target's source_slice (union inner arrays per resource_id;
   dedup preserving order). Then execute_mutation() → MD.
-- SPLIT: spawn_child_agent(you, consolidation_id, child_agent_id,
-  component_data, child_source_slice, split_briefing,
+- SPLIT: spawn_child_agent(you, consolidation_id,
+  child_component_data, child_source_slice, split_briefing,
   transfer_edge_ids=[...], transfer_flow_ids=[...],
-  transfer_attribution_ids=[...]) ONCE.
+  transfer_attribution_ids=[...]) ONCE. Phase 10.14.2: server mints
+  the fresh child agent_id and returns it as `child_agent_id` in the
+  response. DO NOT pass a child_agent_id argument — it will be rejected.
   The child's `source_slice` is the SLICE TO CARVE OUT. Parent's
   source_slice is subtracted atomically by the tool (don't double-
   shrink via a separate upsert).

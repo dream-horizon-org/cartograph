@@ -485,6 +485,20 @@ def execute_mutation(agent_id: str, consolidation_id: str, message: str) -> dict
             f"consolidation {consolidation_id}. "
             f"(assigned: {cons['mutation_assigned_to']}, caller: {agent_id})"
         )
+    # Phase 10.14.3: refuse M→MD if no absorb_agent (merge) or
+    # spawn_child_agent (split) has stamped cascade_completed_at since
+    # M-state began. Closes the F3 silent-corruption class observed on
+    # cons a21f113a in run #4 (sme-5c9dfcf6 fired execute_mutation
+    # before absorb_agent; state machine advanced M→MD without any
+    # actual transfer).
+    if cons.get("cascade_completed_at") is None:
+        raise ValueError(
+            f"execute_mutation requires absorb_agent (merge) or "
+            f"spawn_child_agent (split) to have stamped "
+            f"cascade_completed_at first. Run the cascade tool first, "
+            f"then execute_mutation to transition M→MD. "
+            f"(consolidation_id={consolidation_id})"
+        )
 
     updated = execute_returning(
         """UPDATE consolidations

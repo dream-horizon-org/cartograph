@@ -519,8 +519,18 @@ CREATE TABLE consolidations (
     mutation_assigned_to TEXT,                   -- agent_id responsible for executing mutation
                                                  -- merge: resolver picks A1 or A2 (more planes wins)
                                                  -- split: always A1 (self-nominator)
-    child_agent_id  TEXT,                        -- set by spawn_child_agent during split
-                                                 -- prevents duplicate spawns (one child per nomination)
+    child_agent_id  TEXT,                        -- set by spawn_child_agent during split.
+                                                 -- Phase 10.14.2: minted server-side
+                                                 -- (caller cannot supply; uniqueness
+                                                 -- guaranteed against agent_runs);
+                                                 -- prevents duplicate spawns (one child per nomination).
+    cascade_completed_at TIMESTAMPTZ,            -- Phase 10.14.3. Stamped by
+                                                 -- absorb_agent (merge) or
+                                                 -- spawn_child_agent (split) on
+                                                 -- successful cascade. execute_mutation
+                                                 -- refuses M→MD if NULL — closes the
+                                                 -- F3 silent-corruption class
+                                                 -- (cons a21f113a in run #4).
     resolved_by     TEXT,                        -- resolver agent_id
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),

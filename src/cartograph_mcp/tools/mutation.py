@@ -27,6 +27,7 @@ Design choices:
 from __future__ import annotations
 
 import json
+import uuid
 
 from shared import embedding as emb
 from shared.actor_auth import require_active_agent
@@ -160,9 +161,9 @@ def absorb_agent(
     target_agent_id: str,
     deactivation_reason: str = "merged",
     deactivation_notes: str | None = None,
-    cascade_attributions: bool = True,
-    cascade_edges: bool = True,
-    cascade_flows: bool = True,
+    cascade_attributions: bool | None = None,  # DEPRECATED Phase 10.14.4
+    cascade_edges: bool | None = None,         # DEPRECATED Phase 10.14.4
+    cascade_flows: bool | None = None,         # DEPRECATED Phase 10.14.4
 ) -> dict:
     """Merge target into the caller's component.
 
@@ -170,13 +171,14 @@ def absorb_agent(
     Refuses if target IS the caller. Target must be the other party on
     the consolidation.
 
-    Phase 4.1: cascade_* flags (default True) pull all of target's
-    attributions / edges / flows into the survivor's component via
-    the mutation-scoped transfer_* tools. With defaults, the survivor
-    workflow collapses from 5 calls (transfer_attrs + transfer_edges +
-    transfer_flows + absorb + execute_mutation) to 2 (absorb +
-    execute_mutation). Set any flag to False to hand-pick movement —
-    e.g. keep survivor's existing edges and discard target's.
+    Phase 10.14.4 (commit pending): cascade_* boolean flags are
+    DEPRECATED. Cascade is now unconditional — `transfer_attributions`
+    auto-dedups on `(component_id, plane, rt, id)` collision (keep
+    survivor's row, merge target metadata, MAX confidence, drop
+    target's row) so the F2 workaround pattern (=False) is unnecessary.
+    Callers passing any of the legacy flags get an explicit ValueError.
+    Legacy use case "I want to hand-pick what moves" can be served by
+    `delete_attribution` + `upsert_attribution` after the absorb.
 
     Effects (all in one operation, but not one DB transaction — each
     step is atomic on its own table):
@@ -196,6 +198,18 @@ def absorb_agent(
 
     Does NOT flip the consolidation status (use execute_mutation).
     """
+    # Phase 10.14.4: reject legacy cascade_* boolean flags. Callers that
+    # passed cascade_attributions=False (the F2 workaround) get a clear
+    # error pointing at the auto-dedup behaviour.
+    if cascade_attributions is not None or cascade_edges is not None or cascade_flows is not None:
+        raise ValueError(
+            "absorb_agent no longer accepts cascade_attributions / cascade_edges / "
+            "cascade_flows flags (Phase 10.14.4). Cascade is unconditional now — "
+            "transfer_attributions auto-dedups on (plane, resource_type, identifier) "
+            "collision so the =False workaround is unnecessary. If you need to "
+            "hand-pick what moves, call delete_attribution / upsert_attribution "
+            "after the absorb."
+        )
     cons = _assert_mutation_gate(agent_id, consolidation_id)
     if target_agent_id == agent_id:
         raise ValueError("cannot absorb self")
@@ -327,49 +341,56 @@ def absorb_agent(
             )
             cascade_result["catalogs"] = len(moved_cats)
 
-    # Steps 5-7 only run when both components exist AND the respective
-    # cascade flag is on. Cascades use the mutation-scoped transfer_*
-    # helpers — same gate (_assert_transfer_scope) re-runs per call,
-    # which is cheap (single consolidation SELECT) and keeps the
-    # transfer audit trail uniform whether invoked directly or via
-    # cascade.
+    # Phase 10.14.4: cascade is unconditional. attribution cascade
+    # auto-dedups on collision (transfer_attributions deduped path).
+    # Edge cascade already had its own auto-dedup (Phase 10.13.8).
+    # Flow cascade is collision-rejecting but flows seldom collide
+    # post-merge.
     if survivor_component_id and target_component_id:
-        if cascade_attributions:
-            attr_rows = execute(
-                "SELECT id FROM attributions WHERE component_id = %s",
-                (target_component_id,),
+        attr_rows = execute(
+            "SELECT id FROM attributions WHERE component_id = %s",
+            (target_component_id,),
+        )
+        attr_ids = [str(r["id"]) for r in attr_rows]
+        if attr_ids:
+            r = transfer_attributions(
+                agent_id, consolidation_id, attr_ids,
+                target_component_id, survivor_component_id,
             )
-            attr_ids = [str(r["id"]) for r in attr_rows]
-            if attr_ids:
-                r = transfer_attributions(
-                    agent_id, consolidation_id, attr_ids,
-                    target_component_id, survivor_component_id,
-                )
-                cascade_result["attributions"] = r["transferred"]
+            cascade_result["attributions"] = r["transferred"]
+            cascade_result["deduped_attributions"] = r.get("deduped", 0)
 
-        if cascade_edges:
-            edge_rows = execute(
-                """SELECT id FROM edges
-                   WHERE from_component_id = %s OR to_component_id = %s""",
-                (target_component_id, target_component_id),
+        edge_rows = execute(
+            """SELECT id FROM edges
+               WHERE from_component_id = %s OR to_component_id = %s""",
+            (target_component_id, target_component_id),
+        )
+        edge_ids = [str(r["id"]) for r in edge_rows]
+        if edge_ids:
+            r = transfer_edges(
+                agent_id, consolidation_id, edge_ids, direction="both",
             )
-            edge_ids = [str(r["id"]) for r in edge_rows]
-            if edge_ids:
-                r = transfer_edges(
-                    agent_id, consolidation_id, edge_ids, direction="both",
-                )
-                cascade_result["edges"] = r["transferred"]
-                cascade_result["collapsed_edges"] = r["collapsed"]
+            cascade_result["edges"] = r["transferred"]
+            cascade_result["collapsed_edges"] = r["collapsed"]
 
-        if cascade_flows:
-            flow_rows = execute(
-                "SELECT id FROM flows WHERE component_id = %s",
-                (target_component_id,),
-            )
-            flow_ids = [str(r["id"]) for r in flow_rows]
-            if flow_ids:
-                r = transfer_flows(agent_id, consolidation_id, flow_ids)
-                cascade_result["flows"] = r["transferred"]
+        flow_rows = execute(
+            "SELECT id FROM flows WHERE component_id = %s",
+            (target_component_id,),
+        )
+        flow_ids = [str(r["id"]) for r in flow_rows]
+        if flow_ids:
+            r = transfer_flows(agent_id, consolidation_id, flow_ids)
+            cascade_result["flows"] = r["transferred"]
+
+    # Phase 10.14.3: stamp cascade_completed_at. execute_mutation refuses
+    # M→MD without this stamp — guards against the silent corruption
+    # observed on cons a21f113a (execute_mutation fired before
+    # absorb_agent → state machine advanced M→MD without any actual
+    # cascade).
+    execute_mutate(
+        "UPDATE consolidations SET cascade_completed_at = now() WHERE id = %s",
+        (consolidation_id,),
+    )
 
     return {
         "absorbed": target_agent_id,
@@ -384,10 +405,32 @@ def absorb_agent(
 # ---------- spawn_child_agent (split) ----------
 
 
+def _mint_fresh_agent_id() -> str:
+    """Generate a fresh sme-<8hex> id, retrying on collision against agent_runs.
+
+    Phase 10.14.2: spawn_child_agent no longer accepts a caller-supplied
+    child_agent_id. The server mints the id here so concurrent spawns
+    can never collide on an existing agent (which would put one SME
+    in ownership of two active components — violating the
+    1-SME=1-component invariant). Up to 10 retries; in practice the
+    8-hex namespace (~4B) means collisions are astronomically rare.
+    """
+    for _ in range(10):
+        candidate = f"sme-{uuid.uuid4().hex[:8]}"
+        existing = execute_one(
+            "SELECT 1 FROM agent_runs WHERE agent_id = %s", (candidate,)
+        )
+        if existing is None:
+            return candidate
+    raise RuntimeError(
+        "Could not mint a unique agent_id after 10 attempts — "
+        "namespace exhaustion is improbable, suspect bug."
+    )
+
+
 def spawn_child_agent(
     agent_id: str,
     consolidation_id: str,
-    child_agent_id: str,
     child_component_data: dict,
     child_source_slice: dict,
     split_briefing: str,
@@ -396,31 +439,45 @@ def spawn_child_agent(
     transfer_attribution_ids: list[str] | None = None,
     transfer_catalog_ids: list[str] | None = None,
     agent_manager=None,
+    child_agent_id: str | None = None,  # DEPRECATED — Phase 10.14.2
 ) -> dict:
     """SPLIT: carve out a new component + new SME from the caller's scope.
 
     Atomic within its scope. Effects:
-      1. INSERT new component with split_from_component_id = parent's,
+      1. Mint a fresh `child_agent_id` server-side (Phase 10.14.2 —
+         caller can NO LONGER supply it; collisions previously wedged
+         the receiving SME with two active components).
+      2. INSERT new component with split_from_component_id = parent's,
          source_slice = `child_source_slice`.
-      2. UPDATE parent component: source_slice = parent_slice MINUS child_slice.
-      3. INSERT child_agent_id into agent_runs as an idle SME.
-      4. INSERT resource_component_agents for the child.
-      5. SET consolidations.child_agent_id to block re-spawn.
-      6. Auto-embed the new component.
-      7. (Phase 4.1) Create a BW "[split-welcome]" task for the child
+      3. UPDATE parent component: source_slice = parent_slice MINUS child_slice.
+      4. INSERT the freshly-minted child agent_id into agent_runs as an idle SME.
+      5. INSERT resource_component_agents for the child.
+      6. SET consolidations.child_agent_id to block re-spawn.
+      7. Auto-embed the new component.
+      8. (Phase 4.1) Create a BW "[split-welcome]" task for the child
          with component_id + split_briefing in the description so the
          child wakes with visible context (fixes the "child doesn't
          know their component" gap).
-      8. (Phase 4.1) Transfer specified edge_ids + flow_ids to the
+      9. (Phase 4.1) Transfer specified edge_ids + flow_ids to the
          child via the mutation-scoped transfer tools.
 
     Phase 4.1 tightens parent-slice validation: requires the top-level
     components.source_slice column to be non-empty (previously fell
     back to empty carve when agents stashed slice in metadata).
 
+    Phase 10.14.2 (commit pending): caller-supplied child_agent_id is
+    DEPRECATED — server mints fresh ids. Passing the legacy param
+    raises ValueError to surface the contract change loudly.
+
     Idempotency: consolidation.child_agent_id blocks re-spawn. Caller
     re-runs safely only while child_agent_id IS NULL.
     """
+    if child_agent_id is not None:
+        raise ValueError(
+            "spawn_child_agent no longer accepts child_agent_id — the server "
+            "mints fresh ids to prevent spawn-collision wedges (Phase 10.14.2). "
+            "Drop the child_agent_id arg from your call."
+        )
     cons = _assert_mutation_gate(agent_id, consolidation_id)
     if cons["nomination_type"] != "split":
         raise ValueError(
@@ -439,6 +496,12 @@ def spawn_child_agent(
             raise ValueError(f"child_component_data.{required} is required")
     if not child_source_slice:
         raise ValueError("child_source_slice is required (non-empty dict)")
+
+    # Phase 10.14.2: mint a fresh child agent_id server-side. Previously
+    # callers supplied this and could re-use an existing active SME's id,
+    # putting that SME into ownership of two active components and
+    # wedging it on upsert_component (unique-constraint violation).
+    child_agent_id = _mint_fresh_agent_id()
 
     parent_component_id = _component_of_agent(agent_id)
     if not parent_component_id:
@@ -671,6 +734,13 @@ def spawn_child_agent(
         )
         transferred_attributions = r["transferred"]
 
+    # Phase 10.14.3: stamp cascade_completed_at. execute_mutation refuses
+    # M→MD without this stamp.
+    execute_mutate(
+        "UPDATE consolidations SET cascade_completed_at = now() WHERE id = %s",
+        (consolidation_id,),
+    )
+
     return {
         "child_agent_id": child_agent_id,
         "child_component_id": child_component_id,
@@ -719,16 +789,66 @@ def transfer_attributions(
     # Single scope check — replaces the old RCA-ownership lookup.
     _assert_transfer_scope(agent_id, consolidation_id, from_component_id, to_component_id)
 
-    rowcount = execute_mutate(
-        """UPDATE attributions
-           SET component_id = %s, last_seen_at = now()
+    # Phase 10.14.4: per-row dedup. The old bulk UPDATE blew up on
+    # UNIQUE (component_id, plane, resource_type, identifier) when
+    # survivor + target legitimately shared categorical tags (e.g.
+    # both had telemetry/runtime/jvm or cloud/region/us-east-1).
+    # SMEs worked around via cascade_attributions=False (now removed
+    # — see absorb_agent signature) and target's attrs stayed frozen
+    # on tombstone, invisible to graph queries.
+    #
+    # New behaviour: for each row, check whether survivor already has
+    # the same (plane, resource_type, identifier). If yes → KEEP
+    # survivor's row, MERGE target's metadata into it (target keys
+    # added; survivor keys win on conflict), MAX the confidence, DROP
+    # target's row. If no → standard UPDATE component_id move.
+    target_rows = execute(
+        """SELECT id, plane, resource_type, identifier, metadata, confidence
+           FROM attributions
            WHERE id = ANY(%s) AND component_id = %s""",
-        (to_component_id, attribution_ids, from_component_id),
+        (attribution_ids, from_component_id),
     )
-    if rowcount == 0:
+    if not target_rows:
         raise ValueError(
-            "No attributions moved — check IDs actually belonged to from_component"
+            "No attributions found — check IDs actually belonged to from_component"
         )
+
+    transferred = 0
+    deduped = 0
+    for row in target_rows:
+        existing = execute_one(
+            """SELECT id, metadata, confidence FROM attributions
+               WHERE component_id = %s AND plane = %s
+                 AND resource_type = %s AND identifier = %s""",
+            (
+                to_component_id, row["plane"],
+                row["resource_type"], row["identifier"],
+            ),
+        )
+        if existing is not None:
+            # Collision — merge metadata, MAX confidence, drop target row.
+            target_meta = row["metadata"] if isinstance(row["metadata"], dict) else {}
+            surv_meta = existing["metadata"] if isinstance(existing["metadata"], dict) else {}
+            merged = {**target_meta, **surv_meta}  # survivor keys win on conflict
+            execute_mutate(
+                """UPDATE attributions
+                   SET metadata = %s::jsonb,
+                       confidence = GREATEST(confidence, %s),
+                       last_seen_at = now()
+                   WHERE id = %s""",
+                (json.dumps(merged), row["confidence"], existing["id"]),
+            )
+            execute_mutate("DELETE FROM attributions WHERE id = %s", (row["id"],))
+            deduped += 1
+        else:
+            # No collision — standard move.
+            execute_mutate(
+                """UPDATE attributions
+                   SET component_id = %s, last_seen_at = now()
+                   WHERE id = %s""",
+                (to_component_id, row["id"]),
+            )
+            transferred += 1
 
     # Re-embed both components (best-effort).
     for cid in (from_component_id, to_component_id):
@@ -750,7 +870,8 @@ def transfer_attributions(
             pass
 
     return {
-        "transferred": rowcount,
+        "transferred": transferred,
+        "deduped": deduped,
         "from_component_id": from_component_id,
         "to_component_id": to_component_id,
     }
