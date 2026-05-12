@@ -1,6 +1,6 @@
 # Cartograph — Implementation Phases
 
-**Status (2026-05-12 afternoon):** Phases 0 → 10.13 all ✅ except Phase 6 (Globe — parked). **Phase 10.14 IN-PROGRESS** on `feat/prompt-tuning-and-bug-fixes` — admin verdict confirmed; 4 P0s being shipped this session (see §10.14 below). Phases 0 → 10.13 status unchanged from prior summary. Bedrock token rotated 2026-05-12 06:51 UTC. **Phase 10.13 SHIPPED** — 10 sub-phases across 3 tiers landed in 9 commits; tool count 114 → 117 (+3: `get_component_owner`, `resolve_references_bulk`, `bind_edges_bulk`); 1 schema migration (attribution UNIQUE → component-scoped); 13 OPEN insights triaged (10 promoted, 3 wontfix). **Two post-sync follow-ups (2026-05-11)** ahead of 4th real-data attempt: `8c7fd30` Phase 10.13.12 iterator ADMIN-SCOPE rule (respect narrow target lists — upsert only named targets + their dependency-linked infra; full enumeration dumps to workspace file; saves ~50 LOC of admin kickoff boilerplate); `89ec1c4` Phase 10.13.13 SME lanes 8 → 12 (total concurrent subprocesses 12 → 16: orch 1 + iter 2 + res 1 + sme 12). **Runtime infra shipped 2026-05-08** (`adb59f3`): `CARTOGRAPH_AGENT_SETTINGS_PATH` env var toggles Bedrock-isolated agent auth. **DB wiped 2026-05-11** pre-4th-real-data-run (snapshot `/tmp/cartograph-snapshots/snap-2026-05-11-073639-pre-realdata4.sql`, workspaces backed up at `src/workspaces.bak.pre-realdata4.2026-05-11-073639/`). Fresh singletons live: `orch-841b98fd` + `res-fdb7d978`. **Next work: 4th real-data onboarding** with new ADMIN-SCOPE prompt + 16-lane concurrency.
+**Status (2026-05-12 evening):** Phases 0 → 10.14 all ✅ except Phase 6 (Globe — parked). **Phase 10.14 SHIPPED** on `feat/prompt-tuning-and-bug-fixes` — 4 P0s landed in 4 commits (`beeba19` lock-step drop · `f905384` spawn fresh-id · `008c208` cascade_completed_at guard · `a96127a` attribution cascade auto-dedup + flag delete) plus doc-sync. 92/92 mutation + consolidation tests green. Schema delta: `consolidations.cascade_completed_at TIMESTAMPTZ` added (idempotent migration run on dev DB live). Tool count unchanged at 117; signatures changed on `absorb_agent` (cascade flags removed) and `spawn_child_agent` (`child_agent_id` minted server-side). F1 / F2 / F3 failure modes from run #4 all closed at the root. Bedrock token rotated 2026-05-12 06:51 UTC. **Phase 10.13 SHIPPED** — 10 sub-phases across 3 tiers landed in 9 commits; tool count 114 → 117 (+3: `get_component_owner`, `resolve_references_bulk`, `bind_edges_bulk`); 1 schema migration (attribution UNIQUE → component-scoped); 13 OPEN insights triaged (10 promoted, 3 wontfix). **Two post-sync follow-ups (2026-05-11)** ahead of 4th real-data attempt: `8c7fd30` Phase 10.13.12 iterator ADMIN-SCOPE rule (respect narrow target lists — upsert only named targets + their dependency-linked infra; full enumeration dumps to workspace file; saves ~50 LOC of admin kickoff boilerplate); `89ec1c4` Phase 10.13.13 SME lanes 8 → 12 (total concurrent subprocesses 12 → 16: orch 1 + iter 2 + res 1 + sme 12). **Runtime infra shipped 2026-05-08** (`adb59f3`): `CARTOGRAPH_AGENT_SETTINGS_PATH` env var toggles Bedrock-isolated agent auth. **DB wiped 2026-05-11** pre-4th-real-data-run (snapshot `/tmp/cartograph-snapshots/snap-2026-05-11-073639-pre-realdata4.sql`, workspaces backed up at `src/workspaces.bak.pre-realdata4.2026-05-11-073639/`). Fresh singletons live: `orch-841b98fd` + `res-fdb7d978`. **Next work: 4th real-data onboarding** with new ADMIN-SCOPE prompt + 16-lane concurrency.
 
 Most recent (2026-05-05 → 2026-05-06):
 - **10.7** (`description` column separate from `doc_md` + `vector_search` filters + `exclude_self` + workspace-local doc_md) — 8 sub-commits ending at `e7ce669`.
@@ -6361,12 +6361,25 @@ Tool count: 117 (unchanged — no tools added or removed, just signature changes
 - **O4 `mark_resource_done` precondition gate** (P1) — needs admin verdict on hard-refuse vs soft-warn.
 - **O3 telemetry bare-redis** (P2) — simplified to "do nothing special, low-conf placeholder."
 
-### 10.14.12 — Status (updated as commits land)
+### 10.14.12 — Status (SHIPPED 2026-05-12)
 
 | Sub | Commit | Date |
 |---|---|---|
-| 10.14.1 lock-step drop | _pending_ | _pending_ |
-| 10.14.2 spawn fresh-id | _pending_ | _pending_ |
-| 10.14.3 cascade_completed_at guard | _pending_ | _pending_ |
-| 10.14.4 attr cascade auto-dedup + flag delete | _pending_ | _pending_ |
-| 10.14.5 doc-sync | _pending_ | _pending_ |
+| 10.14.1 lock-step drop | `beeba19` | 2026-05-12 |
+| 10.14.2 spawn fresh-id | `f905384` | 2026-05-12 |
+| 10.14.3 cascade_completed_at guard | `008c208` | 2026-05-12 |
+| 10.14.4 attr cascade auto-dedup + flag delete | `a96127a` | 2026-05-12 |
+| 10.14.5 doc-sync | this commit | 2026-05-12 |
+
+**Phase 10.14 SHIPPED.** 92/92 mutation + consolidation tests green.
+Tool surface signatures changed (no tool count delta):
+- `absorb_agent` drops `cascade_attributions` / `cascade_edges` /
+  `cascade_flows` boolean flags. Callers passing any → ValueError.
+- `spawn_child_agent` drops `child_agent_id`. Server mints + returns it.
+- `execute_mutation` refuses M→MD unless cascade stamp set by
+  absorb_agent or spawn_child_agent.
+
+Schema delta: `consolidations.cascade_completed_at TIMESTAMPTZ` added.
+Migration is idempotent; run on dev DB live.
+
+F1 / F2 / F3 failure modes from run #4 all closed at the root.

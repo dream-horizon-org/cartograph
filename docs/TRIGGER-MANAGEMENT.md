@@ -893,11 +893,27 @@ absorb_agent(agent_id, target_agent_id)
   Decommissions target agent (status = 'decommissioned').
   Validates: agent is mutation_assigned_to on an active consolidation in state M.
 
+  Phase 10.14.4: cascade is unconditional — attributions / edges / flows /
+  catalogs always cascade from target to survivor. transfer_attributions
+  auto-dedups on (component_id, plane, resource_type, identifier)
+  collision (keep survivor's row, merge target metadata, MAX confidence,
+  drop target's row). The legacy boolean flags `cascade_attributions` /
+  `cascade_edges` / `cascade_flows` were REMOVED — callers passing any
+  raise ValueError.
+
+  Phase 10.14.3: stamps consolidations.cascade_completed_at on success.
+  execute_mutation refuses M→MD if NULL (closes the F3 silent-corruption
+  class observed on cons a21f113a in run #4).
+
 spawn_child_agent(parent_agent_id, consolidation_id, component_data, briefing)
-  SPLIT: create new agent + new component.
+  SPLIT: create new agent + new component. Phase 10.14.2: server mints
+  a fresh `child_agent_id` (sme-<8hex>) — caller no longer supplies it.
+  Returned dict carries the minted id. Legacy callers passing
+  `child_agent_id` arg raise ValueError.
   Sets component.split_from_component_id to parent's component.
   Sets component.split_briefing to the briefing doc.
   Sets consolidation.child_agent_id to the new agent (prevents duplicate spawns).
+  Phase 10.14.3: stamps consolidations.cascade_completed_at on success.
   Registers new agent in agent_runs (trigger manager will auto-invoke).
   Validates:
     - agent is mutation_assigned_to on this consolidation in state M

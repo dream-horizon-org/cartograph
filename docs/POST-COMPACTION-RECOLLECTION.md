@@ -1,19 +1,26 @@
-# Cartograph — Post-Compaction Recollection (2026-05-12, Phase 10.14 in flight)
+# Cartograph — Post-Compaction Recollection (2026-05-12, Phase 10.14 SHIPPED)
 
-## 0a. PHASE 10.14 BUG-FIX BUNDLE — IN PROGRESS (most important — read first)
+## 0a. PHASE 10.14 BUG-FIX BUNDLE — SHIPPED (most important — read first)
 
 **Branch:** `feat/prompt-tuning-and-bug-fixes` (branched from master @ `b13d89b` post-merge of Phase 10.13).
 
-**Admin verdict received 2026-05-12 afternoon.** Shipping 4 P0s in order — see `docs/IMPLEMENTATION-PHASES.md §10.14` for full step-by-step plan:
+**Phase 10.14 SHIPPED 2026-05-12.** 4 P0s + doc-sync committed. 92/92 mutation + consolidation tests green.
 
-| # | Sub | What | Effort | Status |
-|---|---|---|---|---|
-| P0-1 | 10.14.1 | Drop the TEMP lock-step doctrine (kills F1 cross-plane miss) | XS | _check git log_ |
-| P0-4 | 10.14.2 | `spawn_child_agent` mints fresh agent_id server-side (kills #8 wedge class) | XS | _check git log_ |
-| P0-2 | 10.14.3 | `consolidations.cascade_completed_at` guard (kills F3 silent corruption) | M | _check git log_ |
-| P0-3 | 10.14.4 | Attribution cascade auto-dedup + delete `cascade_*` flags (kills F2 frozen-attrs) | M | _check git log_ |
-| — | 10.14.5 | Doc-sync HLD/SCHEMA/TRIGGER-MGMT/AGENT-PROMPTS | S | _check git log_ |
-| — | 10.14.6 | Agent verification on current DB state (no wipe yet) | S | _post-commits_ |
+| # | Sub | What | Commit |
+|---|---|---|---|
+| P0-1 | 10.14.1 | Drop the TEMP lock-step doctrine (kills F1) | `beeba19` |
+| P0-4 | 10.14.2 | `spawn_child_agent` mints fresh agent_id server-side (kills #8 wedge class) | `f905384` |
+| P0-2 | 10.14.3 | `consolidations.cascade_completed_at` guard (kills F3 silent corruption) | `008c208` |
+| P0-3 | 10.14.4 | Attribution cascade auto-dedup + delete cascade_* flags (kills F2 frozen-attrs) | `a96127a` |
+| — | 10.14.5 | Doc-sync HLD/SCHEMA/TRIGGER-MGMT/AGENT-PROMPTS/IMPL-PHASES | this commit |
+| — | 10.14.6 | Agent verification on current DB state | pending — post doc-sync push |
+
+**Schema delta:** `consolidations.cascade_completed_at TIMESTAMPTZ` (nullable). Migration idempotent; run on dev DB live.
+
+**Tool surface signatures changed (no tool count delta):**
+- `absorb_agent`: drops `cascade_attributions` / `cascade_edges` / `cascade_flows` flags. Callers passing any → ValueError.
+- `spawn_child_agent`: drops `child_agent_id` arg. Server mints fresh `sme-<8hex>` and returns it. Callers passing the legacy arg → ValueError.
+- `execute_mutation`: refuses M→MD unless `cascade_completed_at` stamped by absorb_agent or spawn_child_agent.
 
 **Three failure modes targeted (full detail in `docs/RUN4-ISSUES-AWAITING-VERDICT.md`):**
 - **F1** cross-plane merge never nominated → lock-step doctrine fooled SMEs into "no cross-plane discovery"
