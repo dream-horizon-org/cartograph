@@ -67,8 +67,32 @@ Returns:
 | `unresolved_new_dependencies` | Subset of `new_outbound_calls` where the target couldn't be matched to any cartograph component — flag for the operator |
 | `downstream` | Transitive closure of the dependency graph from the impacted endpoints' direct targets, including resolved new-call targets, excluding removed-call targets where they were the only path |
 | `code_graph_evidence` | Debug: the static-analysis pre-pass output (which handlers were directly / transitively impacted, with file paths and line ranges) |
+| `deploy_plan` | Release info from the Odin deployer for every component (`services_to_deploy`) plus any components the deployer didn't recognise or that had no GitHub URL (`unresolved_services`). Present when `Authorization` header is forwarded. |
 
 Latency is typically 20–60 seconds per PR (clone + index + Claude call).
+
+## Deployer integration (`deploy_plan` section)
+
+Both endpoints can produce a `deploy_plan` describing release names + versions for every component cartograph identified. We call the Odin deployer over **gRPC** at the endpoint set in `DEPLOYER_GRPC_ENDPOINT`, invoking `dream11.od.service.v1.ServiceService/GetLatestCatalogueReleaseByRepository`. A single TLS channel is opened at FastAPI startup and reused for every request.
+
+The proto stubs are vendored at `proto_stubs/odin_deployer_pb2*.py` (regenerate with `proto_stubs/regen.sh` if the upstream message shape ever changes for this method). The minimal `.proto` carve-out at `proto_stubs/odin_deployer.proto` covers only the messages and method this service needs — we stay decoupled from the wider odin-deployer proto tree.
+
+The auth token is **forwarded from the client's `Authorization` header** as the gRPC `authorization` metadata key. We do not store, log, or refresh it.
+
+Send a request with `Authorization: Bearer <token>`. For each component:
+
+- Root component (the repo whose PR is being analysed) is looked up with `concrete=false` (the -SNAPSHOT in-flight build is allowed).
+- Every other component (downstream / new-call targets) is looked up with `concrete=true` first (released non-SNAPSHOT versions only). If the deployer returns empty (200 with null `serviceName`/`version` — i.e. the filter excluded every row), we retry with `concrete=false` to pick up a SNAPSHOT release. When the second call succeeds, `release.from_snapshot_fallback` is `true` so the consumer can tell it's not a stable release.
+
+Failure handling:
+
+- **No `Authorization` header** → `deploy_plan` is absent + a warning. Rest of analysis is unaffected.
+- **`DEPLOYER_GRPC_ENDPOINT` unset** → channel is never opened; deploy_plan absent + warning.
+- **gRPC `UNAVAILABLE` / `DEADLINE_EXCEEDED`** → `deploy_plan` is absent + a warning.
+- **gRPC `NOT_FOUND`** → component appears in `unresolved_services` with `reason: "deployer_not_found"`.
+- **Deployer returns 200 but with no `service_name` and no `version`** → `unresolved_services` with `reason: "deployer_returned_empty_release"`.
+- **Component without a GitHub URL in cartograph** → `unresolved_services` with `reason: "no_github_url_in_cartograph"`.
+- **gRPC `UNAUTHENTICATED` / `PERMISSION_DENIED`** → HTTP 401 from this service. Operator refreshes the token and retries.
 
 ## How `/analyze/changes` works
 
@@ -155,6 +179,10 @@ The two are complementary. Pre-computing the deterministic part lets us hand Cla
 | `PR_IMPACT_WORKSPACE_ROOT` | `/tmp/pr_workspaces` | Where clones live |
 | `PR_IMPACT_CMM_INDEX_TIMEOUT` | `120` | codebase-memory-mcp index timeout (s) |
 | `PR_IMPACT_CMM_DEPTH` | `3` | Transitive caller walk depth |
+| `DEPLOYER_GRPC_ENDPOINT` | (unset) | Odin deployer gRPC endpoint in `host:port` form (e.g. `odin-deployer-asg-stg.asgard-stag.dss-platform.com:443`). Leave unset to disable deployer integration entirely. |
+| `DEPLOYER_GRPC_INSECURE` | `false` | Set to `true` to use a plaintext channel (local-dev / mocks only). TLS is the default. |
+| `DEPLOYER_TIMEOUT` | `10` | Per-call deadline (s) |
+| `DEPLOYER_MAX_WORKERS` | `8` | Parallel deployer lookups per request |
 
 ## Failure modes
 
@@ -182,6 +210,10 @@ The two are complementary. Pre-computing the deterministic part lets us hand Cla
 | `claude_client.py` | `claude -p` subprocess wrapper, system prompt, pre-analysis injection |
 | `mcp_indexer.py` | codebase-memory-mcp wrapper — index repo, read SQLite directly, line-range overlap, transitive callers |
 | `diff_hunks.py` | Parse unified-diff patches into post-PR line ranges of actual changes (NOT full hunk extents) |
+| `deployer_client.py` | gRPC client for Odin deployer — channel lifecycle, lookup, per-component parallelism |
+| `proto_stubs/odin_deployer.proto` | Minimal proto carve-out (only the method this service needs) |
+| `proto_stubs/odin_deployer_pb2*.py` | Generated Python stubs — regenerate with `proto_stubs/regen.sh` |
+| `proto_stubs/regen.sh` | Regenerate Python stubs from the .proto |
 | `requirements.txt` | Deps |
 
 ## Known limitations

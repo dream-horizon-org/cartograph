@@ -9,10 +9,17 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from typing import Optional
+
+from fastapi import FastAPI, Header, HTTPException
 
 from .analyzer import analyze, analyze_changes, parse_github_url
 from .db import close_pool, init_pool
+from .deployer_client import (
+    DeployerAuthError,
+    close_channel as deployer_close_channel,
+    init_channel as deployer_init_channel,
+)
 from .github_client import parse_pr_url
 from .models import (
     AnalyzeChangesRequest,
@@ -29,9 +36,11 @@ logger = logging.getLogger(__name__)
 async def _lifespan(app: FastAPI):
     init_pool()
     logger.info("pr_impact_agent: db pool initialised")
+    deployer_init_channel()  # no-op if DEPLOYER_GRPC_ENDPOINT is unset
     yield
+    deployer_close_channel()
     close_pool()
-    logger.info("pr_impact_agent: db pool closed")
+    logger.info("pr_impact_agent: db pool + deployer channel closed")
 
 
 app = FastAPI(
@@ -48,20 +57,38 @@ def health() -> dict[str, str]:
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-def analyze_endpoint(req: AnalyzeRequest) -> AnalyzeResponse:
+def analyze_endpoint(
+    req: AnalyzeRequest,
+    authorization: Optional[str] = Header(None),
+) -> AnalyzeResponse:
     try:
         parse_github_url(req.url)  # validate up-front
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    result = analyze(req.url)
+    try:
+        result = analyze(req.url, auth_token=authorization)
+    except DeployerAuthError as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Deployer rejected the forwarded token — refresh and retry. ({e})",
+        )
     return AnalyzeResponse(**result)
 
 
 @app.post("/analyze/changes", response_model=AnalyzeChangesResponse)
-def analyze_changes_endpoint(req: AnalyzeChangesRequest) -> AnalyzeChangesResponse:
+def analyze_changes_endpoint(
+    req: AnalyzeChangesRequest,
+    authorization: Optional[str] = Header(None),
+) -> AnalyzeChangesResponse:
     try:
         parse_pr_url(req.url)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    result = analyze_changes(req.url)
+    try:
+        result = analyze_changes(req.url, auth_token=authorization)
+    except DeployerAuthError as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Deployer rejected the forwarded token — refresh and retry. ({e})",
+        )
     return AnalyzeChangesResponse(**result)

@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 from .claude_client import ClaudeClassificationError, classify_diff, pick_model
 from .db import cursor
+from .deployer_client import (
+    DeployerAuthError,
+    DeployerError,
+    build_plan as deployer_build_plan,
+)
 from .git_client import GitCloneError, cleanup_workspace, shallow_clone
 from .github_client import (
     GitHubError,
@@ -243,8 +248,11 @@ def _build_node(
     )
 
 
-def analyze(input_url: str) -> dict[str, Any]:
-    """Top-level entry: returns AnalyzeResponse fields as a dict."""
+def analyze(input_url: str, auth_token: str | None = None) -> dict[str, Any]:
+    """Top-level entry: returns AnalyzeResponse fields as a dict.
+
+    If `auth_token` is provided, also fetches release info from the Odin
+    deployer for every component and attaches a `deploy_plan` section."""
     owner, repo = parse_github_url(input_url)
     slug = f"{owner}/{repo}"
 
@@ -280,7 +288,7 @@ def analyze(input_url: str) -> dict[str, Any]:
         )
     ]
 
-    return {
+    result = {
         "input_url": input_url,
         "repo": slug,
         "matched": True,
@@ -288,6 +296,8 @@ def analyze(input_url: str) -> dict[str, Any]:
         "downstream": [d.model_dump() for d in ds],
         "warnings": warnings,
     }
+    _attach_deploy_plan(result, auth_token, warnings)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +366,170 @@ def _direct_targets_for_catalogs(catalog_ids: list[str]) -> dict[str, list[dict[
     return out
 
 
+_HTTP_VERB_PREFIXES = ("GET ", "POST ", "PUT ", "PATCH ", "DELETE ",
+                       "HEAD ", "OPTIONS ", "TRACE ", "CONNECT ")
+
+
+def _normalise_endpoint_identifier(s: str) -> str:
+    """Strip a leading HTTP verb + whitespace, lowercase. Robust enough to
+    match `/api/v1/b-only` against `GET /api/v1/b-only` and vice versa."""
+    if not s:
+        return ""
+    s = s.strip()
+    upper = s.upper()
+    for verb in _HTTP_VERB_PREFIXES:
+        if upper.startswith(verb):
+            s = s[len(verb):].strip()
+            break
+    return s.lower()
+
+
+def _match_edge_to_catalogs(edge_identifier: str,
+                            target_catalogs: list[dict[str, Any]]
+                            ) -> list[str]:
+    """Find catalog rows on the target component that this edge plausibly
+    hits. Returns a list of catalog_ids (may be empty for terminal edges,
+    or contain >1 when ambiguous — we walk all matches in that case).
+
+    Match strategies, in order of specificity:
+      1. Normalised exact match
+      2. URL-path extraction (if edge identifier is URL-like) then exact
+      3. Suffix match (one identifier ends with the other)
+    """
+    if not edge_identifier or not target_catalogs:
+        return []
+
+    e = _normalise_endpoint_identifier(edge_identifier)
+
+    # URL-path extraction for URL-style identifiers
+    e_path = e
+    if "://" in edge_identifier:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(edge_identifier)
+            if parsed.path:
+                e_path = _normalise_endpoint_identifier(parsed.path)
+        except Exception:
+            pass
+
+    matches: list[tuple[int, dict[str, Any]]] = []  # (specificity, catalog)
+    for c in target_catalogs:
+        c_norm = _normalise_endpoint_identifier(c.get("identifier") or "")
+        if not c_norm:
+            continue
+        if c_norm == e or c_norm == e_path:
+            matches.append((len(c_norm), c))
+            continue
+        if e_path.endswith(c_norm) or c_norm.endswith(e_path):
+            matches.append((len(c_norm), c))
+
+    if not matches:
+        return []
+
+    # Prefer the longest catalog identifier (most specific). If multiple
+    # catalogs tie at the max length, walk all of them — the LLM/user can
+    # choose later.
+    matches.sort(key=lambda kv: -kv[0])
+    top_len = matches[0][0]
+    return [c["id"] for length, c in matches if length == top_len]
+
+
+def _walk_flows(impacted_catalog_ids: list[str],
+                removed_pairs: set[tuple[str, str]],
+                root_ids: set[str],
+                seed_extras: list[dict[str, Any]] | None = None
+                ) -> dict[str, int]:
+    """Flow-aware downstream walk for Phase-5 closure.
+
+    Starting from `impacted_catalog_ids` (catalogs on the root that this
+    PR touched), recursively follow per-handler outgoing flows. For each
+    outgoing edge to a target component:
+      - include the target as a dependency at this depth
+      - find which catalog on the target the edge actually hits (by
+        identifier match)
+      - if a catalog matches, recurse through THAT catalog's flows
+      - otherwise (no match, or matched catalog has no outgoing flows):
+        TERMINAL — target stays as a dependency, walk stops on this branch.
+
+    `removed_pairs` is the set of `(catalog_id, target_component_id)`
+    tuples whose outbound edges were deleted by this PR; we skip them at
+    every step (not just the first hop).
+
+    `seed_extras` are first-hop synthetic edges from the root for resolved
+    new-call targets (i.e. calls the PR introduced to existing components).
+    Each entry is `{target_component_id, edge_identifier}`.
+
+    Returns `{component_id: min_depth}`. Root components are excluded.
+    """
+    seed_extras = seed_extras or []
+    visited_catalogs: set[str] = set(impacted_catalog_ids)
+    closure: dict[str, int] = {}
+
+    catalog_cache: dict[str, list[dict[str, Any]]] = {}
+
+    def _catalogs_of(cid: str) -> list[dict[str, Any]]:
+        if cid not in catalog_cache:
+            with cursor() as cur:
+                cur.execute(
+                    "SELECT id::text AS id, kind, identifier "
+                    "FROM catalogs WHERE component_id = %s",
+                    (cid,),
+                )
+                catalog_cache[cid] = list(cur.fetchall())
+        return catalog_cache[cid]
+
+    def _flows_for(cat_id: str) -> list[dict[str, Any]]:
+        return _direct_targets_for_catalogs([cat_id]).get(cat_id, [])
+
+    from collections import deque
+    queue: deque[tuple[str, int]] = deque(
+        (cat_id, 0) for cat_id in impacted_catalog_ids
+    )
+
+    # First-hop synthetic edges for resolved new-call targets.
+    for extra in seed_extras:
+        tid = extra.get("target_component_id")
+        eid = extra.get("edge_identifier") or ""
+        if not tid or tid in root_ids:
+            continue
+        target_depth = 1
+        if tid not in closure or closure[tid] > target_depth:
+            closure[tid] = target_depth
+        for mcat in _match_edge_to_catalogs(eid, _catalogs_of(tid)):
+            if mcat not in visited_catalogs:
+                visited_catalogs.add(mcat)
+                queue.append((mcat, target_depth))
+
+    while queue:
+        cat_id, depth = queue.popleft()
+        for row in _flows_for(cat_id):
+            target_id = row.get("to_component_id")
+            if not target_id:
+                continue  # dangling edge, no target component to include
+            if target_id in root_ids:
+                continue  # don't follow back into the root
+            if (cat_id, target_id) in removed_pairs:
+                continue  # call removed by this PR
+
+            target_depth = depth + 1
+            if target_id not in closure or closure[target_id] > target_depth:
+                closure[target_id] = target_depth
+
+            matched = _match_edge_to_catalogs(
+                row.get("identifier"), _catalogs_of(target_id)
+            )
+            if not matched:
+                # Terminal: target included above, stop walking this branch
+                continue
+            for mcat in matched:
+                if mcat in visited_catalogs:
+                    continue
+                visited_catalogs.add(mcat)
+                queue.append((mcat, target_depth))
+
+    return closure
+
+
 def _transitive_from_seeds(seed_ids: list[str], seed_depth: int) -> dict[str, int]:
     """Outbound walk starting at `seed_ids` (themselves at `seed_depth`).
     Returns {component_id: min_depth} INCLUDING the seeds."""
@@ -386,6 +560,59 @@ def _transitive_from_seeds(seed_ids: list[str], seed_depth: int) -> dict[str, in
             (seed_depth, seed_ids),
         )
         return {r["id"]: r["depth"] for r in cur.fetchall()}
+
+
+def _attach_deploy_plan(result: dict[str, Any],
+                        auth_token: str | None,
+                        warnings: list[str]) -> None:
+    """Look up every (root + downstream) component at the Odin deployer and
+    attach a `deploy_plan` section. Mutates `result` in place.
+
+    Auth handling:
+      - No auth header on the request → skip lookup, add a warning. Rest
+        of the response stands.
+      - Deployer unreachable / per-component error → unresolved_services
+        entries, add a warning, response otherwise valid.
+      - Deployer 401/403 → raise DeployerAuthError (app turns it into HTTP 401)."""
+    if not auth_token:
+        warnings.append(
+            "no Authorization header provided — skipping deployer lookup; "
+            "deploy_plan will be absent"
+        )
+        return
+
+    components: list[dict[str, Any]] = []
+    for r in result.get("root_components") or []:
+        components.append({
+            "github_url": r.get("github_url"),
+            "canonical_name": r.get("canonical_name"),
+            "is_root": True,
+        })
+    for d in result.get("downstream") or []:
+        components.append({
+            "github_url": d.get("github_url"),
+            "canonical_name": d.get("canonical_name"),
+            "is_root": False,
+        })
+
+    if not components:
+        return
+
+    try:
+        services, unresolved = deployer_build_plan(components, auth_token)
+    except DeployerAuthError:
+        raise  # propagated to app.py → HTTP 401
+    except DeployerError as e:
+        warnings.append(
+            f"deployer call failed ({e}); deploy_plan omitted, rest of "
+            f"response is valid"
+        )
+        return
+
+    result["deploy_plan"] = {
+        "services_to_deploy": services,
+        "unresolved_services": unresolved,
+    }
 
 
 def _empty_success(input_url: str, slug: str, pr_number: int | None,
@@ -665,7 +892,17 @@ def _resolve_call_list(calls: list[dict[str, Any]],
     return out
 
 
-def analyze_changes(input_url: str) -> dict[str, Any]:
+def analyze_changes(input_url: str, auth_token: str | None = None) -> dict[str, Any]:
+    """Top-level entry. Runs the Phase-3 classification + resolution + closure,
+    then attaches a `deploy_plan` section from the Odin deployer using the
+    caller's auth token (forwarded via `Authorization` header)."""
+    result = _analyze_changes_inner(input_url)
+    warnings = result.setdefault("warnings", [])
+    _attach_deploy_plan(result, auth_token, warnings)
+    return result
+
+
+def _analyze_changes_inner(input_url: str) -> dict[str, Any]:
     """Phase 3: classify the PR diff (impacted + new + removed + new endpoints),
     resolve each new/removed call to existing components via the L1–L5'
     pipeline, subtract removed flow pairs, then return the deploy-impact graph.
@@ -900,10 +1137,11 @@ def _build_phase3_response(input_url: str, slug: str, pr_number: int,
             continue
         removed_pairs.add((cat["id"], target_id))
 
-    # Per-impacted-endpoint flow rows, with removed pairs filtered out
+    # Per-impacted-endpoint flow rows, with removed pairs filtered out.
+    # impacted_out (the per-endpoint "directly_calls" view) is built from
+    # the first-hop flows, with removed-pair subtraction applied.
     direct_by_cat = _direct_targets_for_catalogs([c["id"] for c in impacted_catalogs])
 
-    direct_target_ids: set[str] = set()
     impacted_out: list[ImpactedEndpoint] = []
     for cat in impacted_catalogs:
         kept_rows = []
@@ -929,19 +1167,33 @@ def _build_phase3_response(input_url: str, slug: str, pr_number: int,
             component_id=cat["component_id"],
             directly_calls=calls,
         ))
-        for r in kept_rows:
-            if r["to_component_id"]:
-                direct_target_ids.add(r["to_component_id"])
 
-    # Folded-in: resolved new-call targets become direct dependencies too
+    # Synthetic first-hop seeds for resolved new-call targets. Each is an
+    # edge introduced by the PR that doesn't yet have a flows row.
+    seed_extras: list[dict[str, Any]] = []
     for nc in new_calls_resolved:
         res = nc["resolution"]
         if res["status"] == "resolved":
             tid = res["candidates"][0]["component_id"]
             if tid not in root_ids:
-                direct_target_ids.add(tid)
+                seed_extras.append({
+                    "target_component_id": tid,
+                    "edge_identifier": (nc.get("target_hint")
+                                        or nc.get("host_or_service") or ""),
+                })
 
-    closure = _transitive_from_seeds(list(direct_target_ids), seed_depth=1)
+    # Flow-aware closure: walk per-handler outgoing flows recursively. This
+    # prevents the "land on service-B, include all of service-B's outbound
+    # edges" over-inclusion of the component-only walker. Terminal edges
+    # (target has no matching catalog, or matched catalog has no flows)
+    # include the target but stop walking the branch — no fallback to a
+    # component-wide sweep.
+    closure = _walk_flows(
+        impacted_catalog_ids=[c["id"] for c in impacted_catalogs],
+        removed_pairs=removed_pairs,
+        root_ids=set(root_ids),
+        seed_extras=seed_extras,
+    )
     downstream_ids = list(closure.keys())
 
     all_ids = list({*root_ids, *downstream_ids})

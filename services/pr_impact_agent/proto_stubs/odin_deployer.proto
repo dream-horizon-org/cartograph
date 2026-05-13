@@ -1,0 +1,38 @@
+// Minimal proto carve-out covering ONLY the
+// dream11.od.service.v1.ServiceService/GetLatestCatalogueReleaseByRepository
+// method that the pr_impact_agent calls. We stay decoupled from the full
+// odin-deployer proto tree intentionally — gRPC's wire format depends only
+// on package name, service name, method name, and field numbers/types.
+// All of those exactly match the upstream proto at
+//   odin-deployer-ent/src/main/proto/dream11/od/service/v1/service.proto
+//
+// If the upstream proto's request/response shape changes for THIS method,
+// mirror the change here and re-run codegen (see proto_stubs/regen.sh).
+
+syntax = "proto3";
+
+package dream11.od.service.v1;
+
+option java_multiple_files = true;
+option java_package = "com.dream11.odin.grpc.service";
+
+service ServiceService {
+  rpc GetLatestCatalogueReleaseByRepository(
+        GetLatestCatalogueReleaseByRepositoryRequest)
+      returns (GetLatestCatalogueReleaseByRepositoryResponse) {}
+}
+
+message GetLatestCatalogueReleaseByRepositoryRequest {
+  string github_url = 1 [json_name = "githubUrl"];
+  // When true, exclude catalogue rows whose version ends with the literal
+  // -SNAPSHOT suffix. We set this to true for every dependent component,
+  // and false (or unset) for the root (the PR's own repo).
+  optional bool concrete = 2;
+}
+
+message GetLatestCatalogueReleaseByRepositoryResponse {
+  optional string service_name = 1 [json_name = "serviceName"];
+  optional string version = 2;
+  // ISO-8601 local date-time from service_releases.created_at.
+  optional string created_at = 3 [json_name = "createdAt"];
+}

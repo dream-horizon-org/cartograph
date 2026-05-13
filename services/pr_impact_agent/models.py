@@ -39,6 +39,7 @@ class AnalyzeResponse(BaseModel):
     matched: bool
     root_components: list[ComponentNode] = Field(default_factory=list)
     downstream: list[ComponentNode] = Field(default_factory=list)
+    deploy_plan: Optional[DeployPlan] = None
     warnings: list[str] = Field(default_factory=list)
     phase: Literal["1"] = "1"
 
@@ -93,6 +94,31 @@ class NewEndpoint(BaseModel):
     evidence: Optional[str] = None
 
 
+class DeployerRelease(BaseModel):
+    name: Optional[str] = None
+    version: Optional[str] = None
+    created_at: Optional[str] = None
+    from_snapshot_fallback: bool = False
+
+
+class DeployerService(BaseModel):
+    component_canonical_name: Optional[str] = None
+    github_url: str
+    is_root: bool
+    release: Optional[DeployerRelease] = None
+
+
+class UnresolvedService(BaseModel):
+    component_canonical_name: Optional[str] = None
+    github_url: Optional[str] = None
+    reason: str
+
+
+class DeployPlan(BaseModel):
+    services_to_deploy: list[DeployerService] = Field(default_factory=list)
+    unresolved_services: list[UnresolvedService] = Field(default_factory=list)
+
+
 class LlmUsage(BaseModel):
     model: Optional[str] = None
     input_tokens: Optional[int] = None
@@ -144,5 +170,6 @@ class AnalyzeChangesResponse(BaseModel):
     downstream: list[ComponentNode] = Field(default_factory=list)
     code_graph_evidence: Optional[CodeGraphEvidence] = None
     llm_usage: Optional[LlmUsage] = None
+    deploy_plan: Optional[DeployPlan] = None
     warnings: list[str] = Field(default_factory=list)
     phase: Literal["3"] = "3"
