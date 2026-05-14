@@ -1,31 +1,29 @@
-"""gRPC client for the Odin deployer's
+"""HTTP/1.1 client for the Odin deployer's
 dream11.od.service.v1.ServiceService/GetLatestCatalogueReleaseByRepository.
 
-We stay on a single long-lived TLS channel for the lifetime of the
-FastAPI process (created and closed by the app's lifespan handler).
-Per-call deadline is governed by DEPLOYER_TIMEOUT.
+The deployer sits behind an istio-envoy gateway that exposes the
+grpc_http1_bridge — gRPC methods are reachable as plain HTTP/1.1 POSTs
+to /<service>/<method> with `content-type: application/grpc` and a
+gRPC-framed protobuf body. Native HTTP/2 gRPC isn't available on the
+internal LB, so we use this bridge instead of `grpcio`.
 
 Auth flow: client passes a Bearer token in the Authorization header of
-their pr_impact_agent request; we forward it verbatim as the gRPC
-`authorization` metadata key. Never logged, never persisted.
-
-For dependent components: send concrete=true (catalogued / released).
-For the root component (the PR's own repo): send concrete=false so the
-deployer doesn't filter out -SNAPSHOT versions (the in-flight build).
+their pr_impact_agent request; we forward it verbatim in the upstream
+`authorization` header. Never logged, never persisted.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import struct
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-import grpc
+import httpx
 
 from .proto_stubs import odin_deployer_pb2 as pb
-from .proto_stubs import odin_deployer_pb2_grpc as pb_grpc
 
 
 logger = logging.getLogger(__name__)
@@ -34,9 +32,19 @@ logger = logging.getLogger(__name__)
 _GRPC_ENDPOINT = os.getenv("DEPLOYER_GRPC_ENDPOINT", "")
 _TIMEOUT = int(os.getenv("DEPLOYER_TIMEOUT", "10"))
 _MAX_WORKERS = int(os.getenv("DEPLOYER_MAX_WORKERS", "8"))
-# Set to "true" for plaintext channel (local dev against an insecure
-# deployer mock). Defaults to TLS for production endpoints.
 _INSECURE = os.getenv("DEPLOYER_GRPC_INSECURE", "").lower() == "true"
+
+_METHOD_PATH = (
+    "/dream11.od.service.v1.ServiceService/GetLatestCatalogueReleaseByRepository"
+)
+
+# gRPC status codes (subset we care about)
+_GRPC_OK = 0
+_GRPC_NOT_FOUND = 5
+_GRPC_PERMISSION_DENIED = 7
+_GRPC_UNAUTHENTICATED = 16
+_GRPC_UNAVAILABLE = 14
+_GRPC_DEADLINE_EXCEEDED = 4
 
 
 class DeployerError(RuntimeError):
@@ -52,55 +60,56 @@ class DeployerNotFound(DeployerError):
 
 
 _channel_lock = threading.Lock()
-_channel: grpc.Channel | None = None
-_stub: pb_grpc.ServiceServiceStub | None = None
+_client: httpx.Client | None = None
+_base_url: str = ""
 
 
 def init_channel(endpoint: str | None = None) -> None:
-    """Open the long-lived gRPC channel. Idempotent — calling again is a
-    no-op while the existing channel is open."""
-    global _channel, _stub
+    """Open the long-lived HTTP client to the deployer. Idempotent."""
+    global _client, _base_url
     target = endpoint or _GRPC_ENDPOINT
     if not target:
         logger.info(
-            "deployer channel NOT initialised — DEPLOYER_GRPC_ENDPOINT is empty; "
+            "deployer client NOT initialised — DEPLOYER_GRPC_ENDPOINT is empty; "
             "deploy_plan will be skipped on every request"
         )
         return
     with _channel_lock:
-        if _channel is not None:
+        if _client is not None:
             return
-        if _INSECURE:
-            _channel = grpc.insecure_channel(target)
-            logger.info("deployer channel: insecure %s", target)
-        else:
-            creds = grpc.ssl_channel_credentials()
-            _channel = grpc.secure_channel(target, creds)
-            logger.info("deployer channel: TLS %s", target)
-        _stub = pb_grpc.ServiceServiceStub(_channel)
+        scheme = "http" if _INSECURE else "https"
+        _base_url = f"{scheme}://{target}"
+        _client = httpx.Client(
+            http2=False,
+            timeout=_TIMEOUT,
+            base_url=_base_url,
+        )
+        logger.info(
+            "deployer client: %s %s",
+            "insecure HTTP/1.1" if _INSECURE else "TLS HTTP/1.1",
+            _base_url,
+        )
 
 
 def close_channel() -> None:
-    global _channel, _stub
+    global _client
     with _channel_lock:
-        if _channel is not None:
+        if _client is not None:
             try:
-                _channel.close()
+                _client.close()
             except Exception:
-                logger.exception("error closing deployer channel")
-            _channel = None
-            _stub = None
+                logger.exception("error closing deployer client")
+            _client = None
 
 
-def _get_stub() -> pb_grpc.ServiceServiceStub:
-    if _stub is None:
-        # Lazy init for test paths that don't go through FastAPI lifespan.
+def _get_client() -> httpx.Client:
+    if _client is None:
         init_channel()
-    if _stub is None:
+    if _client is None:
         raise DeployerError(
-            "deployer channel is not configured — set DEPLOYER_GRPC_ENDPOINT"
+            "deployer client is not configured — set DEPLOYER_GRPC_ENDPOINT"
         )
-    return _stub
+    return _client
 
 
 def _normalise_auth(token: str) -> str:
@@ -108,50 +117,82 @@ def _normalise_auth(token: str) -> str:
     return t if t.lower().startswith("bearer ") else f"Bearer {t}"
 
 
+def _frame(payload: bytes) -> bytes:
+    return b"\x00" + struct.pack(">I", len(payload)) + payload
+
+
+def _unframe(body: bytes) -> bytes:
+    if len(body) < 5:
+        raise DeployerError(f"deployer returned short body ({len(body)} bytes)")
+    msg_len = struct.unpack(">I", body[1:5])[0]
+    payload = body[5:5 + msg_len]
+    if len(payload) != msg_len:
+        raise DeployerError(
+            f"deployer body length mismatch: header={msg_len} actual={len(payload)}"
+        )
+    return payload
+
+
+def _raise_for_status(grpc_status: int, msg: str) -> None:
+    snippet = msg[:200]
+    if grpc_status in (_GRPC_UNAUTHENTICATED, _GRPC_PERMISSION_DENIED):
+        raise DeployerAuthError(f"deployer auth status={grpc_status}: {snippet}")
+    if grpc_status == _GRPC_NOT_FOUND:
+        raise DeployerNotFound(f"deployer NOT_FOUND: {snippet}")
+    if grpc_status in (_GRPC_UNAVAILABLE, _GRPC_DEADLINE_EXCEEDED):
+        raise DeployerError(f"deployer transport status={grpc_status}: {snippet}")
+    raise DeployerError(f"deployer gRPC status={grpc_status}: {snippet}")
+
+
 def lookup_service(github_url: str,
                    concrete: bool,
                    auth_token: str,
                    timeout: int | None = None) -> dict[str, Any]:
-    """Calls GetLatestCatalogueReleaseByRepository. Returns a dict with
-    keys service_name, version, created_at (any may be None).
-
-    Maps gRPC status codes to our exception types so analyzer code stays
-    transport-agnostic."""
-    stub = _get_stub()
+    """Calls GetLatestCatalogueReleaseByRepository via the HTTP/1.1 bridge.
+    Returns a dict with keys service_name, version, created_at."""
+    client = _get_client()
     req = pb.GetLatestCatalogueReleaseByRepositoryRequest(
         github_url=github_url,
         concrete=concrete,
     )
-    metadata = [("authorization", _normalise_auth(auth_token))]
+    body = _frame(req.SerializeToString())
+    headers = {
+        "content-type": "application/grpc",
+        "te": "trailers",
+        "authorization": _normalise_auth(auth_token),
+    }
 
     logger.info("deployer lookup: repo=%s concrete=%s", github_url, concrete)
 
     try:
-        resp: pb.GetLatestCatalogueReleaseByRepositoryResponse = (
-            stub.GetLatestCatalogueReleaseByRepository(
-                req,
-                metadata=metadata,
-                timeout=timeout or _TIMEOUT,
-            )
+        r = client.post(
+            _METHOD_PATH,
+            content=body,
+            headers=headers,
+            timeout=timeout or _TIMEOUT,
         )
-    except grpc.RpcError as e:
-        # grpc.RpcError instances also implement Call interface.
-        code = e.code() if hasattr(e, "code") else grpc.StatusCode.UNKNOWN
-        detail = (e.details() if hasattr(e, "details") else "") or ""
-        snippet = detail[:200]
-        if code in (grpc.StatusCode.UNAUTHENTICATED,
-                    grpc.StatusCode.PERMISSION_DENIED):
-            raise DeployerAuthError(f"deployer auth {code.name}: {snippet}") from e
-        if code == grpc.StatusCode.NOT_FOUND:
-            raise DeployerNotFound(f"deployer NOT_FOUND: {snippet}") from e
-        if code in (grpc.StatusCode.UNAVAILABLE,
-                    grpc.StatusCode.DEADLINE_EXCEEDED):
-            raise DeployerError(
-                f"deployer transport {code.name}: {snippet}"
-            ) from e
-        raise DeployerError(f"deployer gRPC {code.name}: {snippet}") from e
+    except httpx.TimeoutException as e:
+        raise DeployerError(f"deployer transport timeout: {e}") from e
+    except httpx.RequestError as e:
+        raise DeployerError(f"deployer transport error: {e}") from e
 
-    # Proto3 optional fields: HasField() tells us whether they were set.
+    if r.status_code != 200:
+        raise DeployerError(
+            f"deployer HTTP {r.status_code}: {r.text[:200]}"
+        )
+
+    # Envoy's grpc_http1_bridge surfaces grpc-status as a response header
+    # (and may also include it in trailers; httpx exposes headers only).
+    grpc_status_h = r.headers.get("grpc-status")
+    grpc_msg = r.headers.get("grpc-message", "")
+
+    if grpc_status_h is not None and grpc_status_h != "0":
+        _raise_for_status(int(grpc_status_h), grpc_msg)
+
+    payload = _unframe(r.content)
+    resp = pb.GetLatestCatalogueReleaseByRepositoryResponse()
+    resp.ParseFromString(payload)
+
     return {
         "service_name": resp.service_name if resp.HasField("service_name") else None,
         "version": resp.version if resp.HasField("version") else None,
@@ -175,7 +216,6 @@ def build_plan(components: list[dict[str, Any]],
     services_to_deploy: list[dict[str, Any]] = []
     unresolved_services: list[dict[str, Any]] = []
 
-    # Dedupe by github_url; prefer is_root=True if duplicates disagree.
     deduped: dict[str, dict[str, Any]] = {}
     for c in components:
         url = c.get("github_url")
@@ -203,12 +243,6 @@ def build_plan(components: list[dict[str, Any]],
     def _one(item: dict[str, Any]) -> dict[str, Any]:
         url = item["github_url"]
         is_root = item["is_root"]
-        # Root uses concrete=false directly (SNAPSHOTs allowed). Dependents
-        # try concrete=true first (only stable, catalogued releases); if
-        # that returns empty (200 with null serviceName/version because the
-        # filter excluded all rows), fall back to concrete=false to pick
-        # up a SNAPSHOT version. Per-call retry inside this thread keeps
-        # the outer parallelism simple.
         fallback_used = False
         try:
             data = lookup_service(
