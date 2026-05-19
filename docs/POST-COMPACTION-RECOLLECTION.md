@@ -321,7 +321,9 @@ The settings file (`~/.claude/settings.cartograph.json`) holds:
 
 **To revert to subscription mode for everything:** `unset CARTOGRAPH_AGENT_SETTINGS_PATH` and restart.
 
-Bedrock settings file template lives at `~/.claude/settings.json.bak.bedrock` — copy + flip `CLAUDE_CODE_USE_BEDROCK` to `"1"` + paste fresh bearer token. Tokens are Bedrock-API-Key format with embedded presigned URL; rotate when expired.
+**Template lives in the repo: `settings.cartograph.json.template`** (repo root, committed, sanitised — token placeholder only). Copy it to `~/.claude/settings.cartograph.json`, paste a fresh Bedrock API key in the `AWS_BEARER_TOKEN_BEDROCK` field (must keep the `bedrock-api-key-` prefix), then restart agent_manager. The template's `_README` field carries inline setup instructions (Claude Code ignores unknown keys; only the `env` block is parsed). Tokens are Bedrock-API-Key format with embedded presigned URL; typically 12h expiry — rotate by editing the file + restarting agent_manager.
+
+(Legacy local fallback: `~/.claude/settings.json.bak.bedrock` — superseded by the in-repo template.)
 
 ### DB state at scorecard time
 - 8 agents (1 decom = sme-933bbef7 absorbed)
