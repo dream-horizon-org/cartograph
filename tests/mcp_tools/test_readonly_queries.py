@@ -104,3 +104,35 @@ def test_list_agents_no_agent_id():
     out = ro.list_agents()
     ids = {a["agent_id"] for a in out["agents"]}
     assert {"iter-gh", "sme-a"} <= ids
+
+
+def test_get_resource_no_agent_id():
+    _seed_component()
+    rows = ro.list_resources_for_plane("github")
+    rid = rows[0]["id"]
+    got = ro.get_resource(rid)
+    assert got["identifier"] == "svc/a"
+    assert got["plane"] == "github"
+
+
+def test_get_resource_missing_raises():
+    with pytest.raises(ValueError):
+        ro.get_resource("00000000-0000-0000-0000-000000000000")
+
+
+def test_list_all_resources_default_includes_seeded():
+    _seed_component()
+    rows = ro.list_all_resources()
+    assert any(r["identifier"] == "svc/a" for r in rows)
+
+
+def test_list_all_resources_status_filter_and_invalid():
+    _seed_component()
+    all_rows = ro.list_all_resources()
+    seeded = next(r for r in all_rows if r["identifier"] == "svc/a")
+    # filtering by the seeded row's actual status returns it
+    filtered = ro.list_all_resources(status=seeded["status"])
+    assert any(r["identifier"] == "svc/a" for r in filtered)
+    # invalid status raises
+    with pytest.raises(ValueError):
+        ro.list_all_resources(status="bogus-status")
