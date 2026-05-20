@@ -136,3 +136,22 @@ def test_list_all_resources_status_filter_and_invalid():
     # invalid status raises
     with pytest.raises(ValueError):
         ro.list_all_resources(status="bogus-status")
+
+
+def test_search_components_no_agent_id():
+    _seed_component(canonical="svc/payments", display="Payments")
+    rows = ro.search_components(name_pattern="payments")
+    assert any(r["canonical_name"] == "svc/payments" for r in rows)
+
+
+def test_search_components_blank_filter_refused():
+    # status defaults to 'active'; pass status=None to force all-None → blank.
+    with pytest.raises(Exception):
+        ro.search_components(status=None)
+
+
+def test_search_attributions_no_agent_id():
+    cid = _seed_component()
+    # search by component_id filter (exact eq)
+    rows = ro.search_attributions(component_id=cid)
+    assert isinstance(rows, list)
