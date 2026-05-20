@@ -252,6 +252,13 @@ def vector_search(
 
 def main() -> None:
     init_pool()  # NOTE: does NOT run migrations — the main server owns schema.
+
+    # Warm the embedder so the first vector_search call doesn't eat the GPU
+    # cold-start. Non-fatal if Ollama is down (vector_search returns
+    # query_embedded=False). Mirrors the main server's main().
+    from shared import embedding as _emb
+    _emb.warmup()
+
     tool_names = sorted(mcp._tool_manager._tools.keys())
     logger.info(
         "Cartograph READ-ONLY MCP server starting on %s:%d "

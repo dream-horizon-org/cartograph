@@ -38,6 +38,7 @@ def test_no_tool_requires_agent_id():
 
 def test_no_search_tool_has_exclude_self():
     for name in ("search_components", "search_attributions", "search_edges",
-                 "search_catalogs", "search_unresolved", "vector_search"):
+                 "search_catalogs", "search_flows", "search_unresolved",
+                 "vector_search"):
         params = inspect.signature(_registered_tools()[name].fn).parameters
         assert "exclude_self" not in params, f"{name} still takes exclude_self"
