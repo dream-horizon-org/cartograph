@@ -45,6 +45,6 @@ jobs:
 
       - name: Upload artifacts
         id: upload-artifacts
-        uses: dream11/d11-github-actions/upload-artifacts@v1
+        uses: dream-horizon-org/dh-github-actions/upload-artifacts@v1
         with:
           github_token: ${{ secrets.COMMIT_ACCESS_TOKEN }}
