@@ -171,8 +171,7 @@ def get_components_bulk(component_ids: list[str]) -> dict:
         (ids,),
     )
     by_id = {str(r["id"]): r for r in rows}
-    # Preserve original caller key types (UUID or str) in output dict.
-    return {raw: by_id.get(str(raw).strip()) for raw in component_ids}
+    return {cid: by_id.get(cid) for cid in ids}
 
 
 def get_attributions_bulk(component_ids: list[str]) -> dict:
@@ -183,11 +182,10 @@ def get_attributions_bulk(component_ids: list[str]) -> dict:
            ORDER BY component_id, plane, resource_type, identifier""",
         (ids,),
     )
-    by_id: dict[str, list[dict]] = {cid: [] for cid in ids}
+    out: dict[str, list[dict]] = {cid: [] for cid in ids}
     for r in rows:
-        by_id[str(r["component_id"])].append(r)
-    # Preserve original caller key types (UUID or str) in output dict.
-    return {raw: by_id.get(str(raw).strip(), []) for raw in component_ids}
+        out[str(r["component_id"])].append(r)
+    return out
 
 
 def get_component_edges_bulk(component_ids: list[str]) -> dict:

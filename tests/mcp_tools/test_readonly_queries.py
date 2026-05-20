@@ -51,7 +51,7 @@ def test_get_component_owner_no_agent_id():
 
 
 def test_get_components_bulk_no_agent_id():
-    cid = _seed_component()
+    cid = str(_seed_component())
     out = ro.get_components_bulk([cid, "00000000-0000-0000-0000-000000000000"])
     assert out[cid]["canonical_name"] == "svc/a"
     assert out["00000000-0000-0000-0000-000000000000"] is None
@@ -63,6 +63,6 @@ def test_get_components_bulk_rejects_empty():
 
 
 def test_get_attributions_bulk_no_agent_id():
-    cid = _seed_component()
+    cid = str(_seed_component())
     out = ro.get_attributions_bulk([cid])
     assert isinstance(out[cid], list)
