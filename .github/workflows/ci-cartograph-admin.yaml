@@ -1,0 +1,45 @@
+name: Verify & Publish (cartograph-admin)
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+    paths:
+      - 'src/admin_ui/**'
+      - 'src/shared/**'
+      - 'src/cartograph_mcp/**'
+      - 'tests/admin_ui/**'
+      - '.odin/cartograph-admin/**'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/ci-cartograph-admin.yaml'
+
+env:
+  ARTIFACT_NAME: cartograph-admin
+  VAULT_ADDR: http://secret-store-writer-stag.d11dev.com
+  VAULT_SKIP_VERIFY: true
+  VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
+  VAULT_VERSION: 1.16.0
+
+jobs:
+  ci-cartograph-admin:
+    name: cartograph-admin
+    runs-on: [onboarding]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Upload artifacts
+        id: upload-artifacts
+        uses: dream11/d11-github-actions/upload-artifacts@v1
+        with:
+          github_token: ${{ secrets.COMMIT_ACCESS_TOKEN }}
