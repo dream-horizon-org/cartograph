@@ -263,7 +263,7 @@ Phase 6 (Globe): parked on `feat/globe-experimental` branch HEAD `1dae0c7`. **Do
 
 ## 2. Live system state (post-DEMO-MEGA)
 
-### Daemons (4 processes, all running)
+### Daemons (5 processes, all running)
 | Daemon | Port | Log | PID at session-end |
 |---|---|---|---|
 | Postgres (docker `cartograph-postgres-1`) | 5432 | `docker logs` | — |
@@ -272,6 +272,7 @@ Phase 6 (Globe): parked on `feat/globe-experimental` branch HEAD `1dae0c7`. **Do
 | Trigger manager | — | `/tmp/cartograph-logs/triggers.log` | (varies) |
 | Agent manager (`python -m main`) | — | `/tmp/cartograph-logs/agents.log` | (varies) |
 | Admin UI (FastAPI) | 8200 | `/tmp/cartograph-logs/admin_ui.log` | (varies) |
+| Read-only MCP server (external clients, no agent_id) | 8101 | `/tmp/cartograph-logs/mcp_ro.log` | (varies) |
 
 ### Restart sequence (from `cartograph/`):
 ```bash
@@ -287,9 +288,17 @@ sleep 5
 /opt/homebrew/bin/python3.10 -u -m trigger_management.main > /tmp/cartograph-logs/triggers.log 2>&1 &
 /opt/homebrew/bin/python3.10 -u main.py                    > /tmp/cartograph-logs/agents.log  2>&1 &
 /opt/homebrew/bin/python3.10 -u -m admin_ui.server         > /tmp/cartograph-logs/admin_ui.log 2>&1 &
+/opt/homebrew/bin/python3.10 -u -m cartograph_mcp.readonly_server > /tmp/cartograph-logs/mcp_ro.log 2>&1 &
 sleep 5
 grep "tools registered" /tmp/cartograph-logs/mcp.log | tail -1   # expect: 114 tools
+grep "tools registered" /tmp/cartograph-logs/mcp_ro.log | tail -1   # expect: 25 tools
 ```
+
+The read-only server (`cartograph_mcp.readonly_server`, port 8101, bound to
+127.0.0.1) exposes the 25 global read tools WITHOUT `agent_id` for external
+non-agent clients. It does not run migrations (the main server owns schema) and
+installs no audit wrapper. Override bind via `CARTOGRAPH_RO_HOST` /
+`CARTOGRAPH_RO_PORT`. Connect at `http://localhost:8101/mcp`.
 
 If Docker daemon is down: `open -a Docker`, wait ~20s, then `docker start cartograph-postgres-1` before MCP.
 
