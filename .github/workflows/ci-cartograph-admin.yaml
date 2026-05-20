@@ -33,13 +33,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # Self-hosted Debian 12 runners: actions/setup-python has no debian-12
+      # toolcache builds. Bookworm ships Python 3.11 (pyproject: requires-python >=3.10).
+      - name: Verify Python
+        run: |
+          python3 --version
+          python3 -c "import sys; assert sys.version_info >= (3, 10), sys.version"
 
       - name: Upload artifacts
         id: upload-artifacts
-        uses: dream-horizon-org/dh-github-actions/upload-artifacts@v1
+        uses: dream11/d11-github-actions/upload-artifacts@v1
         with:
           github_token: ${{ secrets.COMMIT_ACCESS_TOKEN }}
