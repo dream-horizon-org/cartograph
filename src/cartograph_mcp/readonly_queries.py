@@ -204,10 +204,10 @@ def get_catalogs_bulk(component_ids: list[str]) -> dict:
            ORDER BY component_id, kind, identifier""",
         (ids,),
     )
-    by_id: dict[str, list[dict]] = {cid: [] for cid in ids}
+    out: dict[str, list[dict]] = {cid: [] for cid in ids}
     for r in rows:
-        by_id[str(r["component_id"])].append(r)
-    return {raw: by_id.get(str(raw).strip(), []) for raw in component_ids}
+        out[str(r["component_id"])].append(r)
+    return out
 
 
 def get_flows_bulk(component_ids: list[str]) -> dict:
@@ -218,7 +218,7 @@ def get_flows_bulk(component_ids: list[str]) -> dict:
            ORDER BY component_id, updated_at DESC""",
         (ids,),
     )
-    by_id: dict[str, list[dict]] = {cid: [] for cid in ids}
+    out: dict[str, list[dict]] = {cid: [] for cid in ids}
     for r in rows:
-        by_id[str(r["component_id"])].append(r)
-    return {raw: by_id.get(str(raw).strip(), []) for raw in component_ids}
+        out[str(r["component_id"])].append(r)
+    return out
