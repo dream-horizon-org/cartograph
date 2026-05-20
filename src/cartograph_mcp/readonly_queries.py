@@ -559,6 +559,10 @@ def vector_search(
     limit: int = 10,
     filters: dict | None = None,
 ) -> dict:
+    """Cosine-KNN over an embedded table (components/attributions/unresolved/
+    edges/catalogs). limit clamped to [1, 50]. Returns
+    {"query_embedded": bool, "results": [...]}; query_embedded is False when
+    the embedder is unreachable (no agent_id / exclude_self — read-only)."""
     if table not in _TABLE_PROJECTIONS:
         raise ValueError(
             f"Invalid table '{table}'. Valid: {sorted(_TABLE_PROJECTIONS)}"
@@ -598,6 +602,7 @@ def vector_search(
         f"ORDER BY {alias}.embedding <=> %s::vector ASC "
         f"LIMIT %s"
     )
+    # Param order: (vec for similarity column, *extra_params, vec for ORDER BY, limit)
     params = [vec, *extra_params, vec, limit_i]
     rows = execute(sql, tuple(params))
     return {"query_embedded": True, "results": rows}
