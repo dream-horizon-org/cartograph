@@ -6,6 +6,9 @@ agent-facing server (:8100); agents are unaffected.
 
 Binds 127.0.0.1 by default (unauthenticated read-only — not exposed on
 0.0.0.0). Override host/port via CARTOGRAPH_RO_HOST / CARTOGRAPH_RO_PORT.
+WARNING: this endpoint has NO authentication; the localhost bind is the
+only access control. Overriding CARTOGRAPH_RO_HOST to 0.0.0.0 exposes the
+entire read graph to the network — only do so behind a trusted boundary.
 
 Connect from an MCP client:
   {"mcpServers": {"cartograph-ro":
