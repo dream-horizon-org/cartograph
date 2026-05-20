@@ -48,3 +48,21 @@ def test_get_component_owner_no_agent_id():
     owner = ro.get_component_owner(cid)
     assert owner["owner_agent_id"] == "sme-a"
     assert owner["component_status"] == "active"
+
+
+def test_get_components_bulk_no_agent_id():
+    cid = _seed_component()
+    out = ro.get_components_bulk([cid, "00000000-0000-0000-0000-000000000000"])
+    assert out[cid]["canonical_name"] == "svc/a"
+    assert out["00000000-0000-0000-0000-000000000000"] is None
+
+
+def test_get_components_bulk_rejects_empty():
+    with pytest.raises(ValueError):
+        ro.get_components_bulk([])
+
+
+def test_get_attributions_bulk_no_agent_id():
+    cid = _seed_component()
+    out = ro.get_attributions_bulk([cid])
+    assert isinstance(out[cid], list)

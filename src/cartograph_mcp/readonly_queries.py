@@ -140,3 +140,87 @@ def get_component_owner(component_id: str) -> dict:
     if row is None:
         raise ValueError(f"Component {component_id} not found")
     return row
+
+
+# ============ bulk reads ============
+
+def _normalize_id_list(ids: list, label: str) -> list[str]:
+    if not isinstance(ids, list) or not ids:
+        raise ValueError(f"{label} must be a non-empty list")
+    if len(ids) > 500:
+        raise ValueError(f"max 500 {label} per bulk call (got {len(ids)})")
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in ids:
+        s = str(raw or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def get_components_bulk(component_ids: list[str]) -> dict:
+    ids = _normalize_id_list(component_ids, "component_ids")
+    rows = execute(
+        """SELECT id, canonical_name, display_name, component_type,
+                  status, confidence, metadata, description,
+                  component_doc_md, source_slice,
+                  split_from_component_id, split_briefing,
+                  scanned_at, created_at, updated_at
+           FROM components WHERE id = ANY(%s::uuid[])""",
+        (ids,),
+    )
+    by_id = {str(r["id"]): r for r in rows}
+    # Preserve original caller key types (UUID or str) in output dict.
+    return {raw: by_id.get(str(raw).strip()) for raw in component_ids}
+
+
+def get_attributions_bulk(component_ids: list[str]) -> dict:
+    ids = _normalize_id_list(component_ids, "component_ids")
+    rows = execute(
+        """SELECT * FROM attributions
+           WHERE component_id = ANY(%s::uuid[])
+           ORDER BY component_id, plane, resource_type, identifier""",
+        (ids,),
+    )
+    by_id: dict[str, list[dict]] = {cid: [] for cid in ids}
+    for r in rows:
+        by_id[str(r["component_id"])].append(r)
+    # Preserve original caller key types (UUID or str) in output dict.
+    return {raw: by_id.get(str(raw).strip(), []) for raw in component_ids}
+
+
+def get_component_edges_bulk(component_ids: list[str]) -> dict:
+    ids = _normalize_id_list(component_ids, "component_ids")
+    out: dict[str, dict] = {}
+    for cid in ids:
+        out[cid] = get_component_edges(cid)
+    return out
+
+
+def get_catalogs_bulk(component_ids: list[str]) -> dict:
+    ids = _normalize_id_list(component_ids, "component_ids")
+    rows = execute(
+        """SELECT * FROM catalogs
+           WHERE component_id = ANY(%s::uuid[])
+           ORDER BY component_id, kind, identifier""",
+        (ids,),
+    )
+    by_id: dict[str, list[dict]] = {cid: [] for cid in ids}
+    for r in rows:
+        by_id[str(r["component_id"])].append(r)
+    return {raw: by_id.get(str(raw).strip(), []) for raw in component_ids}
+
+
+def get_flows_bulk(component_ids: list[str]) -> dict:
+    ids = _normalize_id_list(component_ids, "component_ids")
+    rows = execute(
+        """SELECT * FROM flows
+           WHERE component_id = ANY(%s::uuid[])
+           ORDER BY component_id, updated_at DESC""",
+        (ids,),
+    )
+    by_id: dict[str, list[dict]] = {cid: [] for cid in ids}
+    for r in rows:
+        by_id[str(r["component_id"])].append(r)
+    return {raw: by_id.get(str(raw).strip(), []) for raw in component_ids}
