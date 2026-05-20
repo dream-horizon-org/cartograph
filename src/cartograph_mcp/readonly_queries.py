@@ -246,3 +246,69 @@ def get_flow_inverse(component_id: str, outgoing_edge_id: str) -> list[dict]:
            ORDER BY c.kind, c.identifier""",
         (component_id, outgoing_edge_id),
     )
+
+
+# ============ resources ============
+
+_VALID_PLANES = {"github", "deploy", "cloud", "telemetry", "config"}
+
+
+def get_resource(resource_id: str) -> dict:
+    row = execute_one("SELECT * FROM resources WHERE id = %s", (resource_id,))
+    if row is None:
+        raise ValueError(f"Resource {resource_id} not found")
+    return row
+
+
+def list_resources_for_plane(plane: str) -> list[dict]:
+    if plane not in _VALID_PLANES:
+        raise ValueError(f"Invalid plane '{plane}'")
+    return execute(
+        "SELECT * FROM resources WHERE plane = %s ORDER BY created_at DESC",
+        (plane,),
+    )
+
+
+def list_all_resources(status: str | None = None) -> list[dict]:
+    if status and status not in ("pending", "assigned", "done", "rejected"):
+        raise ValueError(f"Invalid status '{status}'")
+    if status:
+        return execute(
+            "SELECT * FROM resources WHERE status = %s ORDER BY plane, created_at",
+            (status,),
+        )
+    return execute(
+        "SELECT * FROM resources WHERE status != 'rejected' "
+        "ORDER BY plane, created_at"
+    )
+
+
+def get_resource_counts() -> dict:
+    rows = execute(
+        """SELECT plane, status, COUNT(*) AS cnt
+           FROM resources
+           GROUP BY plane, status
+           ORDER BY plane, status"""
+    )
+    return {"by_plane_status": rows}
+
+
+# ============ agents ============
+
+def list_agents() -> dict:
+    rows = execute(
+        """SELECT agent_id, agent_type, status, plane,
+                  invocation_count, sleep_until, errored_at, created_at
+           FROM agent_runs
+           WHERE status != 'decommissioned'
+           ORDER BY
+             CASE agent_type
+               WHEN 'orchestrator' THEN 0
+               WHEN 'resolver' THEN 1
+               WHEN 'sme' THEN 2
+               WHEN 'iterator' THEN 3
+               ELSE 99
+             END,
+             created_at"""
+    )
+    return {"agents": rows}

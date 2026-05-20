@@ -79,3 +79,28 @@ def test_get_flow_inverse_empty_when_no_flows():
     cid = _seed_component()
     rows = ro.get_flow_inverse(cid, "00000000-0000-0000-0000-000000000000")
     assert rows == []
+
+
+def test_list_resources_for_plane_no_agent_id():
+    _seed_component()  # creates iter-gh + a github 'repo' resource
+    rows = ro.list_resources_for_plane("github")
+    assert any(r["identifier"] == "svc/a" for r in rows)
+
+
+def test_list_resources_for_plane_invalid_plane():
+    with pytest.raises(ValueError):
+        ro.list_resources_for_plane("not-a-plane")
+
+
+def test_get_resource_counts_no_agent_id():
+    _seed_component()
+    out = ro.get_resource_counts()
+    assert "by_plane_status" in out
+    assert isinstance(out["by_plane_status"], list)
+
+
+def test_list_agents_no_agent_id():
+    _seed_component()  # creates iter-gh + sme-a
+    out = ro.list_agents()
+    ids = {a["agent_id"] for a in out["agents"]}
+    assert {"iter-gh", "sme-a"} <= ids
