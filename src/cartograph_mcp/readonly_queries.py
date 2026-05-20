@@ -222,3 +222,27 @@ def get_flows_bulk(component_ids: list[str]) -> dict:
     for r in rows:
         out[str(r["component_id"])].append(r)
     return out
+
+
+# ============ flows (single) ============
+
+def get_flow(component_id: str, incoming_catalog_id: str) -> list[dict]:
+    return execute(
+        """SELECT e.* FROM flows f
+           JOIN edges e ON e.id = f.outgoing_edge_id
+           WHERE f.component_id = %s::uuid
+             AND f.incoming_catalog_id = %s::uuid
+           ORDER BY e.edge_type, e.identifier""",
+        (component_id, incoming_catalog_id),
+    )
+
+
+def get_flow_inverse(component_id: str, outgoing_edge_id: str) -> list[dict]:
+    return execute(
+        """SELECT c.* FROM flows f
+           JOIN catalogs c ON c.id = f.incoming_catalog_id
+           WHERE f.component_id = %s::uuid
+             AND f.outgoing_edge_id = %s::uuid
+           ORDER BY c.kind, c.identifier""",
+        (component_id, outgoing_edge_id),
+    )

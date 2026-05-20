@@ -66,3 +66,16 @@ def test_get_attributions_bulk_no_agent_id():
     cid = str(_seed_component())
     out = ro.get_attributions_bulk([cid])
     assert isinstance(out[cid], list)
+
+
+def test_get_flow_empty_when_no_flows():
+    cid = _seed_component()
+    # No catalog/flow seeded → empty list, but the query must run cleanly.
+    rows = ro.get_flow(cid, "00000000-0000-0000-0000-000000000000")
+    assert rows == []
+
+
+def test_get_flow_inverse_empty_when_no_flows():
+    cid = _seed_component()
+    rows = ro.get_flow_inverse(cid, "00000000-0000-0000-0000-000000000000")
+    assert rows == []
