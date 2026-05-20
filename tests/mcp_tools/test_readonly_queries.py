@@ -146,7 +146,8 @@ def test_search_components_no_agent_id():
 
 def test_search_components_blank_filter_refused():
     # status defaults to 'active'; pass status=None to force all-None → blank.
-    with pytest.raises(Exception):
+    # BlankFilterError subclasses ValueError.
+    with pytest.raises(ValueError):
         ro.search_components(status=None)
 
 
