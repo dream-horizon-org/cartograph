@@ -156,3 +156,19 @@ def test_search_attributions_no_agent_id():
     # search by component_id filter (exact eq)
     rows = ro.search_attributions(component_id=cid)
     assert isinstance(rows, list)
+
+
+def test_vector_search_no_agent_id_runs():
+    _seed_component(canonical="svc/search-target", display="Search Target")
+    out = ro.vector_search("search target service", "components", limit=5)
+    # Embedder may be unavailable (Ollama down) in some environments; either
+    # way the call must succeed and return the documented shape.
+    assert set(out.keys()) == {"query_embedded", "results"}
+    assert isinstance(out["results"], list)
+    if out["query_embedded"]:
+        assert all("similarity" in r for r in out["results"])
+
+
+def test_vector_search_invalid_table():
+    with pytest.raises(ValueError):
+        ro.vector_search("x", "not_a_table")

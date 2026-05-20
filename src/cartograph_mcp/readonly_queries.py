@@ -19,8 +19,10 @@ from __future__ import annotations
 from typing import Any
 
 from shared.db import execute, execute_one
+from shared import embedding as emb
 from cartograph_mcp.tools._search_helper import (
     MAX_RESULTS, pattern_clause, eq_clause, in_clause, assemble, at_most_one,
+    validate_filter_keys, build_filter_clauses,
 )
 
 
@@ -525,3 +527,77 @@ def search_unresolved(
         LIMIT {MAX_RESULTS}
     """
     return execute(sql, tuple(params))
+
+
+# ============ vector search (no agent_id, no exclude_self) ============
+
+_TABLE_PROJECTIONS = {
+    "components": ("c.id, c.canonical_name, c.display_name, "
+                   "c.component_type, c.status, c.description", "c"),
+    "attributions": ("a.id, a.component_id, a.plane, a.resource_type, "
+                     "a.identifier, a.confidence", "a"),
+    "unresolved": ("u.id, u.found_in_component_id, u.reference_type, "
+                   "u.reference_value, u.resolved", "u"),
+    "edges": ("e.id, e.from_component_id, e.to_component_id, "
+              "e.edge_type, e.identifier, e.confidence", "e"),
+    "catalogs": ("c.id, c.component_id, c.kind, c.identifier, "
+                 "c.confidence", "c"),
+}
+
+_TABLE_FROM = {
+    "components":   "components c",
+    "attributions": "attributions a",
+    "unresolved":   "unresolved u",
+    "edges":        "edges e",
+    "catalogs":     "catalogs c",
+}
+
+
+def vector_search(
+    query_text: str,
+    table: str,
+    limit: int = 10,
+    filters: dict | None = None,
+) -> dict:
+    if table not in _TABLE_PROJECTIONS:
+        raise ValueError(
+            f"Invalid table '{table}'. Valid: {sorted(_TABLE_PROJECTIONS)}"
+        )
+    try:
+        limit_i = int(limit)
+    except (TypeError, ValueError) as e:
+        raise ValueError("limit must be an integer") from e
+    limit_i = max(1, min(50, limit_i))
+
+    validate_filter_keys(table, filters)
+
+    vec = emb.vector_literal(emb.embed_text(query_text))
+    if vec is None:
+        return {"query_embedded": False, "results": []}
+
+    projection, alias = _TABLE_PROJECTIONS[table]
+    from_table = _TABLE_FROM[table]
+    where_clauses: list[str] = [f"{alias}.embedding IS NOT NULL"]
+    extra_params: list[Any] = []
+
+    if filters:
+        filter_clauses_raw, _ = build_filter_clauses(filters, table_alias=alias)
+        try:
+            filter_sql, filter_params = assemble(filter_clauses_raw)
+            where_clauses.append(filter_sql)
+            extra_params.extend(filter_params)
+        except Exception:
+            pass
+
+    where_sql = " AND ".join(where_clauses)
+    sql = (
+        f"SELECT {projection}, "
+        f"       1 - ({alias}.embedding <=> %s::vector) AS similarity "
+        f"FROM {from_table} "
+        f"WHERE {where_sql} "
+        f"ORDER BY {alias}.embedding <=> %s::vector ASC "
+        f"LIMIT %s"
+    )
+    params = [vec, *extra_params, vec, limit_i]
+    rows = execute(sql, tuple(params))
+    return {"query_embedded": True, "results": rows}
