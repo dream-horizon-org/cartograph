@@ -13,10 +13,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from shared.db import execute, execute_one, execute_mutate, execute_returning
+from shared.healthcheck import healthcheck_payload
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,11 @@ def _append_client_log(payload: dict[str, Any]) -> None:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Cartograph Admin UI")
+
+    @app.get("/healthcheck")
+    def healthcheck():
+        body, status_code = healthcheck_payload("cartograph-admin")
+        return JSONResponse(content=body, status_code=status_code)
 
     # --- API ROUTES ---
 

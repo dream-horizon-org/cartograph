@@ -9,12 +9,13 @@ TARGET="${ROOT}/target/${ARTIFACT}"
 echo "[cartograph-admin build] TARGET=${TARGET}"
 
 rm -rf "${TARGET}"
-mkdir -p "${TARGET}/src"
+mkdir -p "${TARGET}/src" "${TARGET}/.odin"
 
 cp -R "${ROOT}/src/admin_ui" \
       "${ROOT}/src/shared" \
       "${ROOT}/src/cartograph_mcp" \
       "${TARGET}/src/"
 cp "${ROOT}/requirements.txt" "${ROOT}/pyproject.toml" "${TARGET}/"
+cp -R "${ROOT}/.odin/${ARTIFACT}" "${TARGET}/.odin/"
 
 echo "[cartograph-admin build] done"

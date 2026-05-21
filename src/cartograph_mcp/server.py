@@ -17,8 +17,11 @@ import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from shared.db import init_pool, close_pool, execute, execute_one
+from shared.healthcheck import healthcheck_payload
 from shared.migrations import run_migrations
 from cartograph_mcp.tools import action_items, chat, broadcast, secrets
 from cartograph_mcp.tools import tasks as tasks_tool
@@ -46,6 +49,13 @@ logger = logging.getLogger(__name__)
 
 # Create the MCP server. Streamable HTTP listens at /mcp endpoint.
 mcp = FastMCP("cartograph-db", host="0.0.0.0", port=8100)
+
+
+@mcp.custom_route("/healthcheck", methods=["GET"])
+async def healthcheck(_request: Request) -> JSONResponse:
+    body, status_code = healthcheck_payload("cartograph-mcp")
+    return JSONResponse(content=body, status_code=status_code)
+
 
 # Phase 5.10: install the per-call audit wrapper BEFORE any @mcp.tool()
 # decorator runs. Every subsequent tool registration gets transparently
