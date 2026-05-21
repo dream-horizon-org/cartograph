@@ -2,7 +2,22 @@
 # MCP (:8100) + trigger manager + agent manager. Env vars must be exported by Odin before this runs.
 set -euo pipefail
 
-echo "[cartograph-manager start] APP_DIR=${APP_DIR:-}"
+# Claude Code refuses --dangerously-skip-permissions when invoked as root.
+CARTOGRAPH_RUN_USER="${CARTOGRAPH_RUN_USER:-cartograph}"
+if [[ "$(id -u)" -eq 0 && -n "${CARTOGRAPH_RUN_USER}" ]]; then
+  if ! id "${CARTOGRAPH_RUN_USER}" &>/dev/null; then
+    echo "ERROR: user ${CARTOGRAPH_RUN_USER} missing — run setup.sh" >&2
+    exit 1
+  fi
+  echo "[cartograph-manager start] Dropping root → ${CARTOGRAPH_RUN_USER}"
+  if command -v runuser >/dev/null; then
+    exec runuser -u "${CARTOGRAPH_RUN_USER}" -w "${APP_DIR}" -- "$0" "$@"
+  fi
+  exec su -s /bin/bash "${CARTOGRAPH_RUN_USER}" -c "cd \"${APP_DIR}\" && exec \"$0\"" -- "$0"
+fi
+
+echo "[cartograph-manager start] APP_DIR=${APP_DIR}"
+echo "[cartograph-manager start] user=$(id -un) uid=$(id -u)"
 echo "[cartograph-manager start] ODIN_DEPLOYMENT_TYPE=${ODIN_DEPLOYMENT_TYPE:-${DEPLOYMENT_TYPE:-}}"
 
 export PATH="/usr/local/bin:/usr/bin:${PATH:-}"

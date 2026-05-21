@@ -51,4 +51,16 @@ fi
 "${APP_DIR}/venv/bin/pip" install -q -r "${APP_DIR}/requirements.txt"
 
 mkdir -p "${APP_DIR}/workspaces" "${APP_DIR}/logs" "${APP_DIR}/config"
+
+# Claude Code refuses --dangerously-skip-permissions as root; run the app as a service user.
+CARTOGRAPH_RUN_USER="${CARTOGRAPH_RUN_USER:-cartograph}"
+if [[ "$(id -u)" -eq 0 ]]; then
+  if ! id "${CARTOGRAPH_RUN_USER}" &>/dev/null; then
+    echo "[cartograph-manager setup] Creating service user ${CARTOGRAPH_RUN_USER}..."
+    useradd -r -s /bin/bash "${CARTOGRAPH_RUN_USER}"
+  fi
+  chown -R "${CARTOGRAPH_RUN_USER}:${CARTOGRAPH_RUN_USER}" "${APP_DIR}"
+  echo "[cartograph-manager setup] APP_DIR owned by ${CARTOGRAPH_RUN_USER}"
+fi
+
 echo "[cartograph-manager setup] done"
