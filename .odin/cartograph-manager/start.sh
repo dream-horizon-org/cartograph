@@ -9,12 +9,39 @@ if [[ "$(id -u)" -eq 0 && -n "${CARTOGRAPH_RUN_USER}" ]]; then
     echo "ERROR: user ${CARTOGRAPH_RUN_USER} missing — run setup.sh" >&2
     exit 1
   fi
+  # Odin sets PID_PATH under /run (root-owned). Create/truncate it for cartograph.
+  if [[ -n "${PID_PATH:-}" ]]; then
+    rm -f "${PID_PATH}"
+    if ! install -o "${CARTOGRAPH_RUN_USER}" -g "${CARTOGRAPH_RUN_USER}" -m 664 /dev/null "${PID_PATH}"; then
+      echo "[cartograph-manager start] WARN: cannot use ${PID_PATH}; falling back to ${APP_DIR}/.app.pid" >&2
+      export PID_PATH="${APP_DIR}/.app.pid"
+      install -o "${CARTOGRAPH_RUN_USER}" -g "${CARTOGRAPH_RUN_USER}" -m 664 /dev/null "${PID_PATH}"
+    else
+      echo "[cartograph-manager start] PID file prepared: ${PID_PATH} (${CARTOGRAPH_RUN_USER})"
+    fi
+  fi
   echo "[cartograph-manager start] Dropping root → ${CARTOGRAPH_RUN_USER}"
   if command -v runuser >/dev/null; then
     exec runuser -u "${CARTOGRAPH_RUN_USER}" -w "${APP_DIR}" -- "$0" "$@"
   fi
   exec su -s /bin/bash "${CARTOGRAPH_RUN_USER}" -c "cd \"${APP_DIR}\" && exec \"$0\"" -- "$0"
 fi
+
+_resolve_pid_path() {
+  local path="${PID_PATH:-${APP_DIR}/.app.pid}"
+  local dir
+  dir="$(dirname "${path}")"
+  if [[ -e "${path}" && -w "${path}" ]]; then
+    echo "${path}"
+    return
+  fi
+  if [[ ! -e "${path}" && -w "${dir}" ]]; then
+    echo "${path}"
+    return
+  fi
+  echo "[cartograph-manager start] WARN: ${path} not writable as $(id -un); using ${APP_DIR}/.app.pid" >&2
+  echo "${APP_DIR}/.app.pid"
+}
 
 echo "[cartograph-manager start] APP_DIR=${APP_DIR}"
 echo "[cartograph-manager start] user=$(id -un) uid=$(id -u)"
@@ -81,6 +108,8 @@ if [[ "${ODIN_DEPLOYMENT_TYPE:-${DEPLOYMENT_TYPE:-}}" == "container" ]]; then
 else
   echo "[cartograph-manager start] agent manager (background) → ${LOG_DIR}/agents.log"
   nohup "$PYTHON" -u main.py </dev/null >>"${LOG_DIR}/agents.log" 2>&1 &
-  echo $! >"${PID_PATH:-${APP_DIR}/.app.pid}"
+  PID_FILE="$(_resolve_pid_path)"
+  echo $! >"${PID_FILE}"
+  echo "[cartograph-manager start] agent manager pid=${!} → ${PID_FILE}"
   trap - EXIT TERM INT
 fi
