@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 *.db
 workspaces/
+workspaces.bak*/
 .env
 .idea/
 docs/superpowers/
