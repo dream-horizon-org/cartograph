@@ -6,7 +6,7 @@ echo "[cartograph-manager start] APP_DIR=${APP_DIR:-}"
 echo "[cartograph-manager start] ODIN_DEPLOYMENT_TYPE=${ODIN_DEPLOYMENT_TYPE:-${DEPLOYMENT_TYPE:-}}"
 
 # Bedrock Claude Code settings from S3 (optional; skip if CARTOGRAPH_AGENT_SETTINGS_PATH already set).
-if [[ -n "${CARTOGRAPH_SETTINGS_S3_URI:-}" ]] && [[ -z "${CARTOGRAPH_AGENT_SETTINGS_PATH:-}" ]]; then
+if [[ -n "${CARTOGRAPH_SETTINGS_S3_URI:-}" ]]; then
   mkdir -p "${APP_DIR}/config"
   aws s3 cp "${CARTOGRAPH_SETTINGS_S3_URI}" "${APP_DIR}/config/settings.cartograph.json"
   chmod 600 "${APP_DIR}/config/settings.cartograph.json"
