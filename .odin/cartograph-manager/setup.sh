@@ -26,11 +26,15 @@ fi
 if ! command -v curl &>/dev/null && command -v apt-get &>/dev/null; then
   $SUDO apt-get install -y curl
 fi
-if ! command -v claude &>/dev/null && [[ ! -x /root/.local/bin/claude ]]; then
+if ! command -v claude &>/dev/null \
+   && [[ ! -x "${HOME}/.local/bin/claude" ]] \
+   && [[ ! -x /root/.local/bin/claude ]]; then
   echo "[cartograph-manager setup] Installing Claude Code CLI..."
   curl -fsSL https://claude.ai/install.sh | bash -s stable
 fi
+# Installer puts binary in ~/.local/bin (not on PATH during non-interactive bake).
 CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+[[ -z "${CLAUDE_BIN}" && -x "${HOME}/.local/bin/claude" ]] && CLAUDE_BIN="${HOME}/.local/bin/claude"
 [[ -z "${CLAUDE_BIN}" && -x /root/.local/bin/claude ]] && CLAUDE_BIN=/root/.local/bin/claude
 if [[ -z "${CLAUDE_BIN}" ]]; then
   echo "ERROR: claude CLI not installed" >&2
