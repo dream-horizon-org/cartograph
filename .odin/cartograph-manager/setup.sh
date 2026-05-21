@@ -21,22 +21,24 @@ if ! command -v python3 &>/dev/null; then
   fi
 fi
 
-# Claude Code CLI (agent_manager spawns `claude -p`).
+# Claude CLI for agent_manager (`claude -p`). Install to ~/.local/bin, then link
+# into /usr/local/bin so systemd/start.sh always find it (not bake-user PATH).
 if ! command -v curl &>/dev/null && command -v apt-get &>/dev/null; then
   $SUDO apt-get install -y curl
 fi
-
-if ! command -v claude &>/dev/null; then
+if ! command -v claude &>/dev/null && [[ ! -x /root/.local/bin/claude ]]; then
   echo "[cartograph-manager setup] Installing Claude Code CLI..."
   curl -fsSL https://claude.ai/install.sh | bash -s stable
 fi
-export PATH="${HOME}/.local/bin:/usr/local/bin:${PATH:-}"
-if ! command -v claude &>/dev/null; then
-  echo "ERROR: claude CLI not found after install (need ~/.local/bin or apt claude-code on PATH)" >&2
+CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+[[ -z "${CLAUDE_BIN}" && -x /root/.local/bin/claude ]] && CLAUDE_BIN=/root/.local/bin/claude
+if [[ -z "${CLAUDE_BIN}" ]]; then
+  echo "ERROR: claude CLI not installed" >&2
   exit 1
 fi
-
-echo "[cartograph-manager setup] $(claude --version 2>/dev/null || echo "claude at $(command -v claude)")"
+$SUDO install -d /usr/local/bin
+$SUDO ln -sf "${CLAUDE_BIN}" /usr/local/bin/claude
+echo "[cartograph-manager setup] $(/usr/local/bin/claude --version 2>/dev/null || echo "claude OK")"
 
 if [[ ! -x "${APP_DIR}/venv/bin/python" ]]; then
   python3 -m venv "${APP_DIR}/venv"

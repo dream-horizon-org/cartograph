@@ -5,6 +5,9 @@ set -euo pipefail
 echo "[cartograph-manager start] APP_DIR=${APP_DIR:-}"
 echo "[cartograph-manager start] ODIN_DEPLOYMENT_TYPE=${ODIN_DEPLOYMENT_TYPE:-${DEPLOYMENT_TYPE:-}}"
 
+export PATH="/usr/local/bin:/usr/bin:${PATH:-}"
+command -v claude >/dev/null || { echo "ERROR: claude missing — run setup.sh" >&2; exit 1; }
+
 # Bedrock Claude Code settings from S3 (optional; skip if CARTOGRAPH_AGENT_SETTINGS_PATH already set).
 if [[ -n "${CARTOGRAPH_SETTINGS_S3_URI:-}" ]]; then
   mkdir -p "${APP_DIR}/config"
