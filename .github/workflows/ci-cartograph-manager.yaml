@@ -1,0 +1,52 @@
+name: Verify & Publish (cartograph-manager)
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+    paths:
+      - 'src/agent_management/**'
+      - 'src/cartograph_mcp/**'
+      - 'src/trigger_management/**'
+      - 'src/shared/**'
+      - 'src/main.py'
+      - 'src/mcp_servers.yaml'
+      - 'tests/mcp_tools/**'
+      - 'tests/test_*.py'
+      - '.odin/cartograph-manager/**'
+      - 'settings.cartograph.json.template'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/ci-cartograph-manager.yaml'
+
+env:
+  ARTIFACT_NAME: cartograph-manager
+  VAULT_ADDR: http://secret-store-writer-stag.d11dev.com
+  VAULT_SKIP_VERIFY: true
+  VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
+  VAULT_VERSION: 1.16.0
+
+jobs:
+  ci-cartograph-manager:
+    name: cartograph-manager
+    runs-on: [onboarding]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Self-hosted Debian 12 runners: actions/setup-python has no debian-12
+      # toolcache builds. Bookworm ships Python 3.11 (pyproject: requires-python >=3.10).
+      - name: Verify Python
+        run: |
+          python3 --version
+          python3 -c "import sys; assert sys.version_info >= (3, 10), sys.version"
+
+      - name: Upload artifacts
+        id: upload-artifacts
+        uses: dream11/d11-github-actions/upload-artifacts@v1
+        with:
+          github_token: ${{ secrets.COMMIT_ACCESS_TOKEN }}

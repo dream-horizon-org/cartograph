@@ -1,3 +1,5 @@
+target/
+
 __pycache__/
 *.pyc
 .venv/
@@ -13,3 +15,4 @@ docs/superpowers/
 # shouldn't hit origin.
 snapshots/
 *.sql
+*workspaces*/

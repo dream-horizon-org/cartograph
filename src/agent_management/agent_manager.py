@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -305,6 +306,23 @@ class AgentManager:
             db.set_agent_errored(agent_id, msg)
             return ""
 
+        if not os.path.isabs(workspace_path):
+            workspace_path = os.path.abspath(workspace_path)
+        if not os.path.isdir(workspace_path):
+            logger.warning(
+                "Workspace missing for %s — provisioning %s",
+                agent_id, workspace_path,
+            )
+            workspace_path = self.provision_workspace(
+                agent_id, agent["agent_type"], config.mcp_servers,
+            )
+
+        if shutil.which("claude") is None:
+            msg = "claude CLI not found — is Claude Code installed and on PATH?"
+            logger.error(msg)
+            db.set_agent_errored(agent_id, msg)
+            return ""
+
         # Use --resume if we have a session; otherwise --session-id lets us
         # provide a fresh UUID so we can persist and resume later.
         cmd = [
@@ -431,7 +449,7 @@ class AgentManager:
             )
             return "TIMEOUT"
         except FileNotFoundError as e:
-            msg = f"claude CLI not found — is Claude Code installed and on PATH? {e}"
+            msg = f"Failed to spawn claude subprocess (cwd={workspace_path}): {e}"
             logger.error(msg)
             db.set_agent_errored(agent_id, msg)
             return str(e)
