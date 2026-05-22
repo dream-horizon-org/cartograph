@@ -20,6 +20,10 @@ env:
   VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
   VAULT_VERSION: 1.16.0
 
+concurrency:
+  group: cartograph-release
+  cancel-in-progress: false
+
 jobs:
   publish-concrete-version:
     runs-on: [onboarding]

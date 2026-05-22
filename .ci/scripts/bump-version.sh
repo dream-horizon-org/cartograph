@@ -5,6 +5,7 @@ set -euo pipefail
 
 ARTIFACT_NAME="${ARTIFACT_NAME:?ARTIFACT_NAME is required}"
 RELEASE_VERSION="${RELEASE_VERSION:?RELEASE_VERSION is required}"
+BRANCH="${RELEASE_BRANCH:-master}"
 
 APPLICATION_SPEC=".odin/${ARTIFACT_NAME}/application-spec.yaml"
 if [[ ! -f "${APPLICATION_SPEC}" ]]; then
@@ -26,4 +27,7 @@ BUMP_VERSION="${major}.${minor}.${patch}-SNAPSHOT"
 printf 'version: %s\n' "${BUMP_VERSION}" >"${APPLICATION_SPEC}"
 git add "${APPLICATION_SPEC}"
 git commit -m "chore: release version ${RELEASE_VERSION} and bump version to ${BUMP_VERSION}"
-git push origin HEAD:master
+
+git fetch origin "${BRANCH}"
+git rebase "origin/${BRANCH}"
+git push origin "HEAD:${BRANCH}"
