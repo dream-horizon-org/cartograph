@@ -1,0 +1,76 @@
+name: Release (cartograph-manager)
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'src/agent_management/**'
+      - 'src/cartograph_mcp/**'
+      - 'src/trigger_management/**'
+      - 'src/shared/**'
+      - 'src/main.py'
+      - 'src/mcp_servers.yaml'
+      - 'tests/mcp_tools/**'
+      - 'tests/test_*.py'
+      - '.odin/cartograph-manager/**'
+      - 'settings.cartograph.json.template'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+
+env:
+  ARTIFACT_NAME: cartograph-manager
+  VAULT_ADDR: http://secret-store-writer-stag.d11dev.com
+  VAULT_SKIP_VERIFY: true
+  VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
+  VAULT_VERSION: 1.16.0
+
+concurrency:
+  group: cartograph-release
+  cancel-in-progress: false
+
+jobs:
+  publish-concrete-version:
+    runs-on: [onboarding]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.COMMIT_ACCESS_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup git config
+        run: |
+          git config user.name "release-bot"
+          git config user.email "<>"
+
+      - name: Get version from application-spec
+        id: get_version
+        run: |
+          spec=".odin/cartograph-manager/application-spec.yaml"
+          current="$(grep '^version:' "${spec}" | sed 's/version:[[:space:]]*//')"
+          release="${current%-SNAPSHOT}"
+          if [[ "${current}" == "${release}" ]]; then
+            echo "ERROR: ${spec} must be a SNAPSHOT version (got ${current})" >&2
+            exit 1
+          fi
+          echo "SNAPSHOT_VERSION=${current}" >> "${GITHUB_OUTPUT}"
+          echo "VERSION=${release}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify Python
+        run: |
+          python3 --version
+          python3 -c "import sys; assert sys.version_info >= (3, 10), sys.version"
+
+      - name: Publish Artifact to Artifactory
+        uses: dream11/publish-artifact@v1
+        with:
+          artifact-name: cartograph-manager
+          artifact-version: ${{ steps.get_version.outputs.VERSION }}
+
+      - name: Bump version
+        run: .ci/scripts/bump-version.sh
+        env:
+          ARTIFACT_NAME: cartograph-manager
+          RELEASE_VERSION: ${{ steps.get_version.outputs.VERSION }}
