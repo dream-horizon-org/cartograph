@@ -4,11 +4,14 @@ set -euo pipefail
 
 # Claude Code refuses --dangerously-skip-permissions when invoked as root.
 CARTOGRAPH_RUN_USER="${CARTOGRAPH_RUN_USER:-cartograph}"
+CARTOGRAPH_RUN_HOME="${CARTOGRAPH_RUN_HOME:-/home/${CARTOGRAPH_RUN_USER}}"
 if [[ "$(id -u)" -eq 0 && -n "${CARTOGRAPH_RUN_USER}" ]]; then
   if ! id "${CARTOGRAPH_RUN_USER}" &>/dev/null; then
     echo "ERROR: user ${CARTOGRAPH_RUN_USER} missing — run setup.sh" >&2
     exit 1
   fi
+  # Claude needs a writable HOME; existing hosts may have user without -m home.
+  install -d -o "${CARTOGRAPH_RUN_USER}" -g "${CARTOGRAPH_RUN_USER}" -m 755 "${CARTOGRAPH_RUN_HOME}"
   # Odin sets PID_PATH under /run (root-owned). Create/truncate it for cartograph.
   if [[ -n "${PID_PATH:-}" ]]; then
     rm -f "${PID_PATH}"
@@ -46,6 +49,15 @@ _resolve_pid_path() {
 echo "[cartograph-manager start] APP_DIR=${APP_DIR}"
 echo "[cartograph-manager start] user=$(id -un) uid=$(id -u)"
 echo "[cartograph-manager start] ODIN_DEPLOYMENT_TYPE=${ODIN_DEPLOYMENT_TYPE:-${DEPLOYMENT_TYPE:-}}"
+
+# Claude Code writes state under ~/.claude; ensure HOME exists when running as service user.
+if [[ "$(id -u)" -ne 0 ]]; then
+  export HOME="${HOME:-${CARTOGRAPH_RUN_HOME}}"
+  if [[ ! -d "${HOME}" ]]; then
+    echo "ERROR: HOME ${HOME} missing — run setup.sh" >&2
+    exit 1
+  fi
+fi
 
 export PATH="/usr/local/bin:/usr/bin:${PATH:-}"
 command -v claude >/dev/null || { echo "ERROR: claude missing — run setup.sh" >&2; exit 1; }

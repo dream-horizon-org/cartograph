@@ -53,14 +53,19 @@ fi
 mkdir -p "${APP_DIR}/workspaces" "${APP_DIR}/logs" "${APP_DIR}/config"
 
 # Claude Code refuses --dangerously-skip-permissions as root; run the app as a service user.
+# Claude also needs a writable HOME (~/.claude cache); useradd -r alone does not create it.
 CARTOGRAPH_RUN_USER="${CARTOGRAPH_RUN_USER:-cartograph}"
+CARTOGRAPH_RUN_HOME="${CARTOGRAPH_RUN_HOME:-/home/${CARTOGRAPH_RUN_USER}}"
 if [[ "$(id -u)" -eq 0 ]]; then
   if ! id "${CARTOGRAPH_RUN_USER}" &>/dev/null; then
     echo "[cartograph-manager setup] Creating service user ${CARTOGRAPH_RUN_USER}..."
-    useradd -r -s /bin/bash "${CARTOGRAPH_RUN_USER}"
+    useradd -r -m -d "${CARTOGRAPH_RUN_HOME}" -s /bin/bash "${CARTOGRAPH_RUN_USER}"
+  else
+    usermod -d "${CARTOGRAPH_RUN_HOME}" -s /bin/bash "${CARTOGRAPH_RUN_USER}" 2>/dev/null || true
   fi
+  install -d -o "${CARTOGRAPH_RUN_USER}" -g "${CARTOGRAPH_RUN_USER}" -m 755 "${CARTOGRAPH_RUN_HOME}"
   chown -R "${CARTOGRAPH_RUN_USER}:${CARTOGRAPH_RUN_USER}" "${APP_DIR}"
-  echo "[cartograph-manager setup] APP_DIR owned by ${CARTOGRAPH_RUN_USER}"
+  echo "[cartograph-manager setup] ${CARTOGRAPH_RUN_USER} home=${CARTOGRAPH_RUN_HOME}, APP_DIR owned"
 fi
 
 echo "[cartograph-manager setup] done"
