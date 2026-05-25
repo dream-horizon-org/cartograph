@@ -28,12 +28,22 @@ DB_NAME = os.getenv("CARTOGRAPH_DB_NAME", "cartograph")
 DB_USER = os.getenv("CARTOGRAPH_DB_USER", "cartograph")
 DB_PASSWORD = os.getenv("CARTOGRAPH_DB_PASSWORD", "cartograph")
 
-# Embedding: Ollama runs locally on Apple Silicon (Metal GPU), no API key
-# needed. `mxbai-embed-large` is a 1024d top-tier English embedder and is
-# the default; override with CARTOGRAPH_EMBEDDING_MODEL if you pull a
-# different one. Warm embed latency ~40-60ms on M-series.
+# Embedding provider: ollama (default) or bedrock (production).
+# Bedrock uses boto3 + standard AWS credentials (instance role, env keys,
+# or ~/.aws/credentials). CARTOGRAPH_AGENT_SETTINGS_PATH may set AWS_REGION.
+EMBEDDING_PROVIDER = os.getenv(
+    "CARTOGRAPH_EMBEDDING_PROVIDER", "ollama"
+).strip().lower()
+AWS_REGION = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-2"))
 OLLAMA_URL = os.getenv("CARTOGRAPH_OLLAMA_URL", "http://localhost:11434")
-EMBEDDING_MODEL = os.getenv("CARTOGRAPH_EMBEDDING_MODEL", "mxbai-embed-large")
+_DEFAULT_BEDROCK_EMBED_MODEL = "amazon.titan-embed-text-v2:0"
+_DEFAULT_OLLAMA_EMBED_MODEL = "mxbai-embed-large"
+EMBEDDING_MODEL = os.getenv(
+    "CARTOGRAPH_EMBEDDING_MODEL",
+    _DEFAULT_BEDROCK_EMBED_MODEL
+    if EMBEDDING_PROVIDER == "bedrock"
+    else _DEFAULT_OLLAMA_EMBED_MODEL,
+)
 EMBEDDING_DIMS = int(os.getenv("CARTOGRAPH_EMBEDDING_DIMS", "1024"))
 
 TRIGGER_POLL_INTERVAL = float(os.getenv("CARTOGRAPH_TRIGGER_POLL_INTERVAL", "2.0"))

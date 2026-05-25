@@ -155,16 +155,37 @@ def _backfill_unresolved() -> tuple[int, int]:
     return done, skipped
 
 
+def _backfill_catalogs() -> tuple[int, int]:
+    rows = execute(
+        """SELECT id, kind, identifier FROM catalogs WHERE embedding IS NULL"""
+    )
+    done = skipped = 0
+    for r in rows:
+        text = f"{r['kind']}: {r['identifier']}"
+        vec = emb.embed_text(text)
+        lit = emb.vector_literal(vec)
+        if lit is None:
+            skipped += 1
+            continue
+        execute_mutate(
+            "UPDATE catalogs SET embedding = %s::vector WHERE id = %s",
+            (lit, r["id"]),
+        )
+        done += 1
+    return done, skipped
+
+
 _BACKFILLERS: list[tuple[str, Callable[..., tuple[int, int]]]] = [
     ("components",   _backfill_components),
     ("attributions", _backfill_attributions),
     ("edges",        _backfill_edges),
     ("unresolved",   _backfill_unresolved),
+    ("catalogs",     _backfill_catalogs),
 ]
 
 
 def backfill_all(force_components: bool = False) -> dict:
-    """Re-embed NULL-embedding rows across the four vector tables.
+    """Re-embed NULL-embedding rows across all vector tables.
 
     `force_components=True` re-embeds EVERY component row regardless of
     embedding state — used after Phase 10.2 changed `component_embed_text`

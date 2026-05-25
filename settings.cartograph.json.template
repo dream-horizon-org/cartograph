@@ -48,7 +48,13 @@
     "",
     "  To pin a specific Bedrock model id directly (overrides the env-derived",
     "  default), set CARTOGRAPH_MODEL_OPUS / CARTOGRAPH_MODEL_SONNET in this",
-    "  same env block."
+    "  same env block.",
+    "",
+    "EMBEDDINGS (MCP server / vector_search; default is local Ollama):",
+    "  Omit vars → Ollama mxbai-embed-large @ localhost:11434.",
+    "  Production Bedrock: set CARTOGRAPH_EMBEDDING_PROVIDER=bedrock,",
+    "  CARTOGRAPH_EMBEDDING_MODEL=amazon.titan-embed-text-v2:0, AWS_REGION, and IAM.",
+    "  After switching models, NULL embeddings and run: python -m shared.embedding_backfill"
   ],
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
