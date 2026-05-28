@@ -1,4 +1,44 @@
-# Cartograph — Post-Compaction Recollection (2026-05-12 night, Phase 10.14 + 10.15 + 10.16 SHIPPED, DB wiped pre-run-5)
+# Cartograph — Post-Compaction Recollection (2026-05-21, Phases 10.14→10.17 SHIPPED · fault-tolerance design phase)
+
+## 00. SESSION HANDOFF (2026-05-21) — READ FIRST
+
+**Branch HEAD:** `e2cc99e` on `feat/prompt-tuning-and-bug-fixes` (pushed). Commits since the 10.17 work:
+- `4729f9f` — final doc-sync for Phase 10.17 + run-#5-v2 live state
+- `f7f2807` — committed Bedrock settings template + recall doc pointer
+- `e2cc99e` — `scripts/analyze_costs.py` (cost forensics from JSONL + mcp_audit)
+- (this commit) — 2 new docs + gitignore hygiene + this handoff
+
+**New docs added this session:**
+- **`docs/TOOL-INVENTORY.md`** — all **117 MCP tools** in tables (name · Orch/Iter/SME/Res access matrix · scope/ACL · description) + cross-cutting access-control summary + phase-correlation index. THIS is now the authoritative live tool list; older `114`-count refs in §5/§18 below are Phase-10.7/10.8-era archaeology.
+- **`docs/PRODUCTIONALIZATION.md`** — Dream11-onboarding touchpoints (verbatim from planning): onboarding, fault tolerance, unresolved-var resolution, update flow (github webhooks), maturity/testing, PR2Dev, Aurora+pgvector DB, observability, deployment strategy, scale/load-test. Callouts: high cost, 2 planes only (github+telemetry), no V2 eval.
+
+**Housekeeping:** DB snapshots moved out of `/tmp` into repo-local `snapshots/` (gitignored via `snapshots/` + `*.sql`). `/tmp` is ephemeral — anything important now lives in `snapshots/`. `.gitignore` extended to cover `workspaces.bak*` (the per-run workspace backups were leaking into git status).
+
+**Aurora DB readiness (Dream11):** `pg-rds-t1-carto-001-7kcg` (Aurora PG 16.4, ap-south-1, acct 666019485799) has **pgvector 0.7.3 ENABLED ✓** (`CREATE EXTENSION vector` done, cosine `<=>` verified). Connect from inside-VPC works (VPC CloudShell). **Local access is gated** — the cluster's private subnets (`subnet-0f74273208e21dcbe/0ee0ae5dcbdc782db/049f2ce2e3c456133`, route tables `rtb-005d67d98bb4e7043/0bceb373c68283716/027da21be7c0b70cf`) have **no VPN return route** (only narrow `10.22.2.0/24` + `10.128.6.0/24` slices routed). Fix = add route to your VPN CIDR via `pcx-073e53d1e572300d7` (prod-vpn), OR flip `PubliclyAccessible=true` (SG already allows your IP), OR use VPC CloudShell. SG `sg-0aee4c9c2e1a068c6` is NOT the blocker.
+
+### NEXT WORKSTREAM: Fault Tolerance — design conclusions reached (not yet built)
+
+Goal: agent box / machine dies → relaunch on fresh instance → resume. Conclusions from this session's design discussion:
+
+1. **DB is the source of truth, not agent memory.** Agent state is layered:
+   - **Postgres/Aurora** = correctness-critical. Lose it = unrecoverable. ← back up independently (Aurora PITR + snapshots). THE must-have.
+   - **Agent cwd** (`workspaces/<agent>/`: cloned repos, MERGE_LOG, handoffs, `.mcp.json`) = degraded-recoverable (re-clone repos, derive from DB).
+   - **Claude session JSONL** (`~/.claude/projects/<cwd-encoded>/<session>.jsonl`) = degraded-recoverable (cold-start, re-derive from DB). Resume is continuity/efficiency, NOT correctness.
+2. **Crash/reboot tolerance already exists** — recovery scanner (errored→backoff→idle) + stale-heartbeat watchdog + `cascade_completed_at` guard (no silent half-mutation). A killed agent re-wakes + re-reads DB; only the in-flight wake's progress is lost.
+3. **Session-file portability:** JSONL hardcodes the cwd (folder name = cwd-with-slashes-as-dashes; embedded `cwd` field; ~all lines reference abs paths). Resume on another machine works ONLY with **identical absolute paths** (same `$HOME`, same `workspace_root`). On spot instances with identical install/mount paths → fine.
+4. **Backup approach — the chosen pattern:** build a **pause→drain→snapshot** flow:
+   - `/api/pause` → control flag both trigger-mgr + agent-mgr poll; stop scheduling new wakes (don't kill in-flight).
+   - poll `SELECT count(*) FROM agent_runs WHERE status='running' = 0` (drained; bounded by per-type timeout — SME up to 1800s).
+   - snapshot agent-box EBS (`create-image --no-reboot`) **+ Aurora snapshot in the SAME quiesced window** (mutually consistent pair; agents paused = nothing writing either).
+   - `/api/resume`. App-consistent, zero OS downtime, clean resume.
+5. **EFS vs S3:** EFS Standard ≈ S3 durability (both 11 nines, multi-AZ). EFS preferred for cwd + sessions — live mount at identical path solves the path-canonicalisation problem by construction. Cannot make EFS the root volume (AWS won't boot from NFS). `/tmp` stays local (disposable). Binaries do NOT go on EFS.
+6. **Binaries:** system + predictable tools baked into **AMI/image**; ad-hoc agent-installed CLIs (land in `/usr/local/bin`, lost on relaunch) handled via **install-manifest replay on boot** (Phase 11 `machine_manager` / `installed_tools[]` concept) OR install static single-file CLIs into an EFS `bin/` on PATH. apt packages → AMI bake only.
+7. **Bedrock token rotates ~12h** → must NOT be baked into AMI. Fetch current token from Secrets Manager/SSM on boot (userdata) AND on a steady-state refresh timer (re-pull + bounce agent_manager). This is a steady-state need, not just disaster-recovery.
+8. **AMI = disk only.** SG / subnet / IAM role / key pair / userdata / instance-type are launch-time → use a **Launch Template** ("Create template from instance") pinned to the latest backup AMI for repeatable restore. `create-image` reboots by default (crashes running agents); use `--no-reboot` (safe — Aurora holds truth).
+
+When resuming post-compact: read §0a below for the Phase 10.14→10.17 detail, then this §00 for current state + the fault-tolerance plan, then build the pause/resume + backup tooling.
+
+---
 
 ## 0a. PHASE 10.14 / 10.15 / 10.16 — ALL SHIPPED · DB WIPED · READY FOR RUN #5 (most important)
 
