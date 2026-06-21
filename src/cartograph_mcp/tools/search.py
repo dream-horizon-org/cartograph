@@ -1,8 +1,9 @@
 """Vector search + Phase 10.3 deterministic search across embedded tables.
 
-`vector_search` embeds the query with the same model used at write
-time, then does a cosine-distance KNN against the target table's
-embedding column. Open to all active agents.
+`vector_search` embeds the query with the same provider/model used at
+write time (Ollama by default; Bedrock when configured), then does a
+cosine-distance KNN
+against the target table's embedding column. Open to all active agents.
 
 Phase 10.3 adds 6 deterministic SQL-LIKE search tools that fill the
 "find rows without knowing the component_id first" gap:
@@ -81,7 +82,7 @@ def vector_search(
     `table` must be one of components / attributions / unresolved / edges /
     catalogs. `limit` is clamped to [1, 50].
 
-    If the query can't be embedded (Ollama unreachable, empty text) →
+    If the query can't be embedded (provider unreachable, empty text) →
     returns {"query_embedded": False, "results": []}. Callers distinguish
     "no hits" from "couldn't search" via that flag.
 
@@ -128,7 +129,9 @@ def vector_search(
     )
     validate_filter_keys(table, filters)
 
-    vec = emb.vector_literal(emb.embed_text(query_text))
+    vec = emb.vector_literal(
+        emb.embed_text(query_text, input_type="search_query")
+    )
     if vec is None:
         return {"query_embedded": False, "results": []}
 

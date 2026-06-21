@@ -1679,7 +1679,8 @@ def vector_search(
     Open to all active agents. `table` must be one of:
     components, attributions, unresolved, edges, catalogs.
 
-    Interpretation bands (calibrated for mxbai-embed-large, the model
+    Interpretation bands (calibrated for Bedrock Titan Embed v2 /
+    mxbai-embed-large when using Ollama — recalibrate if you change
     wired up in production — Phase 3.7):
       similarity >= 0.75  → strong match
       0.60 to 0.75        → hint (candidate; verify before acting)
@@ -1724,7 +1725,7 @@ def vector_search(
       exclude_self=True (default) drops your own component (which would
       cosine ≈ 1.0) so all returned rows are real candidates.
 
-    If the query can't be embedded (Ollama unreachable, empty text),
+    If the query can't be embedded (embedding provider unreachable, empty text),
     returns {"query_embedded": False, "results": []}. Callers must
     check this flag to distinguish "no hits" from "could not search".
     """
@@ -2488,10 +2489,10 @@ def main() -> None:
     init_pool()
     run_migrations()
 
-    # Load the Ollama embedding model into GPU memory so the first real
-    # MCP call doesn't eat the ~1s cold-start latency. Non-fatal if
-    # Ollama is down — the server boots, writes still land with
-    # embedding=NULL, and vector_search returns query_embedded=False.
+    # Warm the embedding provider (Bedrock or Ollama) so the first real
+    # MCP call doesn't eat cold-start latency. Non-fatal if unreachable —
+    # the server boots, writes still land with embedding=NULL, and
+    # vector_search returns query_embedded=False.
     from shared import embedding as _emb
     _emb.warmup()
 

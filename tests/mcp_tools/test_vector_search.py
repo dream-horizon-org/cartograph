@@ -32,19 +32,19 @@ def test_agent_not_found_rejected():
         search.vector_search("ghost", "q", "components", 5)
 
 
-def test_ollama_unreachable_returns_query_embedded_false(agent_factory, monkeypatch):
-    """If Ollama is down, search must return False flag — not raise."""
+def test_embed_unreachable_returns_query_embedded_false(agent_factory, monkeypatch):
+    """If the embedding provider is down, search must return False — not raise."""
     agent_factory("orch", "orchestrator")
-    from shared import config
-    monkeypatch.setattr(config, "OLLAMA_URL", "http://localhost:1")
+    from shared import embedding as emb_mod
+    monkeypatch.setattr(emb_mod, "embed_text", lambda *a, **k: None)
     result = search.vector_search("orch", "feeds aggregator", "components", 5)
     assert result == {"query_embedded": False, "results": []}
 
 
 def test_limit_clamp(agent_factory, monkeypatch):
     agent_factory("orch", "orchestrator")
-    from shared import config
-    monkeypatch.setattr(config, "OLLAMA_URL", "http://localhost:1")
+    from shared import embedding as emb_mod
+    monkeypatch.setattr(emb_mod, "embed_text", lambda *a, **k: None)
     # limit=100 clamps to 50; limit=0 clamps to 1. Can't observe the
     # internal value without a live embed, but the call must not raise.
     result = search.vector_search("orch", "x", "components", 100)

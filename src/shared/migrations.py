@@ -9,6 +9,7 @@ _EMBEDDING_TABLES = [
     ("attributions", "idx_attr_embedding"),
     ("edges",        "idx_edge_embedding"),
     ("unresolved",   "idx_unres_embedding"),
+    ("catalogs",     "idx_catalogs_embedding"),
 ]
 
 

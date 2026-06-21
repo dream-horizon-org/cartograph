@@ -1085,8 +1085,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/backfill_embeddings")
     def backfill_embeddings_endpoint():
-        """Re-embed rows whose embedding column is NULL across all 4 vector
-        tables. Idempotent: rows already embedded are skipped by the
+        """Re-embed rows whose embedding column is NULL across all vector
+        tables (including catalogs). Idempotent: rows already embedded are skipped by the
         `WHERE embedding IS NULL` filter. Returns per-table counts.
 
         Run this after a model / dim change, or when rows were written

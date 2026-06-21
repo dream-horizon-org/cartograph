@@ -81,10 +81,10 @@ def test_backfill_is_idempotent():
     assert second["totals"]["done"] == 0
 
 
-def test_backfill_skips_when_ollama_unreachable(monkeypatch):
-    """Graceful degrade: unreachable Ollama → skipped count, no raise."""
-    from shared import config
-    monkeypatch.setattr(config, "OLLAMA_URL", "http://localhost:1")
+def test_backfill_skips_when_embed_unreachable(monkeypatch):
+    """Graceful degrade: unreachable embedder → skipped count, no raise."""
+    from shared import embedding as emb_mod
+    monkeypatch.setattr(emb_mod, "embed_text", lambda *a, **k: None)
     execute_returning(
         """INSERT INTO components (canonical_name, display_name, component_type)
            VALUES ('o/degrade', 'Degrade', 'application')
